@@ -1,0 +1,3 @@
+# The admin console is a web app, not a desktop app
+
+tanomu runs on a cloud server, and the admin console only edits configuration and shows data — it needs none of the desktop-only abilities like a tray icon or global shortcuts, and team members shouldn't have to install anything. So the admin console is a web app in the same TypeScript monorepo, served by the same service, with Feishu OAuth login. We considered MyGo (a Go desktop framework), but it would put Go and TypeScript side by side, add client distribution, signing, and update work, and the framework is still pre-1.0. A "local resident tanomu client" would be a different product and should be evaluated separately if it ever comes up.
