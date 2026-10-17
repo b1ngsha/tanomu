@@ -1,0 +1,3 @@
+# Memory is strictly isolated per Conversation
+
+In v1, a Memory belongs only to the Conversation it came from: what a User says in a Private Conversation never surfaces in a Group Conversation or in anyone else's Private Conversation, and a group's Memory is only available inside that group. The cost is that tanomu won't "know" in a group what you told it privately; in exchange, private information can never leak into a group. We considered letting preference-type Memory cross Conversations while keeping specific content isolated, but that relies on the model telling preferences apart from private matters, which is too risky to rely on.
