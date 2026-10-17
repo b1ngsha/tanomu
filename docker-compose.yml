@@ -1,0 +1,30 @@
+services:
+  db:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_USER: tanomu
+      POSTGRES_PASSWORD: tanomu
+      POSTGRES_DB: tanomu
+    ports:
+      - "127.0.0.1:54329:5432"
+    volumes:
+      - db-data:/var/lib/postgresql
+      - ./docker/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tanomu"]
+      interval: 5s
+      retries: 10
+
+  server:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgres://tanomu:tanomu@db:5432/tanomu
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles: [app]
+
+volumes:
+  db-data:

@@ -1,0 +1,14 @@
+{
+  "name": "@tanomu/core",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "ai": "^7.0.142"
+  }
+}
