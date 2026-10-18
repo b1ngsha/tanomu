@@ -1,5 +1,6 @@
 # Production stack. Lives at /opt/tanomu/compose.yml on the server; copied there by the deploy job.
-# Reads /opt/tanomu/.env for both interpolation (POSTGRES_PASSWORD, TANOMU_IMAGE) and the app's env.
+# /opt/tanomu/.env is written by the deploy job from the GitHub `production` environment; it
+# feeds both interpolation (POSTGRES_PASSWORD, TANOMU_IMAGE) and the app's env.
 services:
   db:
     image: pgvector/pgvector:pg18

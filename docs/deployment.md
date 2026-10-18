@@ -8,7 +8,7 @@ On the server everything lives in `/opt/tanomu`:
 /opt/tanomu/
 ├── compose.yml   # copied from deploy/compose.yml on every deploy
 ├── backup.sh     # copied from deploy/backup.sh on every deploy
-├── .env          # maintained by hand, except TANOMU_IMAGE (written by the deploy job)
+├── .env          # written by the deploy job on every deploy (mode 600); don't edit
 └── backups/      # daily pg_dump files + backup.log
 ```
 
@@ -23,19 +23,7 @@ On the server everything lives in `/opt/tanomu`:
   sudo mkdir -p /opt/tanomu && sudo chown deploy:deploy /opt/tanomu
   ```
 
-- Create `/opt/tanomu/.env` with the same variables as `.env.example`, **except** `DATABASE_URL` (compose builds it), plus a `POSTGRES_PASSWORD` (hex only, since it is embedded in a connection URL: `openssl rand -hex 32`):
-
-  ```sh
-  POSTGRES_PASSWORD=<openssl rand -hex 32>
-  FEISHU_APP_ID=...
-  FEISHU_APP_SECRET=...
-  CHAT_PROVIDER_PROTOCOL=openai
-  CHAT_PROVIDER_BASE_URL=...
-  CHAT_PROVIDER_API_KEY=...
-  CHAT_MODEL=...
-  ```
-
-  `POSTGRES_PASSWORD` only takes effect when the database volume is first created. Changing it later requires `ALTER USER` inside Postgres as well.
+The server needs nothing else: all configuration lives in GitHub and is written to `/opt/tanomu/.env` on every deploy.
 
 ### 2. Container registry
 
@@ -51,25 +39,34 @@ ssh-copy-id -i tanomu-deploy.pub deploy@<server>
 ssh-keyscan <server>   # value for DEPLOY_KNOWN_HOSTS
 ```
 
-### 4. GitHub variables and secrets
+### 4. GitHub `production` environment
 
-Under the repository's Settings → Secrets and variables → Actions.
+Create an environment named `production` under the repository's Settings → Environments, and put everything below in it (not at repository level), so only the deploy job can read it.
 
-Variables (not sensitive, so the image tag stays readable in logs):
+Variables (not sensitive, readable in logs):
 
-| Variable           | Value                                                     |
-| ------------------ | --------------------------------------------------------- |
-| `REGISTRY`         | Registry host, e.g. `<instance>-cn-beijing.cr.volces.com` |
-| `IMAGE_REPOSITORY` | `<namespace>/<repository>`                                |
+| Variable                 | Value                                                     |
+| ------------------------ | --------------------------------------------------------- |
+| `REGISTRY`               | Registry host, e.g. `<instance>-cn-beijing.cr.volces.com` |
+| `IMAGE_REPOSITORY`       | `<namespace>/<repository>`                                |
+| `CHAT_PROVIDER_PROTOCOL` | `openai`, `anthropic`, or `google`                        |
+| `CHAT_MODEL`             | Chat model id                                             |
 
 Secrets:
 
-| Secret                                    | Value                                       |
-| ----------------------------------------- | ------------------------------------------- |
-| `REGISTRY_USERNAME` / `REGISTRY_PASSWORD` | Registry credentials                        |
-| `DEPLOY_HOST` / `DEPLOY_USER`             | Server address and deploy user              |
-| `DEPLOY_SSH_KEY`                          | Contents of the private key `tanomu-deploy` |
-| `DEPLOY_KNOWN_HOSTS`                      | Output of `ssh-keyscan <server>`            |
+| Secret                                             | Value                                                                       |
+| -------------------------------------------------- | --------------------------------------------------------------------------- |
+| `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`          | Registry credentials                                                        |
+| `DEPLOY_HOST` / `DEPLOY_USER`                      | Server address and deploy user                                              |
+| `DEPLOY_SSH_KEY`                                   | Contents of the private key `tanomu-deploy`                                 |
+| `DEPLOY_KNOWN_HOSTS`                               | Output of `ssh-keyscan <server>`                                            |
+| `POSTGRES_PASSWORD`                                | `openssl rand -hex 32` (hex only, since it is embedded in a connection URL) |
+| `FEISHU_APP_ID` / `FEISHU_APP_SECRET`              | Credentials of the **production** Feishu app                                |
+| `CHAT_PROVIDER_BASE_URL` / `CHAT_PROVIDER_API_KEY` | Chat model Provider                                                         |
+
+GitHub secrets can't be read back. Keep a copy of `POSTGRES_PASSWORD` in a password manager: it only takes effect when the database volume is first created, and losing it locks you out of the database (changing it later also requires `ALTER USER` inside Postgres).
+
+Adding a new app variable means adding it to this environment **and** to the `app_vars` list and `env:` block of the deploy step. A variable missing from the environment fails the deploy before anything is written to the server.
 
 ### 5. One Feishu app per running instance
 
@@ -78,7 +75,8 @@ Feishu's long connection delivers each event to only **one** connected client. I
 ## Operations
 
 - **Deploy**: merge to `main`. The job fails if the server doesn't log `tanomu is listening` within 60 s, and prints the last 50 log lines.
-- **Roll back**: on the server, set `TANOMU_IMAGE` in `.env` to an earlier `<registry>/<repository>:<git sha>` and run `docker compose up -d`. Images older than a week are pruned on deploy; older ones can be pulled from the registry again.
+- **Change config or rotate a secret**: update the `production` environment, then re-run the latest deploy job on `main`.
+- **Roll back**: re-run the deploy job of an earlier successful run on `main` (it redeploys that commit's image). For a quick fix on the server, set `TANOMU_IMAGE` in `.env` and run `docker compose up -d`; the next deploy overwrites it.
 - **Logs**: `docker compose logs -f server`.
 - **Backups**: cron runs `backup.sh` daily at 03:30 server time and keeps 14 days (`KEEP_DAYS`). Backups stay on the server; copying them off-box is not set up yet.
 - **Restore**:

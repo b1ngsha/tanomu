@@ -39,6 +39,7 @@ jobs:
     needs: check
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    environment: production
     concurrency: deploy
     env:
       IMAGE: ${{ vars.REGISTRY }}/${{ vars.IMAGE_REPOSITORY }}:${{ github.sha }}
@@ -75,19 +76,34 @@ jobs:
           REGISTRY: ${{ vars.REGISTRY }}
           REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
           REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          # App config, written to /opt/tanomu/.env on every deploy.
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
+          FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          CHAT_PROVIDER_PROTOCOL: ${{ vars.CHAT_PROVIDER_PROTOCOL }}
+          CHAT_PROVIDER_BASE_URL: ${{ secrets.CHAT_PROVIDER_BASE_URL }}
+          CHAT_PROVIDER_API_KEY: ${{ secrets.CHAT_PROVIDER_API_KEY }}
+          CHAT_MODEL: ${{ vars.CHAT_MODEL }}
+        shell: bash
         run: |
           remote() { ssh -i ~/.ssh/deploy_key "$TARGET" "$@"; }
           scp -i ~/.ssh/deploy_key deploy/compose.yml deploy/backup.sh "$TARGET:/opt/tanomu/"
+          app_vars="POSTGRES_PASSWORD FEISHU_APP_ID FEISHU_APP_SECRET CHAT_PROVIDER_PROTOCOL CHAT_PROVIDER_BASE_URL CHAT_PROVIDER_API_KEY CHAT_MODEL"
+          for name in $app_vars; do
+            if [ -z "${!name}" ]; then echo "::error::$name is not set in the production environment"; exit 1; fi
+          done
+          {
+            echo "TANOMU_IMAGE=$IMAGE"
+            for name in $app_vars; do printf '%s=%s\n' "$name" "${!name}"; done
+          } | remote 'umask 077 && cat > /opt/tanomu/.env.next && mv /opt/tanomu/.env.next /opt/tanomu/.env'
           printf '%s' "$REGISTRY_PASSWORD" | remote docker login --username "$REGISTRY_USERNAME" --password-stdin "$REGISTRY"
-          remote bash -s -- "$IMAGE" <<'REMOTE'
+          remote bash -s <<'REMOTE'
           set -euo pipefail
           cd /opt/tanomu
           mkdir -p backups
           # Install the backup cron first so backups run even if this rollout fails.
           cron_line="30 3 * * * /opt/tanomu/backup.sh >> /opt/tanomu/backups/backup.log 2>&1 # tanomu-backup"
           (crontab -l 2>/dev/null | grep -v '# tanomu-backup'; echo "$cron_line") | crontab -
-          sed -i '/^TANOMU_IMAGE=/d' .env
-          echo "TANOMU_IMAGE=$1" >> .env
           docker compose pull server
           started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           docker compose up -d --force-recreate server
