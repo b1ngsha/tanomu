@@ -1,6 +1,6 @@
 # Deployment
 
-tanomu runs on a single Volcano Engine cloud server under Docker Compose. Every push to `main` that passes CI builds an image, pushes it to Volcano Engine Container Registry, and redeploys over SSH (the `deploy` job in `.github/workflows/ci.yml`).
+tanomu runs on a single Volcano Engine cloud server (cn-shanghai) under Docker Compose. Every push to `main` that passes CI builds the image on the GitHub runner, streams it to the server over SSH (`docker save | docker load`), and restarts the service (the `deploy` job in `.github/workflows/ci.yml`). There is no container registry, and the server never pulls from the internet: Docker Hub isn't reachable from mainland China, so third-party images such as `pgvector/pgvector` are shipped the same way the first time they're needed (ADR 0005).
 
 On the server everything lives in `/opt/tanomu`:
 
@@ -16,47 +16,61 @@ On the server everything lives in `/opt/tanomu`:
 
 ### 1. Server
 
-- Install Docker Engine with the Compose plugin.
-- Create a deploy user that can run `docker` (member of the `docker` group) and owns `/opt/tanomu`:
+As root on the server (Ubuntu 22.04). Docker comes from Ubuntu's own packages, which resolve through Volcano Engine's internal mirror; `get.docker.com` is not reachable.
 
-  ```sh
-  sudo mkdir -p /opt/tanomu && sudo chown deploy:deploy /opt/tanomu
-  ```
+```sh
+apt update
+apt install -y docker.io docker-compose-v2
+systemctl enable --now docker
+
+adduser --disabled-password --gecos "" deploy   # key-only login
+usermod -aG docker deploy                       # docker group is root-equivalent: guard the key
+mkdir -p /opt/tanomu && chown deploy:deploy /opt/tanomu
+```
 
 The server needs nothing else: all configuration lives in GitHub and is written to `/opt/tanomu/.env` on every deploy.
 
-### 2. Container registry
+### 2. SSH deploy key
 
-In Volcano Engine Container Registry, create an instance, a namespace, and a repository for tanomu, plus access credentials for pushing and pulling. The deploy job logs the server into the registry on every run, so these credentials are also stored in the deploy user's `~/.docker/config.json`.
-
-### 3. SSH deploy key
-
-Generate a dedicated key pair with no passphrase, authorize it for the deploy user, and capture the server's host key:
+On your machine, generate a dedicated key pair with no passphrase:
 
 ```sh
 ssh-keygen -t ed25519 -N "" -C tanomu-deploy -f tanomu-deploy
-ssh-copy-id -i tanomu-deploy.pub deploy@<server>
+cat tanomu-deploy.pub
+```
+
+On the server, as root, authorize the public key for `deploy` (it has no password, so `ssh-copy-id` won't work):
+
+```sh
+install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
+echo '<contents of tanomu-deploy.pub>' > /home/deploy/.ssh/authorized_keys
+chown deploy:deploy /home/deploy/.ssh/authorized_keys && chmod 600 /home/deploy/.ssh/authorized_keys
+```
+
+Back on your machine, check access and capture the host key:
+
+```sh
+ssh -i tanomu-deploy deploy@<server> docker ps
 ssh-keyscan <server>   # value for DEPLOY_KNOWN_HOSTS
 ```
 
-### 4. GitHub `production` environment
+The server's security group must allow inbound SSH from anywhere: GitHub-hosted runners have no fixed IPs. Keep password login disabled.
+
+### 3. GitHub `production` environment
 
 Create an environment named `production` under the repository's Settings → Environments, and put everything below in it (not at repository level), so only the deploy job can read it.
 
 Variables (not sensitive, readable in logs):
 
-| Variable                 | Value                                                     |
-| ------------------------ | --------------------------------------------------------- |
-| `REGISTRY`               | Registry host, e.g. `<instance>-cn-beijing.cr.volces.com` |
-| `IMAGE_REPOSITORY`       | `<namespace>/<repository>`                                |
-| `CHAT_PROVIDER_PROTOCOL` | `openai`, `anthropic`, or `google`                        |
-| `CHAT_MODEL`             | Chat model id                                             |
+| Variable                 | Value                              |
+| ------------------------ | ---------------------------------- |
+| `CHAT_PROVIDER_PROTOCOL` | `openai`, `anthropic`, or `google` |
+| `CHAT_MODEL`             | Chat model id                      |
 
 Secrets:
 
 | Secret                                             | Value                                                                       |
 | -------------------------------------------------- | --------------------------------------------------------------------------- |
-| `REGISTRY_USERNAME` / `REGISTRY_PASSWORD`          | Registry credentials                                                        |
 | `DEPLOY_HOST` / `DEPLOY_USER`                      | Server address and deploy user                                              |
 | `DEPLOY_SSH_KEY`                                   | Contents of the private key `tanomu-deploy`                                 |
 | `DEPLOY_KNOWN_HOSTS`                               | Output of `ssh-keyscan <server>`                                            |
@@ -68,7 +82,7 @@ GitHub secrets can't be read back. Keep a copy of `POSTGRES_PASSWORD` in a passw
 
 Adding a new app variable means adding it to this environment **and** to the `app_vars` list and `env:` block of the deploy step. A variable missing from the environment fails the deploy before anything is written to the server.
 
-### 5. One Feishu app per running instance
+### 4. One Feishu app per running instance
 
 Feishu's long connection delivers each event to only **one** connected client. If `pnpm dev` runs locally with the production app's credentials, it randomly steals messages from production. Use a separate Feishu app for local development.
 
@@ -76,7 +90,8 @@ Feishu's long connection delivers each event to only **one** connected client. I
 
 - **Deploy**: merge to `main`. The job fails if the server doesn't log `tanomu is listening` within 60 s, and prints the last 50 log lines.
 - **Change config or rotate a secret**: update the `production` environment, then re-run the latest deploy job on `main`.
-- **Roll back**: re-run the deploy job of an earlier successful run on `main` (it redeploys that commit's image). For a quick fix on the server, set `TANOMU_IMAGE` in `.env` and run `docker compose up -d`; the next deploy overwrites it.
+- **Roll back**: re-run the deploy job of an earlier successful run on `main` (it rebuilds and ships that commit's image). For a quick fix, images from the last week are still on the server: set `TANOMU_IMAGE` in `.env` to `tanomu-server:<git sha>` and run `docker compose up -d`; the next deploy overwrites it.
+- **Upgrade Postgres or add a third-party image**: change the image in `deploy/compose.yml`; the next deploy ships it if the server doesn't have it.
 - **Logs**: `docker compose logs -f server`.
 - **Backups**: cron runs `backup.sh` daily at 03:30 server time and keeps 14 days (`KEEP_DAYS`). Backups stay on the server; copying them off-box is not set up yet.
 - **Restore**:
