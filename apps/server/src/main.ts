@@ -17,4 +17,5 @@ const deps = {
 };
 
 await feishu.listen((message) => replyToPrivateMessage(message, deps));
+// The deploy job waits for this line; keep "tanomu is listening" in sync with .github/workflows/ci.yml.
 console.log("tanomu is listening on Feishu");

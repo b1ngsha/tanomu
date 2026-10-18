@@ -34,3 +34,66 @@ jobs:
       - run: pnpm test
         env:
           TEST_DATABASE_URL: postgres://tanomu:tanomu@localhost:5432/tanomu
+
+  deploy:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency: deploy
+    env:
+      IMAGE: ${{ vars.REGISTRY }}/${{ vars.IMAGE_REPOSITORY }}:${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ vars.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          TARGET: ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}
+          REGISTRY: ${{ vars.REGISTRY }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          remote() { ssh -i ~/.ssh/deploy_key "$TARGET" "$@"; }
+          scp -i ~/.ssh/deploy_key deploy/compose.yml deploy/backup.sh "$TARGET:/opt/tanomu/"
+          printf '%s' "$REGISTRY_PASSWORD" | remote docker login --username "$REGISTRY_USERNAME" --password-stdin "$REGISTRY"
+          remote bash -s -- "$IMAGE" <<'REMOTE'
+          set -euo pipefail
+          cd /opt/tanomu
+          mkdir -p backups
+          # Install the backup cron first so backups run even if this rollout fails.
+          cron_line="30 3 * * * /opt/tanomu/backup.sh >> /opt/tanomu/backups/backup.log 2>&1 # tanomu-backup"
+          (crontab -l 2>/dev/null | grep -v '# tanomu-backup'; echo "$cron_line") | crontab -
+          sed -i '/^TANOMU_IMAGE=/d' .env
+          echo "TANOMU_IMAGE=$1" >> .env
+          docker compose pull server
+          started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          docker compose up -d --force-recreate server
+          # Matches the startup log line in apps/server/src/main.ts.
+          timeout 60 sh -c "until docker compose logs --since $started server | grep -q 'tanomu is listening'; do sleep 2; done" \
+            || { docker compose logs --tail 50 server; exit 1; }
+          # Keep a week of old images for rollback.
+          docker image prune -af --filter until=168h
+          REMOTE
