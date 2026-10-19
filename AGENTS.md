@@ -7,6 +7,7 @@ A personal agent living in Feishu. Domain language: `GLOSSARY.md`. Decisions: `d
 - `packages/core`: domain logic (Conversations, agent loop). No Feishu or database imports; dependencies come in as interfaces.
 - `apps/server`: the single Node process. Adapters for Feishu (long connection), Postgres (Drizzle), and model Providers, wired together in `src/main.ts`.
 - `apps/admin`: the web admin console (not created yet).
+- `deploy/`: production compose file and backup script, copied to the server by the deploy job.
 
 TypeScript runs directly on Node via type stripping, no build step. Use `.ts` extensions in relative imports and only erasable syntax (no enums, no parameter properties).
 
@@ -18,6 +19,8 @@ TypeScript runs directly on Node via type stripping, no build step. Use `.ts` ex
 - `pnpm test` / `pnpm test:db`: unit tests / unit tests plus Postgres-backed tests against the `tanomu_test` database in the local compose DB
 - `pnpm lint` (oxlint, type-aware), `pnpm format` (oxfmt), `pnpm typecheck`
 - `pnpm db:generate`: generate a migration after editing `apps/server/src/db/schema.ts`
+
+Deployment (Volcano Engine, deploy job in CI, backups, rollback): `docs/deployment.md`.
 
 ## Commits
 
