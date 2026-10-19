@@ -62,29 +62,35 @@ Create an environment named `production` under the repository's Settings → Env
 
 Variables (not sensitive, readable in logs):
 
-| Variable                 | Value                              |
-| ------------------------ | ---------------------------------- |
-| `CHAT_PROVIDER_PROTOCOL` | `openai`, `anthropic`, or `google` |
-| `CHAT_MODEL`             | Chat model id                      |
+| Variable                 | Value                                                                               |
+| ------------------------ | ----------------------------------------------------------------------------------- |
+| `CHAT_PROVIDER_PROTOCOL` | `openai`, `anthropic`, or `google`                                                  |
+| `CHAT_MODEL`             | Chat model id                                                                       |
+| `DEPLOY_USER`            | `deploy` (a variable, not a secret: a secret would mask every "deploy" in the logs) |
 
 Secrets:
 
-| Secret                                             | Value                                                                       |
-| -------------------------------------------------- | --------------------------------------------------------------------------- |
-| `DEPLOY_HOST` / `DEPLOY_USER`                      | Server address and deploy user                                              |
-| `DEPLOY_SSH_KEY`                                   | Contents of the private key `tanomu-deploy`                                 |
-| `DEPLOY_KNOWN_HOSTS`                               | Output of `ssh-keyscan <server>`                                            |
-| `POSTGRES_PASSWORD`                                | `openssl rand -hex 32` (hex only, since it is embedded in a connection URL) |
-| `FEISHU_APP_ID` / `FEISHU_APP_SECRET`              | Credentials of the **production** Feishu app                                |
-| `CHAT_PROVIDER_BASE_URL` / `CHAT_PROVIDER_API_KEY` | Chat model Provider                                                         |
+| Secret                                             | Value                                                                                                                                                                 |
+| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DEPLOY_HOST`                                      | Server address                                                                                                                                                        |
+| `DEPLOY_SSH_KEY`                                   | The private key `tanomu-deploy`, set from the file: `gh secret set DEPLOY_SSH_KEY --env production < tanomu-deploy` (pasting interactively keeps only the first line) |
+| `DEPLOY_KNOWN_HOSTS`                               | Output of `ssh-keyscan <server>`                                                                                                                                      |
+| `POSTGRES_PASSWORD`                                | `openssl rand -hex 32` (hex only, since it is embedded in a connection URL)                                                                                           |
+| `FEISHU_APP_ID` / `FEISHU_APP_SECRET`              | Credentials of the **production** Feishu app                                                                                                                          |
+| `CHAT_PROVIDER_BASE_URL` / `CHAT_PROVIDER_API_KEY` | Chat model Provider                                                                                                                                                   |
 
 GitHub secrets can't be read back. Keep a copy of `POSTGRES_PASSWORD` in a password manager: it only takes effect when the database volume is first created, and losing it locks you out of the database (changing it later also requires `ALTER USER` inside Postgres).
 
 Adding a new app variable means adding it to this environment **and** to the `app_vars` list and `env:` block of the deploy step. A variable missing from the environment fails the deploy before anything is written to the server.
 
-### 4. One Feishu app per running instance
+### 4. Local development shares the production Feishu app
 
-Feishu's long connection delivers each event to only **one** connected client. If `pnpm dev` runs locally with the production app's credentials, it randomly steals messages from production. Use a separate Feishu app for local development.
+Local `pnpm dev` and production use the same Feishu app. Feishu's long connection delivers each event to only **one** connected client, so while both run, messages are split between them at random. Stop production before debugging locally, and start it again afterwards:
+
+```sh
+docker compose stop server    # on the server, in /opt/tanomu
+docker compose start server
+```
 
 ## Operations
 
