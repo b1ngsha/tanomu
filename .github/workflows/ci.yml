@@ -67,7 +67,7 @@ jobs:
 
       - name: Deploy
         env:
-          TARGET: ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}
+          TARGET: ${{ vars.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}
           # App config, written to /opt/tanomu/.env on every deploy.
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
