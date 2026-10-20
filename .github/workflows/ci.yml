@@ -41,19 +41,8 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     concurrency: deploy
-    env:
-      IMAGE: tanomu-server:${{ github.sha }}
     steps:
       - uses: actions/checkout@v5
-
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          load: true
-          tags: ${{ env.IMAGE }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
 
       - name: Configure SSH
         env:
@@ -68,6 +57,7 @@ jobs:
       - name: Deploy
         env:
           TARGET: ${{ vars.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}
+          BUILD_PROXY: ${{ vars.BUILD_PROXY }}
           # App config, written to /opt/tanomu/.env on every deploy.
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
@@ -79,26 +69,19 @@ jobs:
         shell: bash
         run: |
           remote() { ssh -i ~/.ssh/deploy_key "$TARGET" "$@"; }
-          ship() { docker save "$1" | gzip | remote 'gunzip | docker load'; }
 
           app_vars="POSTGRES_PASSWORD FEISHU_APP_ID FEISHU_APP_SECRET CHAT_PROVIDER_PROTOCOL CHAT_PROVIDER_BASE_URL CHAT_PROVIDER_API_KEY CHAT_MODEL"
           for name in $app_vars; do
             if [ -z "${!name}" ]; then echo "::error::$name is not set in the production environment"; exit 1; fi
           done
 
-          # The server can't reach Docker Hub, so every image comes from here over SSH.
-          ship "$IMAGE"
-          touch deploy/.env # compose config needs the env_file to exist; values don't matter here
-          for image in $(TANOMU_IMAGE=self POSTGRES_PASSWORD=x docker compose -f deploy/compose.yml config --images | grep -vx self); do
-            if ! remote docker image inspect "$image" > /dev/null 2>&1; then
-              docker pull "$image"
-              ship "$image"
-            fi
-          done
-
+          # Only the source crosses the border (a few hundred KB); the server builds it (ADR 0006).
+          git archive --format=tar.gz HEAD \
+            | remote 'rm -rf /opt/tanomu/src.next && mkdir /opt/tanomu/src.next && tar -xz -C /opt/tanomu/src.next'
           scp -i ~/.ssh/deploy_key deploy/compose.yml deploy/backup.sh "$TARGET:/opt/tanomu/"
           {
-            echo "TANOMU_IMAGE=$IMAGE"
+            echo "TANOMU_IMAGE=tanomu-server:$GITHUB_SHA"
+            echo "BUILD_PROXY=$BUILD_PROXY"
             for name in $app_vars; do printf '%s=%s\n' "$name" "${!name}"; done
           } | remote 'umask 077 && cat > /opt/tanomu/.env.next && mv /opt/tanomu/.env.next /opt/tanomu/.env'
 
@@ -109,11 +92,17 @@ jobs:
           # Install the backup cron first so backups run even if this rollout fails.
           cron_line="30 3 * * * /opt/tanomu/backup.sh >> /opt/tanomu/backups/backup.log 2>&1 # tanomu-backup"
           (crontab -l 2>/dev/null | grep -v '# tanomu-backup'; echo "$cron_line") | crontab -
+          rm -rf src && mv src.next src
+          # A failed build stops here and leaves the running container untouched. The client side of
+          # the build fetches registry tokens itself, so it needs the proxy too, not just the daemon.
+          BUILD_PROXY=$(sed -n 's/^BUILD_PROXY=//p' .env)
+          HTTP_PROXY=$BUILD_PROXY HTTPS_PROXY=$BUILD_PROXY NO_PROXY=localhost,127.0.0.1 docker compose build server
           started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           docker compose up -d --force-recreate server
           # Matches the startup log line in apps/server/src/main.ts.
           timeout 60 sh -c "until docker compose logs --since $started server | grep -q 'tanomu is listening'; do sleep 2; done" \
             || { docker compose logs --tail 50 server; exit 1; }
-          # Keep a week of old images for rollback.
+          # Keep a week of old images (for rollback) and build cache.
           docker image prune -af --filter until=168h
+          docker builder prune -f --filter until=168h
           REMOTE
