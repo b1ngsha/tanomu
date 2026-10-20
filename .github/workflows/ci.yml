@@ -81,6 +81,7 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
+          SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
           CHAT_PROVIDER_PROTOCOL: ${{ vars.CHAT_PROVIDER_PROTOCOL }}
           CHAT_PROVIDER_BASE_URL: ${{ secrets.CHAT_PROVIDER_BASE_URL }}
           CHAT_PROVIDER_API_KEY: ${{ secrets.CHAT_PROVIDER_API_KEY }}
@@ -89,7 +90,7 @@ jobs:
         run: |
           remote() { ssh -i ~/.ssh/deploy_key "$TARGET" "$@"; }
 
-          app_vars="POSTGRES_PASSWORD FEISHU_APP_ID FEISHU_APP_SECRET CHAT_PROVIDER_PROTOCOL CHAT_PROVIDER_BASE_URL CHAT_PROVIDER_API_KEY CHAT_MODEL"
+          app_vars="POSTGRES_PASSWORD FEISHU_APP_ID FEISHU_APP_SECRET SESSION_SECRET CHAT_PROVIDER_PROTOCOL CHAT_PROVIDER_BASE_URL CHAT_PROVIDER_API_KEY CHAT_MODEL"
           for name in $app_vars; do
             if [ -z "${!name}" ]; then echo "::error::$name is not set in the production environment"; exit 1; fi
           done

@@ -94,6 +94,10 @@ Secrets:
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET`              | Credentials of the **production** Feishu app                                                                                                                          |
 | `CHAT_PROVIDER_BASE_URL` / `CHAT_PROVIDER_API_KEY` | Chat model Provider                                                                                                                                                   |
 
+| `SESSION_SECRET` | Random signing secret (at least 32 characters): generate with `openssl rand -hex 32` and set with `gh secret set SESSION_SECRET --env production` before merging the sign-in PR |
+
+Before using sign-in, add `http://localhost:3000/auth/feishu/callback` in the Feishu developer console's Security settings and publish a new app version. Put a generated `SESSION_SECRET` in local `.env` too. Rotating this secret signs everyone out.
+
 GitHub secrets can't be read back. Keep a copy of `POSTGRES_PASSWORD` in a password manager: it only takes effect when the database volume is first created, and losing it locks you out of the database (changing it later also requires `ALTER USER` inside Postgres).
 
 Adding a new app variable means adding it to this environment **and** to the `app_vars` list and `env:` block of the deploy step. A variable missing from the environment fails the deploy before anything is written to the server.
