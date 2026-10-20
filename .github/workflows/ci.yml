@@ -87,11 +87,12 @@ jobs:
 
           remote bash -s <<'REMOTE'
           set -euo pipefail
+          trap 'echo "::error::remote deploy failed at line $LINENO: $BASH_COMMAND"' ERR
           cd /opt/tanomu
           mkdir -p backups
           # Install the backup cron first so backups run even if this rollout fails.
           cron_line="30 3 * * * /opt/tanomu/backup.sh >> /opt/tanomu/backups/backup.log 2>&1 # tanomu-backup"
-          (crontab -l 2>/dev/null | grep -v '# tanomu-backup'; echo "$cron_line") | crontab -
+          { crontab -l 2>/dev/null | grep -v '# tanomu-backup' || true; echo "$cron_line"; } | crontab -
           rm -rf src && mv src.next src
           # A failed build stops here and leaves the running container untouched. The client side of
           # the build fetches registry tokens itself, so it needs the proxy too, not just the daemon.
