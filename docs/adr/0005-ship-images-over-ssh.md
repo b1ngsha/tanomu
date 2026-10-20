@@ -1,3 +1,7 @@
+---
+status: superseded by ADR-0006
+---
+
 # Ship Docker images over SSH instead of using a registry
 
 The production server is in Volcano Engine cn-shanghai, where Docker Hub, `get.docker.com`, and often GitHub and npm are unreachable or unreliable, and a Volcano Engine container registry would be an extra paid service for a single server. So the deploy job builds the image on the GitHub runner and streams it to the server with `docker save | gzip | ssh … docker load`; third-party images in `deploy/compose.yml` (e.g. `pgvector/pgvector`) are shipped the same way when the server lacks them, and compose uses `pull_policy: never` so the server never tries the internet. We rejected building on the server from a `git pull`, since that would need GitHub, Docker Hub, and npm access from inside mainland China. The cost is a ~110 MB transfer per deploy and no central image history: rollback beyond the week of images kept on the server means re-running an older deploy, which rebuilds that commit. Revisit if deploys become too slow or there is more than one server.

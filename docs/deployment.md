@@ -1,12 +1,13 @@
 # Deployment
 
-tanomu runs on a single Volcano Engine cloud server (cn-shanghai) under Docker Compose. Every push to `main` that passes CI builds the image on the GitHub runner, streams it to the server over SSH (`docker save | docker load`), and restarts the service (the `deploy` job in `.github/workflows/ci.yml`). There is no container registry, and the server never pulls from the internet: Docker Hub isn't reachable from mainland China, so third-party images such as `pgvector/pgvector` are shipped the same way the first time they're needed (ADR 0005).
+tanomu runs on a single Volcano Engine cloud server (cn-shanghai) under Docker Compose. Every push to `main` that passes CI sends the commit's source to the server over SSH (`git archive`, ~50 KB), builds the image there, and restarts the service (the `deploy` job in `.github/workflows/ci.yml`). There is no container registry. The server reaches Docker Hub and npm through the Clash proxy running on it (`127.0.0.1:7890`); cross-border transfers from the GitHub runner are far too slow to ship images (ADR 0006).
 
 On the server everything lives in `/opt/tanomu`:
 
 ```
 /opt/tanomu/
 ├── compose.yml   # copied from deploy/compose.yml on every deploy
+├── src/          # source of the deployed commit, replaced on every deploy
 ├── backup.sh     # copied from deploy/backup.sh on every deploy
 ├── .env          # written by the deploy job on every deploy (mode 600); don't edit
 └── backups/      # daily pg_dump files + backup.log
@@ -16,19 +17,32 @@ On the server everything lives in `/opt/tanomu`:
 
 ### 1. Server
 
-As root on the server (Ubuntu 22.04). Docker comes from Ubuntu's own packages, which resolve through Volcano Engine's internal mirror; `get.docker.com` is not reachable.
+As root on the server (Ubuntu 22.04). The server sends its traffic through a Clash proxy on `127.0.0.1:7890`; Volcano Engine's internal apt mirror must bypass it, and the Docker daemon must use it.
 
 ```sh
+# apt: reach the internal mirror directly
+cat > /etc/apt/apt.conf.d/99ivolces-direct <<'EOF'
+Acquire::http::Proxy::mirrors.ivolces.com "DIRECT";
+Acquire::https::Proxy::mirrors.ivolces.com "DIRECT";
+EOF
+
 apt update
-apt install -y docker.io docker-compose-v2
-systemctl enable --now docker
+apt install -y docker.io docker-compose-v2 docker-buildx
+
+# Docker daemon: pull images through the proxy
+mkdir -p /etc/systemd/system/docker.service.d
+cat > /etc/systemd/system/docker.service.d/http-proxy.conf <<'EOF'
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:7890" "HTTPS_PROXY=http://127.0.0.1:7890" "NO_PROXY=localhost,127.0.0.1,mirrors.ivolces.com"
+EOF
+systemctl daemon-reload && systemctl enable --now docker && systemctl restart docker
 
 adduser --disabled-password --gecos "" deploy   # key-only login
 usermod -aG docker deploy                       # docker group is root-equivalent: guard the key
 mkdir -p /opt/tanomu && chown deploy:deploy /opt/tanomu
 ```
 
-The server needs nothing else: all configuration lives in GitHub and is written to `/opt/tanomu/.env` on every deploy.
+The Clash service must start on boot, or deploys after a reboot fail at the build step (a running tanomu keeps working). Everything else, including configuration, comes from GitHub on every deploy.
 
 ### 2. SSH deploy key
 
@@ -66,6 +80,7 @@ Variables (not sensitive, readable in logs):
 | ------------------------ | ----------------------------------------------------------------------------------- |
 | `CHAT_PROVIDER_PROTOCOL` | `openai`, `anthropic`, or `google`                                                  |
 | `CHAT_MODEL`             | Chat model id                                                                       |
+| `BUILD_PROXY`            | `http://127.0.0.1:7890`, the server's outbound proxy, used by build steps           |
 | `DEPLOY_USER`            | `deploy` (a variable, not a secret: a secret would mask every "deploy" in the logs) |
 
 Secrets:
@@ -94,10 +109,10 @@ docker compose start server
 
 ## Operations
 
-- **Deploy**: merge to `main`. The job fails if the server doesn't log `tanomu is listening` within 60 s, and prints the last 50 log lines.
+- **Deploy**: merge to `main`. A failed build leaves the running container untouched. After restarting, the job fails if the server doesn't log `tanomu is listening` within 60 s, and prints the last 50 log lines.
 - **Change config or rotate a secret**: update the `production` environment, then re-run the latest deploy job on `main`.
-- **Roll back**: re-run the deploy job of an earlier successful run on `main` (it rebuilds and ships that commit's image). For a quick fix, images from the last week are still on the server: set `TANOMU_IMAGE` in `.env` to `tanomu-server:<git sha>` and run `docker compose up -d`; the next deploy overwrites it.
-- **Upgrade Postgres or add a third-party image**: change the image in `deploy/compose.yml`; the next deploy ships it if the server doesn't have it.
+- **Roll back**: re-run the deploy job of an earlier successful run on `main` (it rebuilds that commit on the server). For a quick fix, images from the last week are still on the server: set `TANOMU_IMAGE` in `.env` to `tanomu-server:<git sha>` and run `docker compose up -d`; the next deploy overwrites it.
+- **Upgrade Postgres or add a third-party image**: change the image in `deploy/compose.yml`; the server pulls it through the proxy on the next deploy.
 - **Logs**: `docker compose logs -f server`.
 - **Backups**: cron runs `backup.sh` daily at 03:30 server time and keeps 14 days (`KEEP_DAYS`). Backups stay on the server; copying them off-box is not set up yet.
 - **Restore**:

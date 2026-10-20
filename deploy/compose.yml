@@ -1,10 +1,10 @@
 # Production stack. Lives at /opt/tanomu/compose.yml on the server; copied there by the deploy job.
 # /opt/tanomu/.env is written by the deploy job from the GitHub `production` environment; it
-# feeds both interpolation (POSTGRES_PASSWORD, TANOMU_IMAGE) and the app's env.
+# feeds both interpolation (POSTGRES_PASSWORD, TANOMU_IMAGE, BUILD_PROXY) and the app's env.
+# Images are built and pulled on the server through its outbound proxy (ADR 0006).
 services:
   db:
     image: pgvector/pgvector:pg18
-    pull_policy: never # shipped over SSH by the deploy job; the server can't reach Docker Hub
     environment:
       POSTGRES_USER: tanomu
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
@@ -19,7 +19,12 @@ services:
 
   server:
     image: ${TANOMU_IMAGE:?set by the deploy job}
-    pull_policy: never
+    build:
+      context: ./src # the commit being deployed, unpacked by the deploy job
+      network: host # so build steps can reach a proxy on the server's 127.0.0.1
+      args:
+        HTTP_PROXY: ${BUILD_PROXY:-}
+        HTTPS_PROXY: ${BUILD_PROXY:-}
     env_file: .env
     environment:
       DATABASE_URL: postgres://tanomu:${POSTGRES_PASSWORD}@db:5432/tanomu
