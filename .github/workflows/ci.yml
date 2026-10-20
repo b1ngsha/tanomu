@@ -35,6 +35,25 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://tanomu:tanomu@localhost:5432/tanomu
 
+  pr-size:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Check PR size (max 600 changed lines, see AGENTS.md)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          changed=$(git diff --numstat "$BASE"...HEAD -- . ':(exclude)pnpm-lock.yaml' ':(exclude)apps/server/drizzle/meta/**' \
+            | awk '{ total += $1 + $2 } END { print total + 0 }')
+          echo "Changed lines, excluding generated files: $changed"
+          if [ "$changed" -gt 600 ]; then
+            echo "::error::This PR changes $changed lines; keep PRs at or under 600 and split the rest into follow-ups (AGENTS.md)."
+            exit 1
+          fi
+
   deploy:
     needs: check
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

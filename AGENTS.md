@@ -30,6 +30,14 @@ Conventional Commits with a required scope: `type(scope): summary`, lowercase im
 - Scopes: `core`, `server`, `admin` for the packages; `db` for schema and migrations; `infra` for Docker, Compose, and deployment; `repo` for root tooling, config, and repo-wide docs
 - Reference the ticket in the body (`Closes #N`) when the commit completes it
 
+## Pull requests
+
+Small steps: each PR changes **at most 600 lines** (additions + deletions), excluding generated files (`pnpm-lock.yaml`, `apps/server/drizzle/meta/**`). CI's `pr-size` job enforces this.
+
+- Plan the split before writing code. A ticket may span several PRs; each must be mergeable and deployable on its own (CI green, nothing half-wired in production).
+- Earlier PRs reference the ticket with `Refs #N`; the PR that finishes it uses `Closes #N`.
+- Prefer splitting along seams: a prefactor or schema migration first, then the behaviour, then its UI.
+
 ## Agent skills
 
 ### Issue tracker
