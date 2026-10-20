@@ -6,16 +6,18 @@ A personal agent living in Feishu. Domain language: `GLOSSARY.md`. Decisions: `d
 
 - `packages/core`: domain logic (Conversations, agent loop). No Feishu or database imports; dependencies come in as interfaces.
 - `apps/server`: the single Node process. Adapters for Feishu (long connection), Postgres (Drizzle), and model Providers, wired together in `src/main.ts`.
-- `apps/admin`: the web admin console (not created yet).
+- `apps/admin`: React + Vite + shadcn/ui admin console; its production bundle is served by `apps/server`.
 - `deploy/`: production compose file and backup script, copied to the server by the deploy job.
 
-TypeScript runs directly on Node via type stripping, no build step. Use `.ts` extensions in relative imports and only erasable syntax (no enums, no parameter properties).
+Server and core TypeScript run directly on Node via type stripping, no build step. `apps/admin` is the exception: Vite builds its browser bundle. Use `.ts` extensions in relative imports and only erasable syntax (no enums, no parameter properties).
 
 ## Commands
 
 - `cp .env.example .env` and fill it in (never commit `.env`, never print it)
 - `docker compose up -d db`: local Postgres with pgvector on `localhost:54329`
 - `pnpm dev`: run the server with watch mode (applies migrations on start)
+- `pnpm dev:admin`: run Vite on `localhost:3000`; set `HTTP_PORT=3001` in `.env` for the server and run both commands in separate terminals. Observe the Feishu listener warning in `docs/agents/implementing.md`.
+- `pnpm build:admin`: build `apps/admin/dist`; Docker runs this during the image build
 - `pnpm test` / `pnpm test:db`: unit tests / unit tests plus Postgres-backed tests against the `tanomu_test` database in the local compose DB
 - `pnpm lint` (oxlint, type-aware), `pnpm format` (oxfmt), `pnpm typecheck`
 - `pnpm db:generate`: generate a migration after editing `apps/server/src/db/schema.ts`
