@@ -1,3 +1,5 @@
+import { serve } from "@hono/node-server";
+import { createHttpApp } from "./http.ts";
 import { replyToPrivateMessage } from "@tanomu/core";
 import { createChatModel } from "./chat-model.ts";
 import { loadConfig } from "./config.ts";
@@ -15,6 +17,8 @@ const deps = {
   model: createChatModel(config),
   send: feishu.send,
 };
+
+serve({ fetch: createHttpApp().fetch, port: config.HTTP_PORT });
 
 await feishu.listen((message) => replyToPrivateMessage(message, deps));
 // The deploy job waits for this line; keep "tanomu is listening" in sync with .github/workflows/ci.yml.

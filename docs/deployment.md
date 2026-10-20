@@ -107,6 +107,20 @@ docker compose stop server    # on the server, in /opt/tanomu
 docker compose start server
 ```
 
+## Open the admin console
+
+The HTTP port is published on the server's loopback interface only. Open an SSH tunnel from your machine:
+
+```sh
+ssh -i ~/.ssh/tanomu-deploy -N -L 3000:127.0.0.1:3000 deploy@<server>
+```
+
+Leave it running, then in another terminal run `curl http://localhost:3000/healthz` (returns `ok`). The console will be at `http://localhost:3000`. After deploying, verify that port 3000 is unreachable using the server's public address. Do not open it in the security group.
+
+| Optional app variable | Default | Purpose                                                                             |
+| --------------------- | ------- | ----------------------------------------------------------------------------------- |
+| `HTTP_PORT`           | `3000`  | HTTP listener port; production uses the default and does not set this in `app_vars` |
+
 ## Operations
 
 - **Deploy**: merge to `main`. A failed build leaves the running container untouched. After restarting, the job fails if the server doesn't log `tanomu is listening` within 60 s, and prints the last 50 log lines.
