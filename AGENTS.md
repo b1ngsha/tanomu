@@ -38,6 +38,10 @@ Small steps: each PR changes **at most 600 lines** (additions + deletions), excl
 - Earlier PRs reference the ticket with `Refs #N`; the PR that finishes it uses `Closes #N`.
 - Prefer splitting along seams: a prefactor or schema migration first, then the behaviour, then its UI.
 
+## Implementing tickets
+
+Follow `docs/agents/implementing.md`: workflow, test seams, and known traps (adding env vars, migrations, Feishu long connection).
+
 ## Agent skills
 
 ### Issue tracker
