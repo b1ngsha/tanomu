@@ -76,8 +76,7 @@ export function createHttpApp({ oauth, sessionSecret }: HttpDeps) {
     if (!session.success || session.data.exp <= Date.now())
       return c.json({ error: "Unauthorized" }, 401);
     c.set("user", { openId: session.data.openId, name: session.data.name });
-    await next();
-    return c.res;
+    return next();
   });
   app.get("/api/me", (c) => c.json(c.get("user")));
   if (process.env.NODE_ENV === "production") {
