@@ -1,3 +1,5 @@
+import { serveStatic } from "@hono/node-server/serve-static";
+import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { deleteCookie, getSignedCookie, setSignedCookie } from "hono/cookie";
 import { z } from "zod";
@@ -77,6 +79,12 @@ export function createHttpApp({ oauth, sessionSecret }: HttpDeps) {
     return next();
   });
   app.get("/api/me", (c) => c.json(c.get("user")));
-  app.get("/healthz", (c) => c.text("ok"));
+  if (process.env.NODE_ENV === "production") {
+    const root = fileURLToPath(new URL("../../admin/dist", import.meta.url));
+    app.get("/api/*", (c) => c.notFound());
+    app.get("/auth/*", (c) => c.notFound());
+    app.get("/*", serveStatic({ root }));
+    app.get("/*", serveStatic({ path: `${root}/index.html` }));
+  }
   return app;
 }

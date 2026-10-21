@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: #ffffff;
+  --color-foreground: #172b4d;
+  --color-primary: #245bdb;
+  --color-primary-foreground: #ffffff;
+  --color-border: #dce3ed;
+  --color-input: #dce3ed;
+  --color-ring: #245bdb;
+  --color-accent: #eef3fc;
+  --color-accent-foreground: #172b4d;
+  --radius-md: 0.5rem;
+}
+
+body {
+  margin: 0;
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+button {
+  cursor: pointer;
+}
+button:disabled {
+  cursor: wait;
+}
