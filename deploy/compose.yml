@@ -25,6 +25,8 @@ services:
       args:
         HTTP_PROXY: ${BUILD_PROXY:-}
         HTTPS_PROXY: ${BUILD_PROXY:-}
+    ports:
+      - "127.0.0.1:3000:3000"
     env_file: .env
     environment:
       DATABASE_URL: postgres://tanomu:${POSTGRES_PASSWORD}@db:5432/tanomu
