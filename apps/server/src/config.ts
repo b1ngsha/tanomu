@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const Env = z.object({
   DATABASE_URL: z.url(),
+  SESSION_SECRET: z.string().min(32),
   HTTP_PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   FEISHU_APP_ID: z.string().min(1),
   FEISHU_APP_SECRET: z.string().min(1),
