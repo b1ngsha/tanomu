@@ -15,6 +15,13 @@
       "when": 1792249361992,
       "tag": "0001_conversations-and-messages",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1792651784545,
+      "tag": "0002_clean_tana_nile",
+      "breakpoints": true
     }
   ]
 }

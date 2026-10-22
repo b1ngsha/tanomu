@@ -7,6 +7,7 @@ import { createDb, runMigrations } from "./db/client.ts";
 import { createFeishu } from "./feishu.ts";
 import { createFeishuOAuth } from "./feishu-oauth.ts";
 import { createHttpApp } from "./http.ts";
+import { createLlmCallLog } from "./llm-call-log.ts";
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL);
@@ -15,6 +16,7 @@ await runMigrations(db);
 const feishu = createFeishu(config);
 const deps = {
   store: createConversationStore(db),
+  llmCallLog: createLlmCallLog(db),
   model: createChatModel(config),
   send: feishu.send,
 };

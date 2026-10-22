@@ -10,8 +10,8 @@
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "typecheck": "pnpm -r typecheck",
-    "test": "vitest run",
-    "test:db": "TEST_DATABASE_URL=postgres://tanomu:tanomu@localhost:54329/tanomu_test vitest run",
+    "test": "vitest run --no-file-parallelism",
+    "test:db": "TEST_DATABASE_URL=postgres://tanomu:tanomu@localhost:54329/tanomu_test pnpm test",
     "db:generate": "pnpm --filter @tanomu/server db:generate",
     "db:migrate": "pnpm --filter @tanomu/server db:migrate"
   },
