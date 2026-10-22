@@ -322,6 +322,76 @@ class GateTest(TaskDirectory):
         self.assertRejects("pr-exists", self.gate)
 
 
+class ClaimedTest(GateTest):
+    def setUp(self):
+        super().setUp()
+        self.issue["labels"] = [{"name": name} for name in ("ready-for-agent", "implementing")]
+        self.event = {**labeled("labeled", "github-actions[bot]", "implementing"), "id": 987}
+        self.pages = [[labeled("labeled", OWNER)], [self.event]]
+        self.enterContext(mock.patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}))
+        self.record = self.root / "claim.json"
+
+    # GateTest's cases also exercise the shared validation against claimed state.
+    def gate(self):
+        control.validate_issue("1", claimed=True)
+
+    def test_accepts_authorized_issue_and_writes_body(self):
+        control.record_claim("1", str(self.record))
+        control.claimed("1", str(self.record))
+        record = json.loads(self.record.read_text())
+        self.assertEqual(record, {"issue": "1", "repository": REPO, "run_id": "123",
+                                  "run_attempt": "1", "event_id": 987})
+
+    def test_rejects_label_without_event_history(self):
+        self.pages = [[labeled("labeled", OWNER)]]
+        self.assertRejects("wrong-label-actor", self.gate)
+
+    def test_rejects_label_from_non_owner(self):
+        self.event["actor"]["login"] = OWNER
+        self.assertRejects("wrong-label-actor", self.gate)
+
+    def test_rejects_owner_label_later_removed(self):
+        self.pages[-1].append(labeled("unlabeled", "github-actions[bot]", "implementing"))
+        self.assertRejects("wrong-label-actor", self.gate)
+
+    def test_rejects_issue_state_and_author(self):
+        for labels in (("ready-for-agent",), ("implementing",),
+                       ("ready-for-agent", "implementing", "agent:implement"),
+                       ("ready-for-agent", "implementing", "needs-human"),
+                       ("ready-for-agent", "implementing", "ready-for-human")):
+            with self.subTest(labels=labels):
+                self.issue["labels"] = [{"name": name} for name in labels]
+                reason = "missing-authorization" if len(labels) == 1 else "already-claimed"
+                self.assertRejects(reason, self.gate)
+
+    def test_rejects_changed_or_missing_body(self):
+        for body in (BODY + "changed", None, ""):
+            with self.subTest(body=body):
+                self.issue["body"] = body
+                self.assertRejects("body-changed", self.gate)
+
+    def test_rejects_stale_run_attempt_repository_issue_and_event(self):
+        control.record_claim("1", str(self.record))
+        original = self.record.read_text()
+        for key, value in (("run_id", "999"), ("run_attempt", "2"), ("repository", "other/repo"),
+                           ("issue", "2"), ("event_id", 988)):
+            with self.subTest(key=key):
+                data = json.loads(original)
+                data[key] = value
+                self.record.write_text(json.dumps(data))
+                self.assertRejects("stale-claim", control.claimed, "1", str(self.record))
+        self.record.write_text(original)
+        self.event["id"] = 989
+        self.assertRejects("stale-claim", control.claimed, "1", str(self.record))
+
+    def test_rejects_claim_event_without_valid_id(self):
+        for value in (None, "987", True, 0):
+            with self.subTest(value=value):
+                self.event["id"] = value
+                self.assertRejects("invalid-claim-event", control.record_claim, "1", str(self.record))
+        self.assertFalse(self.record.exists())
+
+
 class ScanTest(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -347,7 +417,11 @@ class ScanTest(unittest.TestCase):
     def test_accepts_without_auth_file(self):
         with mock.patch.dict(os.environ):
             del os.environ["FACTORY_AUTH_FILE"]
-            control.scan(self.artifact("Zq9/\"opaque+cred"))
+            with self.assertRaisesRegex(ValueError, "^missing-auth-file$"):
+                control.scan(self.artifact("Zq9/\"opaque+cred"))
+            control.scan(self.artifact("Zq9/\"opaque+cred"), public=True)
+            with self.assertRaisesRegex(ValueError, "^credential-pattern-in-artifact$"):
+                control.scan(self.artifact(SECRET), public=True)
 
     def test_rejects_exact_credential(self):
         self.assertRejects("credential-in-artifact", 'leak Zq9/"opaque+cred here')
@@ -477,6 +551,9 @@ class ConfigureTest(TaskDirectory):
     def test_review_is_read_only(self):
         config = self.configure("review")
         self.assertFalse(config["share"])
+        self.assertEqual(config["permission"]["read"], {
+            "*": "allow", ".env": "deny", ".env.*": "deny", "**/.env": "deny",
+            "**/.env.*": "deny", "**/auth.json": "deny"})
         self.assertEqual(config["permission"]["*"], "deny")
         self.assertEqual(config["permission"]["edit"], "deny")
         for tool in self.denied:

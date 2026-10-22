@@ -39,7 +39,7 @@ def task(number):
     return value
 
 
-def gate(number, directory):
+def validate_issue(number, claimed=False):
     spec = task(number)
     require(os.environ["GITHUB_REF"] == "refs/heads/main", "wrong-ref")
     require(os.environ["MODEL"] == MODEL, "unsupported-model")
@@ -51,16 +51,19 @@ def gate(number, directory):
     require("pull_request" not in issue and issue["state"] == "open", "not-open-issue")
     require(issue["user"]["login"] == owner, "wrong-author")
     labels = {label["name"] for label in issue["labels"]}
-    require({"ready-for-agent", "agent:implement"} <= labels, "missing-authorization")
-    require(not {"implementing", "needs-human", "ready-for-human"} & labels, "already-claimed")
+    authorization = "implementing" if claimed else "agent:implement"
+    forbidden = {"needs-human", "ready-for-human", "agent:implement" if claimed else "implementing"}
+    require({"ready-for-agent", authorization} <= labels, "missing-authorization")
+    require(not forbidden & labels, "already-claimed")
     events = json.loads(subprocess.check_output([
         "gh", "api", "--paginate", "--slurp", f"repos/{repo}/issues/{number}/events?per_page=100"
     ]))
     authorizations = [event for page in events for event in page
                       if event.get("event") in ("labeled", "unlabeled")
-                      and event.get("label", {}).get("name") == "agent:implement"]
+                      and event.get("label", {}).get("name") == authorization]
     require(bool(authorizations) and authorizations[-1]["event"] == "labeled"
-            and authorizations[-1]["actor"]["login"] == owner, "wrong-label-actor")
+            and authorizations[-1]["actor"]["login"] == ("github-actions[bot]" if claimed else owner),
+            "wrong-label-actor")
     body = issue.get("body") or ""
     require(hashlib.sha256(body.encode()).hexdigest() == spec["body_sha256"], "body-changed")
     for dependency in spec["blocked_by"]:
@@ -71,9 +74,32 @@ def gate(number, directory):
     require(not any(ref["ref"] == f"refs/heads/{spec['branch']}" for ref in refs), "branch-exists")
     pulls = api(f"repos/{repo}/pulls?state=all&head={owner}:{spec['branch']}")
     require(not pulls, "pr-exists")
+    return body, authorizations[-1]
+
+
+def gate(number, directory):
+    body, _ = validate_issue(number)
     output = Path(directory)
     output.mkdir(parents=True, exist_ok=True)
     (output / "issue.md").write_text(body)
+
+
+def claim_identity(number, event):
+    require(type(event.get("id")) is int and event["id"] > 0, "invalid-claim-event")
+    return {"issue": number, "repository": os.environ["GITHUB_REPOSITORY"],
+            "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+            "event_id": event["id"]}
+
+
+def record_claim(number, filename):
+    _, event = validate_issue(number, claimed=True)
+    Path(filename).write_text(json.dumps(claim_identity(number, event)))
+
+
+def claimed(number, filename):
+    _, event = validate_issue(number, claimed=True)
+    record = json.loads(Path(filename).read_text())
+    require(record == claim_identity(number, event), "stale-claim")
 
 
 def scope(number, base):
@@ -109,7 +135,8 @@ def scope(number, base):
         require(check.returncode == 0, "whitespace-error")
 
 
-def scan(filename):
+def scan(filename, public=False):
+    require(public or bool(os.environ.get("FACTORY_AUTH_FILE")), "missing-auth-file")
     require(Path(filename).stat().st_size <= MAX_ARTIFACT_BYTES, "artifact-too-large")
     data = Path(filename).read_bytes()
     require(len(data) <= MAX_ARTIFACT_BYTES, "artifact-too-large")
@@ -160,7 +187,9 @@ def configure(directory, mode):
     output.mkdir(parents=True, exist_ok=True)
     for name in ("data/opencode", "config", "cache", "state"):
         (output / name).mkdir(parents=True, exist_ok=True)
-    permissions = {"*": "deny", "read": "allow", "glob": "allow", "grep": "allow", "list": "allow",
+    permissions = {"*": "deny", "read": {"*": "allow", ".env": "deny", ".env.*": "deny",
+                   "**/.env": "deny", "**/.env.*": "deny", "**/auth.json": "deny"},
+                   "glob": "allow", "grep": "allow", "list": "allow",
                    "edit": "deny", "external_directory": "deny", "bash": "deny", "webfetch": "deny",
                    "websearch": "deny", "task": "deny", "skill": "deny"}
     if mode == "implement":
@@ -197,10 +226,16 @@ if __name__ == "__main__":
         command, *args = sys.argv[1:]
         if command == "gate":
             gate(*args)
+        elif command == "record-claim":
+            record_claim(*args)
+        elif command == "claimed":
+            claimed(*args)
         elif command == "scope":
             scope(*args)
         elif command == "scan":
             scan(*args)
+        elif command == "scan-public":
+            scan(*args, public=True)
         elif command == "configure":
             configure(*args)
         elif command == "review":
