@@ -183,6 +183,81 @@ def events(filename):
     return parsed
 
 
+# Run diagnostics name only these categories; every other string from the event stream,
+# including error messages, tool inputs and outputs, is never echoed.
+EVENT_TYPES = {"step_start", "step_finish", "text", "reasoning", "tool_use", "error"}
+TOOLS = {"read", "edit", "write", "patch", "glob", "grep", "list", "bash", "webfetch", "websearch",
+         "task", "skill", "todoread", "todowrite", "invalid"}
+TOOL_STATUSES = {"pending", "running", "completed", "error"}
+FINISH_REASONS = {"stop", "tool-calls", "length", "content-filter", "error", "other", "unknown"}
+MAX_EVENT_LINE_BYTES = 1_000_000
+MAX_EVENT_BYTES = 64_000_000
+
+
+def summarize(filename, status, elapsed, started):
+    require(re.fullmatch(r"[0-9]{1,3}", status) and re.fullmatch(r"[0-9]{1,6}", elapsed)
+            and re.fullmatch(r"[0-9]{1,12}", started), "invalid-summary-input")
+    counts = {"events": 0, "malformed": 0, "oversized": 0, "truncated": False}
+    types, tools, finish = {}, {}, {}
+    tokens = {"input": 0, "output": 0, "reasoning": 0}
+    streak = longest = 0
+    previous = last = None
+
+    def bump(table, key):
+        table[key] = table.get(key, 0) + 1
+
+    def pick(value, allowed):
+        return value if isinstance(value, str) and value in allowed else "other"
+
+    path = Path(filename)
+    with (path.open("rb") if path.is_file() else open(os.devnull, "rb")) as stream:
+        consumed = 0
+        while line := stream.readline(MAX_EVENT_LINE_BYTES + 1):
+            consumed += len(line)
+            if consumed > MAX_EVENT_BYTES:
+                counts["truncated"] = True
+                break
+            if len(line) > MAX_EVENT_LINE_BYTES:
+                counts["oversized"] += 1
+                while (not line.endswith(b"\n") and consumed <= MAX_EVENT_BYTES
+                       and (line := stream.readline(MAX_EVENT_LINE_BYTES))):
+                    consumed += len(line)
+                counts["truncated"] = consumed > MAX_EVENT_BYTES
+                continue
+            try:
+                event = json.loads(line)
+            except (ValueError, RecursionError):
+                event = None
+            if not isinstance(event, dict):
+                counts["malformed"] += 1
+                continue
+            counts["events"] += 1
+            kind = event.get("type")
+            bump(types, pick(kind, EVENT_TYPES))
+            if type(event.get("timestamp")) is int:
+                last = event["timestamp"]
+            part = event.get("part") if isinstance(event.get("part"), dict) else {}
+            if kind == "tool_use":
+                name = pick(part.get("tool"), TOOLS)
+                state = part.get("state") if isinstance(part.get("state"), dict) else {}
+                bump(tools.setdefault(name, {}), pick(state.get("status"), TOOL_STATUSES))
+                streak = streak + 1 if name == previous else 1
+                previous, longest = name, max(longest, streak)
+            elif kind == "step_finish":
+                bump(finish, pick(part.get("reason"), FINISH_REASONS))
+                used = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
+                for key in tokens:
+                    if type(used.get(key)) is int and 0 <= used[key] < 10**9:
+                        tokens[key] += used[key]
+    # OpenCode timestamps are epoch milliseconds. A gap before the deadline only shows that no
+    # JSON event was written after that point; it does not say why.
+    offset = last // 1000 - int(started) if last is not None else None
+    return {"exit_status": int(status), "elapsed_seconds": int(elapsed), **counts,
+            "event_types": types, "tools": tools, "longest_same_tool_streak": longest,
+            "finish_reasons": finish, "tokens": tokens,
+            "last_event_after_seconds": offset if offset is not None and 0 <= offset <= 10**6 else None}
+
+
 def diagnose(filename, command, log):
     # Only the tail matters for fixing a failure, and it bounds what reaches the model.
     require(command in CHECKS, "invalid-check")
@@ -271,6 +346,12 @@ if __name__ == "__main__":
             print(prompt(*args), end="")
         elif command == "events":
             events(*args)
+        elif command == "summary":
+            line = json.dumps(summarize(*args), sort_keys=True)
+            print(f"opencode-summary {line}")
+            if os.environ.get("GITHUB_STEP_SUMMARY"):
+                with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                    summary.write(f"### OpenCode run\n\n```json\n{line}\n```\n")
         elif command == "diagnose":
             diagnose(*args)
         elif command == "review":
