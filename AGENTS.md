@@ -54,6 +54,8 @@ Issues are tracked in GitHub Issues (b1ngsha/tanomu) via the `gh` CLI. See `docs
 
 Default five-role vocabulary: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
 
+The software factory uses `agent:implement` as a separate, maintainer-only execution signal. `ready-for-agent` alone must never start an automated run. See `docs/software-factory.md` for the trust boundaries and phased rollout.
+
 ### Domain docs
 
 Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.
