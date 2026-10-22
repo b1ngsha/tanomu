@@ -79,13 +79,14 @@ jobs:
         working-directory: candidate
         env:
           MODEL: ${{ inputs.model }}
+          ISSUE: ${{ inputs.issue }}
         run: |
           set -euo pipefail
           test "$MODEL" = opencode/deepseek-v4.1-flash-free
           PWD=$(pwd -P)
           export PWD
-          timeout 600 opencode run --standalone --format json -m "$MODEL" \
-            "$(cat ../trusted/.github/software-factory/prompts/implement.md)" \
+          prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt implement "$ISSUE")
+          timeout 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
             > "$RUNNER_TEMP/implementation.jsonl" 2> "$RUNNER_TEMP/implementation.stderr"
           python3 -I ../trusted/.github/software-factory/control.py events "$RUNNER_TEMP/implementation.jsonl"
       - name: Validate and export patch
@@ -277,6 +278,7 @@ jobs:
         working-directory: candidate
         env:
           MODEL: ${{ inputs.model }}
+          ISSUE: ${{ inputs.issue }}
           REVIEW_OUTPUT: ${{ runner.temp }}/feedback/review.json
         run: |
           set -euo pipefail
@@ -284,8 +286,8 @@ jobs:
           PWD=$(pwd -P)
           export PWD
           mkdir "$RUNNER_TEMP/feedback"
-          timeout 600 opencode run --standalone --format json -m "$MODEL" \
-            "$(cat ../trusted/.github/software-factory/prompts/review.md)" \
+          prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt review "$ISSUE")
+          timeout 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
             > "$RUNNER_TEMP/review.jsonl" 2> "$RUNNER_TEMP/review.stderr"
           verdict=$(python3 -I ../trusted/.github/software-factory/control.py review "$RUNNER_TEMP/review.jsonl")
           python3 -I ../trusted/.github/software-factory/control.py scan "$REVIEW_OUTPUT"

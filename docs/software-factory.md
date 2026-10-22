@@ -46,6 +46,11 @@ Run its regression suite with `python3 -I -m unittest discover -s .github/softwa
 Task #6 permits only six core/server implementation and test files, with a 400-line
 limit. Updating the specification requires a reviewed task snapshot change.
 
+The prompts and workflows are task-independent. Each `tasks/N.json` supplies the
+commit/PR `title`, the `implement` and `review` requirements appended to the generic
+prompts, and the human `acceptance` steps listed in the draft PR. A new task needs
+only its snapshot; `control.py` rejects a snapshot missing any of these fields.
+
 The only accepted model is `opencode/deepseek-v4.1-flash-free`; no paid fallback is
 configured. OpenCode's [provider policy](https://opencode.ai/docs/zen/) states that
 DeepSeek V4.1 Flash Free uses zero retention and does not train on submitted data.

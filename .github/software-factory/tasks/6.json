@@ -3,6 +3,7 @@
   "body_sha256": "625306c055a3fe11b32ce4e35811f2ca04577dbf2ff9c1d1168c3c95d9df9120",
   "blocked_by": [7],
   "branch": "feat/6-merge-private-messages",
+  "title": "feat(core): merge consecutive private messages",
   "max_changed_lines": 400,
   "allowed_paths": [
     "packages/core/src/message-batcher.ts",
@@ -11,5 +12,8 @@
     "packages/core/test/message-batcher.test.ts",
     "packages/core/test/private-conversation.test.ts",
     "apps/server/src/main.ts"
-  ]
+  ],
+  "implement": "Implement meaningful tests using the existing core fakes and Vitest fake timers. Preserve LLM call logging and redelivery deduplication. Create one batcher per process, reset its 2.5-second timer on each new message, remove a batch before awaiting its flush, catch flush errors, and keep different chats independent. Join text in arrival order with newlines; non-text-only batches use the existing decline without calling the model. Keep the \"tanomu is listening on Feishu\" startup line. Cover an incoming message during an in-flight reply, mixed text/non-text batches, timer reset, independent chats, and redelivery.",
+  "review": "Check timer reset at 2.5 s, chat isolation, removal before asynchronous flush, errors being caught, deduplication before batching, ordered newline joining, non-text-only decline without an LLM call, mixed batches, preserved call logging, thin single-instance wiring, and meaningful tests including messages during an in-flight generation.",
+  "acceptance": "Stop production, send three rapid Private Conversation messages to a local instance, confirm one ordered merged reply, then restore production."
 }

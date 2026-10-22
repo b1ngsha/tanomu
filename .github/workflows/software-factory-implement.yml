@@ -180,10 +180,11 @@ jobs:
           python3 -I .github/software-factory/control.py scope "$ISSUE" "$BASE"
           python3 -I .github/software-factory/control.py scan-public "$RUNNER_TEMP/patch/candidate.patch"
           branch=$(jq -r .branch ".github/software-factory/tasks/$ISSUE.json")
+          title=$(jq -r .title ".github/software-factory/tasks/$ISSUE.json")
           git switch -c "$branch"
           git add .
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-            commit -m "feat(core): merge consecutive private messages" -m "Refs #$ISSUE" \
+            commit -m "$title" -m "Refs #$ISSUE" \
             -m 'Co-Authored-By: Claude Code <noreply@anthropic.com>'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -201,15 +202,17 @@ jobs:
           gh auth setup-git
           branch=$(git branch --show-current)
           git push --force-with-lease="refs/heads/$branch:" origin "HEAD:refs/heads/$branch"
-          branch=$(git branch --show-current)
+          title=$(jq -r .title ".github/software-factory/tasks/$ISSUE.json")
+          acceptance=$(jq -r .acceptance ".github/software-factory/tasks/$ISSUE.json")
           {
             printf 'Implements the approved specification for #%s. Refs #%s.\n\n' "$ISSUE" "$ISSUE"
             printf 'Evidence: format, lint, typecheck, admin build, database tests, scope checks and independent model review passed.\n\n'
             printf 'Run: https://github.com/%s/actions/runs/%s\n\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
-            printf 'Merge Danger: human must mark Ready for review to trigger ordinary CI, inspect the diff, stop production before real Feishu acceptance, restore production, and decide whether to merge. Acceptance has not been performed.\n\n'
+            printf 'Merge Danger: human must mark Ready for review to trigger ordinary CI, inspect the diff, perform acceptance and decide whether to merge. Acceptance has not been performed.\n\n'
+            printf 'Acceptance: %s\n\n' "$acceptance"
             printf '🤖 Generated with [Claude Code](https://claude.com/claude-code)\n'
           } > "$RUNNER_TEMP/pr.md"
-          gh pr create --draft --base main --head "$branch" --title 'feat(core): merge consecutive private messages' --body-file "$RUNNER_TEMP/pr.md"
+          gh pr create --draft --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/pr.md"
   report:
     needs: [gate, claim, round1, round2, round3, round4, handoff]
     if: always() && needs.gate.result == 'success'
