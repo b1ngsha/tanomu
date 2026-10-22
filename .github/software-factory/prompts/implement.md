@@ -7,15 +7,9 @@ Do not use shell, network, external directories, subagents, or session sharing.
 Do not read credentials or .env files. Do not attempt to commit, push, or open a PR.
 The orchestrator formats the code, runs lint, typecheck, build and tests on a separate
 runner, and publishes the result; you cannot run them, so match existing types and APIs
-by reading their source. Implement meaningful tests
-using the existing core fakes and Vitest fake timers. Preserve LLM call logging and
-redelivery deduplication. Create one batcher per process, reset its 2.5-second timer
-on each new message, remove a batch before awaiting its flush, catch flush errors,
-and keep different chats independent. Join text in arrival order with newlines;
-non-text-only batches use the existing decline without calling the model. Keep the
-"tanomu is listening on Feishu" startup line. Cover an incoming message during an
-in-flight reply, mixed text/non-text batches, timer reset, independent chats, and
-redelivery. Do not run real Feishu acceptance; the human performs it before merging.
+by reading their source. Add meaningful tests next to the changed behaviour, following
+the repository's existing test style. Do not perform the human acceptance in
+task.json; the maintainer performs it before merging.
 The workspace may already contain your previous candidate. If .factory-input/checks.json
 exists, its "output" is the tail of the failing "command"; fix the cause in the
 candidate, never by weakening or skipping tests. If .factory-input/review.json exists,

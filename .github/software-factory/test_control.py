@@ -27,8 +27,12 @@ class TaskDirectory(unittest.TestCase):
         "body_sha256": hashlib.sha256(BODY.encode()).hexdigest(),
         "blocked_by": [2],
         "branch": "feat/1-thing",
+        "title": "feat(core): add a thing",
         "max_changed_lines": 10,
         "allowed_paths": ["src/a.ts", "src/new.ts", "dir with space/b.ts"],
+        "implement": "Build the thing.",
+        "review": "Check the thing.",
+        "acceptance": "Try the thing.",
     }
 
     def setUp(self):
@@ -55,6 +59,32 @@ class TaskTest(TaskDirectory):
     def test_rejects_mismatched_issue(self):
         (self.root / "tasks" / "3.json").write_text(json.dumps({**self.spec, "issue": 4}))
         self.assertRejects("invalid-task", control.task, "3")
+
+    def test_rejects_missing_task_text(self):
+        for key in ("implement", "review", "acceptance"):
+            for value in (None, " ", ["x"]):
+                with self.subTest(key=key, value=value):
+                    (self.root / "tasks" / "1.json").write_text(json.dumps({**self.spec, key: value}))
+                    self.assertRejects("invalid-task", control.task, "1")
+
+    def test_rejects_unconventional_titles(self):
+        for title in (None, "add a thing", "feat: add a thing", "feat(core): a\nb",
+                      "feat(core): " + "x" * 73, "Feat(core): add a thing"):
+            with self.subTest(title=title):
+                (self.root / "tasks" / "1.json").write_text(json.dumps({**self.spec, "title": title}))
+                self.assertRejects("invalid-title", control.task, "1")
+
+    def test_prompt_appends_task_requirements(self):
+        (self.root / "prompts").mkdir()
+        (self.root / "prompts" / "review.md").write_text("Generic review.\n")
+        self.assertEqual(control.prompt("review", "1"),
+                         "Generic review.\n\nTask-specific requirements:\nCheck the thing.\n")
+        self.assertRejects("invalid-mode", control.prompt, "acceptance", "1")
+
+    def test_real_tasks_are_valid(self):
+        for path in (CONTROL.parent / "tasks").glob("*.json"):
+            with self.subTest(task=path.name), mock.patch.object(control, "ROOT", CONTROL.parent):
+                control.task(path.stem)
 
 
 class ScopeTest(TaskDirectory):
@@ -610,6 +640,16 @@ class WorkflowContractTest(unittest.TestCase):
             if re.search(r"pnpm (lint|typecheck|build:admin|test)", step.get("run", "")):
                 self.assertGreater(index, upload, step["run"])
         self.assertNotIn("secrets", str(self.round["jobs"]["verify"]))
+
+    def test_shared_files_contain_no_task_specific_text(self):
+        task = json.loads((CONTROL.parent / "tasks" / "6.json").read_text())
+        shared = [CONTROL.parent / "prompts" / "implement.md", CONTROL.parent / "prompts" / "review.md",
+                  *(CONTROL.parents[2] / ".github/workflows").glob("software-factory-*.yml")]
+        for path in shared:
+            text = path.read_text()
+            for fragment in (task["title"], "2.5", "batch"):
+                with self.subTest(path=path.name, fragment=fragment):
+                    self.assertNotIn(fragment, text)
 
     def test_review_repair_and_handoff_use_the_checked_patch(self):
         def downloads(job):

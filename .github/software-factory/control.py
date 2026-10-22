@@ -40,7 +40,18 @@ def task(number):
     require(re.fullmatch(r"[1-9][0-9]*", number), "invalid-issue")
     value = json.loads((ROOT / "tasks" / f"{number}.json").read_text())
     require(value["issue"] == int(number), "invalid-task")
+    require(all(isinstance(value.get(key), str) and value[key].strip()
+                for key in ("implement", "review", "acceptance")), "invalid-task")
+    # The title becomes the commit subject and PR title, so keep it one conventional line.
+    require(isinstance(value.get("title"), str)
+            and re.fullmatch(r"[a-z]+\([a-z0-9-]+\): [^\n]{1,72}", value["title"]), "invalid-title")
     return value
+
+
+def prompt(mode, number):
+    require(mode in ("implement", "review"), "invalid-mode")
+    instructions = (ROOT / "prompts" / f"{mode}.md").read_text()
+    return f"{instructions}\nTask-specific requirements:\n{task(number)[mode]}\n"
 
 
 def validate_issue(number, claimed=False):
@@ -256,6 +267,8 @@ if __name__ == "__main__":
             scan(*args, public=True)
         elif command == "configure":
             configure(*args)
+        elif command == "prompt":
+            print(prompt(*args), end="")
         elif command == "events":
             events(*args)
         elif command == "diagnose":
