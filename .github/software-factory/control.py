@@ -12,6 +12,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parent
 MODEL = "opencode/deepseek-v4.1-flash-free"
 MAX_ARTIFACT_BYTES = 512_000
+MAX_DIAGNOSTIC_BYTES = 12_000
+CHECKS = ("pnpm format", "pnpm format:check", "pnpm lint", "pnpm typecheck", "pnpm build:admin",
+          "pnpm test")
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 # Credential-shaped tokens; the lookbehind keeps kebab-case text such as "task-..." from matching.
 CREDENTIAL_PATTERN = re.compile(
     rb"(?<![A-Za-z0-9_-])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})"
@@ -158,11 +162,25 @@ def scan(filename, public=False):
     require(not CREDENTIAL_PATTERN.search(data), "credential-pattern-in-artifact")
 
 
+def events(filename):
+    try:
+        parsed = [json.loads(line) for line in Path(filename).read_text().splitlines()]
+    except json.JSONDecodeError:
+        raise ValueError("invalid-events") from None
+    require(parsed and all(isinstance(event, dict) and event.get("type") != "error"
+                           and not event.get("error") for event in parsed), "invalid-events")
+    return parsed
+
+
+def diagnose(filename, command, log):
+    # Only the tail matters for fixing a failure, and it bounds what reaches the model.
+    require(command in CHECKS, "invalid-check")
+    tail = Path(log).read_bytes()[-MAX_DIAGNOSTIC_BYTES:].decode(errors="replace")
+    Path(filename).write_text(json.dumps({"command": command, "output": ANSI.sub("", tail)}))
+
+
 def review(filename):
-    events = [json.loads(line) for line in Path(filename).read_text().splitlines()]
-    require(events and all(isinstance(event, dict) and event.get("type") != "error"
-                           and not event.get("error") for event in events), "invalid-events")
-    text = "".join(event.get("part", {}).get("text", "") for event in events
+    text = "".join(event.get("part", {}).get("text", "") for event in events(filename)
                    if event.get("type") == "text")
     def unique(pairs):
         keys = [key for key, _ in pairs]
@@ -238,6 +256,10 @@ if __name__ == "__main__":
             scan(*args, public=True)
         elif command == "configure":
             configure(*args)
+        elif command == "events":
+            events(*args)
+        elif command == "diagnose":
+            diagnose(*args)
         elif command == "review":
             result = review(*args)
             Path(os.environ["REVIEW_OUTPUT"]).write_text(json.dumps(result))

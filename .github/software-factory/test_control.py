@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -529,6 +530,98 @@ class ReviewTest(unittest.TestCase):
     def test_accepts_limits(self):
         control.review(self.events(json.dumps(
             {"verdict": "request_changes", "findings": ["x" * 2000] * 20})))
+
+
+class EventsTest(unittest.TestCase):
+    def test_rejects_unparseable_events(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.jsonl"
+            path.write_text('{"type":"text"}\nnot json\n')
+            with self.assertRaisesRegex(ValueError, "^invalid-events$"):
+                control.events(str(path))
+            path.write_text('{"type":"step_start"}\n{"type":"text","part":{"text":"done"}}\n')
+            self.assertEqual(len(control.events(str(path))), 2)
+
+
+class DiagnoseTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.log = self.directory / "checks.log"
+        self.output = self.directory / "checks.json"
+
+    def test_keeps_bounded_tail_without_ansi(self):
+        self.log.write_bytes(b"x" * control.MAX_DIAGNOSTIC_BYTES + b"\x1b[31mFAIL\x1b[0m a.test.ts\xff")
+        control.diagnose(str(self.output), "pnpm test", str(self.log))
+        result = json.loads(self.output.read_text())
+        self.assertEqual(result["command"], "pnpm test")
+        self.assertTrue(result["output"].endswith("FAIL a.test.ts�"))
+        self.assertNotIn("\x1b", result["output"])
+        self.assertLessEqual(len(result["output"].encode()), control.MAX_DIAGNOSTIC_BYTES + 3)
+
+    def test_rejects_unknown_command(self):
+        self.log.write_text("boom")
+        with self.assertRaisesRegex(ValueError, "^invalid-check$"):
+            control.diagnose(str(self.output), "rm -rf /", str(self.log))
+
+
+class WorkflowContractTest(unittest.TestCase):
+    """Wiring between jobs is not exercised by the unit tests above, so pin its invariants."""
+
+    @staticmethod
+    def load(name):
+        import yaml
+        return yaml.safe_load((CONTROL.parents[2] / ".github/workflows" / name).read_text())
+
+    def setUp(self):
+        self.implement = self.load("software-factory-implement.yml")
+        self.round = self.load("software-factory-round.yml")
+
+    def steps(self):
+        for workflow in (self.implement, self.round):
+            for job in workflow["jobs"].values():
+                yield from job.get("steps", [])
+
+    def test_issue_validation_steps_receive_model(self):
+        validating = [step for step in self.steps()
+                      if re.search(r"control\.py (gate|record-claim|claimed) ", step.get("run", ""))]
+        self.assertEqual(len(validating), 4)
+        for step in validating:
+            with self.subTest(step=step.get("name")):
+                self.assertIn("MODEL", step.get("env", {}))
+
+    def test_repairable_outcomes_reach_every_later_round(self):
+        jobs = self.implement["jobs"]
+        rounds = sorted(name for name in jobs if name.startswith("round"))
+        self.assertEqual(rounds, ["round1", "round2", "round3", "round4"])
+        for previous, current in zip(rounds, rounds[1:]):
+            with self.subTest(round=current):
+                self.assertEqual(jobs[current]["needs"], previous)
+                for outcome in ("checks_failed", "request_changes"):
+                    self.assertIn(f"needs.{previous}.outputs.outcome == '{outcome}'", jobs[current]["if"])
+        for job in ("handoff", "report"):
+            self.assertLessEqual(set(rounds), set(jobs[job]["needs"]))
+        self.assertIn("needs.round4.outputs.outcome", str(jobs["report"]))
+
+    def test_checked_patch_is_uploaded_before_candidate_code_runs(self):
+        steps = self.round["jobs"]["verify"]["steps"]
+        upload = next(index for index, step in enumerate(steps)
+                      if step.get("with", {}).get("name") == "checked-${{ inputs.round }}")
+        for index, step in enumerate(steps):
+            if re.search(r"pnpm (lint|typecheck|build:admin|test)", step.get("run", "")):
+                self.assertGreater(index, upload, step["run"])
+        self.assertNotIn("secrets", str(self.round["jobs"]["verify"]))
+
+    def test_review_repair_and_handoff_use_the_checked_patch(self):
+        def downloads(job):
+            return {step["with"]["name"] for step in job["steps"]
+                    if "download-artifact" in step.get("uses", "")}
+        jobs = self.round["jobs"]
+        self.assertEqual(downloads(jobs["review"]), {"factory-input", "checked-${{ inputs.round }}"})
+        self.assertEqual(downloads(jobs["implement"]), {
+            "factory-input", "checked-${{ steps.previous.outputs.round }}",
+            "feedback-${{ steps.previous.outputs.round }}"})
+        self.assertEqual(downloads(self.implement["jobs"]["handoff"]),
+                         {"checked-${{ steps.approved.outputs.round }}", "factory-claim"})
 
 
 class ConfigureTest(TaskDirectory):
