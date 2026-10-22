@@ -1,0 +1,15 @@
+{
+  "issue": 6,
+  "body_sha256": "625306c055a3fe11b32ce4e35811f2ca04577dbf2ff9c1d1168c3c95d9df9120",
+  "blocked_by": [7],
+  "branch": "feat/6-merge-private-messages",
+  "max_changed_lines": 400,
+  "allowed_paths": [
+    "packages/core/src/message-batcher.ts",
+    "packages/core/src/private-conversation.ts",
+    "packages/core/src/index.ts",
+    "packages/core/test/message-batcher.test.ts",
+    "packages/core/test/private-conversation.test.ts",
+    "apps/server/src/main.ts"
+  ]
+}
