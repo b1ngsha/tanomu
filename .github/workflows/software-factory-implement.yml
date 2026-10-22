@@ -73,6 +73,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
+          MODEL: ${{ github.event_name == 'issues' && 'opencode/deepseek-v4.1-flash-free' || inputs.model }}
         run: |
           set -euo pipefail
           gh issue edit "$ISSUE" --add-label implementing --remove-label agent:implement
