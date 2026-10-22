@@ -84,6 +84,7 @@ jobs:
           path: ${{ runner.temp }}/claim.json
           retention-days: 3
           if-no-files-found: error
+  # Check failures and review findings share one budget: the first attempt plus three repairs.
   round1:
     needs: claim
     uses: ./.github/workflows/software-factory-round.yml
@@ -98,7 +99,7 @@ jobs:
       OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
   round2:
     needs: round1
-    if: needs.round1.outputs.verdict == 'request_changes'
+    if: needs.round1.outputs.outcome == 'checks_failed' || needs.round1.outputs.outcome == 'request_changes'
     uses: ./.github/workflows/software-factory-round.yml
     permissions:
       contents: read
@@ -111,7 +112,7 @@ jobs:
       OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
   round3:
     needs: round2
-    if: needs.round2.outputs.verdict == 'request_changes'
+    if: needs.round2.outputs.outcome == 'checks_failed' || needs.round2.outputs.outcome == 'request_changes'
     uses: ./.github/workflows/software-factory-round.yml
     permissions:
       contents: read
@@ -122,13 +123,25 @@ jobs:
       base: ${{ github.sha }}
     secrets:
       OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+  round4:
+    needs: round3
+    if: needs.round3.outputs.outcome == 'checks_failed' || needs.round3.outputs.outcome == 'request_changes'
+    uses: ./.github/workflows/software-factory-round.yml
+    permissions:
+      contents: read
+    with:
+      issue: ${{ github.event.issue.number || inputs.issue_number }}
+      model: ${{ github.event_name == 'issues' && 'opencode/deepseek-v4.1-flash-free' || inputs.model }}
+      round: 4
+      base: ${{ github.sha }}
+    secrets:
+      OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
   handoff:
-    needs: [round1, round2, round3]
+    needs: [round1, round2, round3, round4]
+    # Rounds stop at the first approval, so at most one round approves and none may have failed.
     if: >-
-      always() && !cancelled() &&
-      ((needs.round1.result == 'success' && needs.round1.outputs.verdict == 'approve') ||
-       (needs.round2.result == 'success' && needs.round2.outputs.verdict == 'approve') ||
-       (needs.round3.result == 'success' && needs.round3.outputs.verdict == 'approve'))
+      always() && !cancelled() && contains(needs.*.outputs.outcome, 'approve') &&
+      !contains(needs.*.result, 'failure')
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -139,9 +152,22 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      - id: approved
+        env:
+          ROUND1: ${{ needs.round1.outputs.outcome }}
+          ROUND2: ${{ needs.round2.outputs.outcome }}
+          ROUND3: ${{ needs.round3.outputs.outcome }}
+          ROUND4: ${{ needs.round4.outputs.outcome }}
+        run: |
+          set -euo pipefail
+          for round in 1 2 3 4; do
+            outcome="ROUND$round"
+            if [ "${!outcome}" = approve ]; then printf 'round=%s\n' "$round" >> "$GITHUB_OUTPUT"; fi
+          done
+      # Publish exactly the formatted patch that passed the checks and review.
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: candidate-${{ needs.round3.result == 'success' && needs.round3.outputs.verdict == 'approve' && '3' || needs.round2.result == 'success' && needs.round2.outputs.verdict == 'approve' && '2' || '1' }}
+          name: checked-${{ steps.approved.outputs.round }}
           path: ${{ runner.temp }}/patch
       - name: Validate and commit candidate
         env:
@@ -185,7 +211,7 @@ jobs:
           } > "$RUNNER_TEMP/pr.md"
           gh pr create --draft --base main --head "$branch" --title 'feat(core): merge consecutive private messages' --body-file "$RUNNER_TEMP/pr.md"
   report:
-    needs: [gate, claim, round1, round2, round3, handoff]
+    needs: [gate, claim, round1, round2, round3, round4, handoff]
     if: always() && needs.gate.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -202,7 +228,8 @@ jobs:
           ROUND1: ${{ needs.round1.result }}
           ROUND2: ${{ needs.round2.result }}
           ROUND3: ${{ needs.round3.result }}
-          FINAL_VERDICT: ${{ needs.round3.outputs.verdict }}
+          ROUND4: ${{ needs.round4.result }}
+          FINAL_OUTCOME: ${{ needs.round4.outputs.outcome }}
         run: |
           set -euo pipefail
           state=needs-human
@@ -210,8 +237,9 @@ jobs:
           if [ "$CLAIM" != success ]; then reason=claim-failed
           elif [ "$HANDOFF" = success ]; then state=ready-for-human; reason=checks-and-review-passed
           elif [ "$HANDOFF" = failure ]; then reason=handoff-failed
-          elif [ "$FINAL_VERDICT" = request_changes ]; then reason=rework-exhausted
-          elif [ "$ROUND1" = cancelled ] || [ "$ROUND2" = cancelled ] || [ "$ROUND3" = cancelled ]; then reason=cancelled
+          elif [ "$FINAL_OUTCOME" = checks_failed ]; then reason=checks-exhausted
+          elif [ "$FINAL_OUTCOME" = request_changes ]; then reason=rework-exhausted
+          elif [[ " $ROUND1 $ROUND2 $ROUND3 $ROUND4 " = *' cancelled '* ]]; then reason=cancelled
           fi
           gh issue edit "$ISSUE" --remove-label implementing --add-label "$state"
           printf 'Factory status: %s. Reason: %s. Run: https://github.com/%s/actions/runs/%s\n' \

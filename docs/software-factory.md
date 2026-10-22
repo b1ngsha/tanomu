@@ -29,9 +29,11 @@ The OpenCode config denies all tools by default and allows only read-only file i
 The implementation lifecycle is:
 
 ```text
-ready-for-agent -> agent:implement -> implementing -> draft PR -> reviewing
-                                      -> rework (at most twice)
-                                      -> ready-for-human / needs-human
+ready-for-agent + agent:implement -> implementing
+  -> round: implement -> format + checks -> independent review
+       check failure or review findings -> next round (four rounds in total)
+  -> draft PR -> ready-for-human
+  -> needs-human (authorization, scope, credential or infrastructure failure, or budget exhausted)
 ```
 
 A task is keyed by issue number and has one concurrency group. The implementation and review runs are independent. The maintainer reviews the draft PR and CI evidence, stops production before real Feishu testing, sends three rapid Private Conversation messages, confirms one ordered merged reply, restores production, and decides whether to merge.
@@ -55,15 +57,26 @@ Recheck this policy before changing models. The pinned CLI uses its tested legac
 After both factory PRs are merged, the maintainer creates `agent:implement`,
 `implementing`, `ready-for-human` and `needs-human`, enables Actions to create PRs,
 and configures main protection and production approval. Review issue #6 and its
-snapshot, add `agent:implement`, then dispatch **Software factory implement** from
-`main` with issue `6` and the exact free model above. There is no dry-run mode.
+snapshot, then add `agent:implement` while `ready-for-agent` is present. The label
+event starts **Software factory implement** on `main` with the free model above.
+Manual dispatch remains available for re-running with the same validation. There is
+no dry-run mode.
 
 The gate checks the maintainer actors, issue author, latest authorization label
 actor, body hash, dependencies and branch/PR uniqueness. Claim consumes the execution
-label. Each round generates a patch, runs ordinary CI including database tests on
-a fresh runner without model credentials, then obtains a fresh read-only review.
-Only review findings trigger rework, at most twice. Any command/check/parse failure
-stops the run; there is no automatic retry that could hide a failing check.
+label. Each round generates a patch, then a fresh runner without model credentials
+applies `pnpm format`, rechecks scope, uploads that formatted patch, and only then
+runs lint, typecheck, admin build and database tests. A failing check produces
+`checks.json` (the command and a bounded, ANSI-stripped output tail) for the next
+round; passing checks lead to a fresh read-only review, whose findings produce
+`review.json`. Both kinds of repair share one budget of four rounds. Repair is not
+a blind retry: every round is checked again, and only the patch that passed checks
+and review is published.
+
+Authorization, scope, credential-scan, implementer-error and infrastructure failures
+are not repairable and stop the run, as does a repair round that leaves the patch
+unchanged. Candidate code runs in the verify job after the checked patch is uploaded;
+ordinary PR CI after Ready for review remains the authoritative check.
 
 Only a passing candidate is committed and pushed to a draft PR, using `Refs #6`.
 GitHub-token-created PRs do not trigger CI automatically; marking the draft ready
@@ -78,7 +91,7 @@ network tools, external directories and subagents are denied.
 
 Successful handoff adds `ready-for-human`; failures after the gate add `needs-human`
 and remove `implementing`. Fixed reason codes include `claim-failed`, `round-failed`,
-`rework-exhausted`, `handoff-failed` and `cancelled`. A gate rejection changes no
+`checks-exhausted`, `rework-exhausted`, `handoff-failed` and `cancelled`. A gate rejection changes no
 issue state. If GitHub cancels the entire run or its token/API is unavailable, the
 report job may not execute: inspect the run, remove a stale `implementing` label,
 and resolve any existing branch/PR before deliberately authorizing another run.
