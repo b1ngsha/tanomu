@@ -26,7 +26,7 @@ The OpenCode config denies all tools by default and allows only read-only file i
 
 ## Later task lifecycle
 
-The planned lifecycle is:
+The implementation lifecycle is:
 
 ```text
 ready-for-agent -> agent:implement -> implementing -> draft PR -> reviewing
@@ -35,6 +35,54 @@ ready-for-agent -> agent:implement -> implementing -> draft PR -> reviewing
 ```
 
 A task is keyed by issue number and has one concurrency group. The implementation and review runs are independent. The maintainer reviews the draft PR and CI evidence, stops production before real Feishu testing, sends three rapid Private Conversation messages, confirms one ordered merged reply, restores production, and decides whether to merge.
+
+## Implementation controls
+
+The trusted controls, task snapshots and prompts live in `.github/software-factory/`.
+`control.py` runs from the dispatch revision, independently of the candidate tree.
+Run its regression suite with `python3 -I -m unittest discover -s .github/software-factory -p 'test_*.py'`.
+Task #6 permits only six core/server implementation and test files, with a 400-line
+limit. Updating the specification requires a reviewed task snapshot change.
+
+The only accepted model is `opencode/deepseek-v4.1-flash-free`; no paid fallback is
+configured. OpenCode's [provider policy](https://opencode.ai/docs/zen/) states that
+DeepSeek V4.1 Flash Free uses zero retention and does not train on submitted data.
+Recheck this policy before changing models. The pinned CLI uses its tested legacy
+`permission` configuration; migration to `permissions` needs separate verification.
+
+## Implementation runbook
+
+After both factory PRs are merged, the maintainer creates `agent:implement`,
+`implementing`, `ready-for-human` and `needs-human`, enables Actions to create PRs,
+and configures main protection and production approval. Review issue #6 and its
+snapshot, add `agent:implement`, then dispatch **Software factory implement** from
+`main` with issue `6` and the exact free model above. There is no dry-run mode.
+
+The gate checks the maintainer actors, issue author, latest authorization label
+actor, body hash, dependencies and branch/PR uniqueness. Claim consumes the execution
+label. Each round generates a patch, runs ordinary CI including database tests on
+a fresh runner without model credentials, then obtains a fresh read-only review.
+Only review findings trigger rework, at most twice. Any command/check/parse failure
+stops the run; there is no automatic retry that could hide a failing check.
+
+Only a passing candidate is committed and pushed to a draft PR, using `Refs #6`.
+GitHub-token-created PRs do not trigger CI automatically; marking the draft ready
+triggers ordinary CI through `ready_for_review`. Inspect that CI and the diff before
+real Feishu acceptance. The factory never claims real Feishu acceptance passed.
+
+Patch and structured feedback artifacts expire after three days. Exact credential
+values and common credential patterns are checked before upload. Raw model events,
+stderr and auth files are never uploaded. Workspace paths are explicitly pinned
+with `PWD`; edit permission permits only the task's relative file paths, after a default deny rule. Shell,
+network tools, external directories and subagents are denied.
+
+Successful handoff adds `ready-for-human`; failures after the gate add `needs-human`
+and remove `implementing`. Fixed reason codes include `claim-failed`, `round-failed`,
+`rework-exhausted`, `handoff-failed` and `cancelled`. A gate rejection changes no
+issue state. If GitHub cancels the entire run or its token/API is unavailable, the
+report job may not execute: inspect the run, remove a stale `implementing` label,
+and resolve any existing branch/PR before deliberately authorizing another run.
+Never blindly rerun a claimed or partially published task.
 
 ## Human-only operations
 

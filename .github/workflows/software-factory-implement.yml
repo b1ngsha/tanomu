@@ -1,0 +1,209 @@
+name: Software factory implement
+on:
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Approved issue number
+        required: true
+        type: string
+      model:
+        description: Must be opencode/deepseek-v4.1-flash-free
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  group: factory-${{ inputs.issue_number }}
+  cancel-in-progress: false
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Validate explicit maintainer authorization
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ inputs.issue_number }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          python3 -I .github/software-factory/control.py gate "$ISSUE" "$RUNNER_TEMP/input"
+          cp ".github/software-factory/tasks/$ISSUE.json" "$RUNNER_TEMP/input/task.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: factory-input
+          path: ${{ runner.temp }}/input
+          retention-days: 3
+          if-no-files-found: error
+  claim:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - name: Revalidate before claiming
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ inputs.issue_number }}
+          MODEL: ${{ inputs.model }}
+        run: python3 -I .github/software-factory/control.py gate "$ISSUE" "$RUNNER_TEMP/claim"
+      - name: Consume authorization
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          gh issue edit "$ISSUE" --add-label implementing --remove-label agent:implement
+          python3 -I .github/software-factory/control.py record-claim "$ISSUE" "$RUNNER_TEMP/claim.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: factory-claim
+          path: ${{ runner.temp }}/claim.json
+          retention-days: 3
+          if-no-files-found: error
+  round1:
+    needs: claim
+    uses: ./.github/workflows/software-factory-round.yml
+    permissions:
+      contents: read
+    with:
+      issue: ${{ inputs.issue_number }}
+      model: ${{ inputs.model }}
+      round: 1
+      base: ${{ github.sha }}
+    secrets:
+      OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+  round2:
+    needs: round1
+    if: needs.round1.outputs.verdict == 'request_changes'
+    uses: ./.github/workflows/software-factory-round.yml
+    permissions:
+      contents: read
+    with:
+      issue: ${{ inputs.issue_number }}
+      model: ${{ inputs.model }}
+      round: 2
+      base: ${{ github.sha }}
+    secrets:
+      OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+  round3:
+    needs: round2
+    if: needs.round2.outputs.verdict == 'request_changes'
+    uses: ./.github/workflows/software-factory-round.yml
+    permissions:
+      contents: read
+    with:
+      issue: ${{ inputs.issue_number }}
+      model: ${{ inputs.model }}
+      round: 3
+      base: ${{ github.sha }}
+    secrets:
+      OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+  handoff:
+    needs: [round1, round2, round3]
+    if: >-
+      always() && !cancelled() &&
+      ((needs.round1.result == 'success' && needs.round1.outputs.verdict == 'approve') ||
+       (needs.round2.result == 'success' && needs.round2.outputs.verdict == 'approve') ||
+       (needs.round3.result == 'success' && needs.round3.outputs.verdict == 'approve'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-${{ needs.round3.result == 'success' && needs.round3.outputs.verdict == 'approve' && '3' || needs.round2.result == 'success' && needs.round2.outputs.verdict == 'approve' && '2' || '1' }}
+          path: ${{ runner.temp }}/patch
+      - name: Validate and commit candidate
+        env:
+          ISSUE: ${{ inputs.issue_number }}
+          BASE: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git apply "$RUNNER_TEMP/patch/candidate.patch"
+          git add -N .
+          python3 -I .github/software-factory/control.py scope "$ISSUE" "$BASE"
+          python3 -I .github/software-factory/control.py scan-public "$RUNNER_TEMP/patch/candidate.patch"
+          branch=$(jq -r .branch ".github/software-factory/tasks/$ISSUE.json")
+          git switch -c "$branch"
+          git add .
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "feat(core): merge consecutive private messages" -m "Refs #$ISSUE" \
+            -m 'Co-Authored-By: Claude Code <noreply@anthropic.com>'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: factory-claim
+          path: ${{ runner.temp }}/claim
+      - name: Push and open draft PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ inputs.issue_number }}
+          MODEL: ${{ inputs.model }}
+        run: |
+          set -euo pipefail
+          python3 -I .github/software-factory/control.py claimed "$ISSUE" "$RUNNER_TEMP/claim/claim.json"
+          gh auth setup-git
+          branch=$(git branch --show-current)
+          git push --force-with-lease="refs/heads/$branch:" origin "HEAD:refs/heads/$branch"
+          branch=$(git branch --show-current)
+          {
+            printf 'Implements the approved specification for #%s. Refs #%s.\n\n' "$ISSUE" "$ISSUE"
+            printf 'Evidence: format, lint, typecheck, admin build, database tests, scope checks and independent model review passed.\n\n'
+            printf 'Run: https://github.com/%s/actions/runs/%s\n\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+            printf 'Merge Danger: human must mark Ready for review to trigger ordinary CI, inspect the diff, stop production before real Feishu acceptance, restore production, and decide whether to merge. Acceptance has not been performed.\n\n'
+            printf '🤖 Generated with [Claude Code](https://claude.com/claude-code)\n'
+          } > "$RUNNER_TEMP/pr.md"
+          gh pr create --draft --base main --head "$branch" --title 'feat(core): merge consecutive private messages' --body-file "$RUNNER_TEMP/pr.md"
+  report:
+    needs: [gate, claim, round1, round2, round3, handoff]
+    if: always() && needs.gate.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Publish fixed status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ inputs.issue_number }}
+          HANDOFF: ${{ needs.handoff.result }}
+          CLAIM: ${{ needs.claim.result }}
+          ROUND1: ${{ needs.round1.result }}
+          ROUND2: ${{ needs.round2.result }}
+          ROUND3: ${{ needs.round3.result }}
+          FINAL_VERDICT: ${{ needs.round3.outputs.verdict }}
+        run: |
+          set -euo pipefail
+          state=needs-human
+          reason=round-failed
+          if [ "$CLAIM" != success ]; then reason=claim-failed
+          elif [ "$HANDOFF" = success ]; then state=ready-for-human; reason=checks-and-review-passed
+          elif [ "$HANDOFF" = failure ]; then reason=handoff-failed
+          elif [ "$FINAL_VERDICT" = request_changes ]; then reason=rework-exhausted
+          elif [ "$ROUND1" = cancelled ] || [ "$ROUND2" = cancelled ] || [ "$ROUND3" = cancelled ]; then reason=cancelled
+          fi
+          gh issue edit "$ISSUE" --remove-label implementing --add-label "$state"
+          printf 'Factory status: %s. Reason: %s. Run: https://github.com/%s/actions/runs/%s\n' \
+            "$state" "$reason" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$RUNNER_TEMP/report.md"
+          gh issue comment "$ISSUE" --body-file "$RUNNER_TEMP/report.md"
