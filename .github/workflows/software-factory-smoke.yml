@@ -65,7 +65,7 @@ jobs:
       - name: Install pinned OpenCode CLI
         run: |
           set -euo pipefail
-          npm install --global opencode-ai@2.1.0 --no-audit --no-fund
+          npm install --global @opencode/cli@2.1.0 --no-audit --no-fund
           opencode --version | grep -Fx 'opencode v2.1.0'
 
       - name: Configure read-only OpenCode
