@@ -104,7 +104,7 @@ jobs:
           set +e
           opencode run --standalone --format json -m "$MODEL" \
             'Read README.md only. Do not edit files, run commands, access the network, or share the session. Reply with exactly one short sentence.' \
-            >"$output_file" 2>&1
+            >"$output_file" 2>"$RUNNER_TEMP/opencode-smoke.stderr"
           status=$?
           set -e
           finished=$(date +%s)
@@ -122,10 +122,23 @@ jobs:
             echo '::error::read-only smoke modified the fixture'
             exit 1
           }
-          if grep -Eiq '(api[_ -]?key|authorization|bearer|token|secret)' "$output_file"; then
+          if grep -Eiq '(^|[^[:alnum:]_])(api[_ -]?key|authorization|bearer|token|secret)([^[:alnum:]_]|$)' \
+            "$output_file" "$RUNNER_TEMP/opencode-smoke.stderr"; then
             echo '::error::OpenCode output contained credential-shaped text'
             exit 1
           fi
+          jq -e -s '
+            all(.[]; type == "object") and
+            all(.[]; .type != "error" and .error == null) and
+            any(.[];
+              .type == "text" and
+              (.part.text | type == "string") and
+              (.part.text | test("\\S"))
+            )
+          ' "$output_file" >/dev/null 2>&1 || {
+            echo '::error::OpenCode must return valid JSON events with a non-empty reply and no errors'
+            exit 1
+          }
 
       - name: Write redacted summary
         if: always()
