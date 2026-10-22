@@ -1,5 +1,10 @@
 import { serve } from "@hono/node-server";
-import { replyToPrivateMessage } from "@tanomu/core";
+import {
+  createMessageBatcher,
+  recordPrivateMessage,
+  replyToPrivateMessages,
+  type RecordedMessage,
+} from "@tanomu/core";
 import { createChatModel } from "./chat-model.ts";
 import { loadConfig } from "./config.ts";
 import { createConversationStore } from "./conversation-store.ts";
@@ -21,12 +26,20 @@ const deps = {
   send: feishu.send,
 };
 
+const batcher = createMessageBatcher<RecordedMessage>({
+  windowMs: 2_500,
+  onFlush: (chatId, items) => replyToPrivateMessages(chatId, items, deps),
+});
+
 const http = createHttpApp({
   oauth: createFeishuOAuth(config),
   sessionSecret: config.SESSION_SECRET,
 });
 serve({ fetch: http.fetch, port: config.HTTP_PORT });
 
-await feishu.listen((message) => replyToPrivateMessage(message, deps));
+await feishu.listen(async (message) => {
+  const recorded = await recordPrivateMessage(message, deps);
+  if (recorded) batcher.add(message.chatId, recorded);
+});
 // The deploy job waits for this line; keep "tanomu is listening" in sync with .github/workflows/ci.yml.
 console.log("tanomu is listening on Feishu");

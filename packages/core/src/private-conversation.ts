@@ -54,6 +54,12 @@ export interface ReplyDeps {
 
 const NON_TEXT_REPLY = "这个我暂时看不了，先发文字给我吧。";
 
+/** An incoming message together with the Private Conversation it was recorded in. */
+export interface RecordedMessage {
+  message: IncomingMessage;
+  conversationId: string;
+}
+
 /** Calls the model and records the call; recording failures are logged, never thrown. */
 async function generateRecorded(
   { model, llmCallLog }: Pick<ReplyDeps, "model" | "llmCallLog">,
@@ -99,23 +105,45 @@ async function generateRecorded(
   return result.text;
 }
 
-/** Handles one message in a Private Conversation end to end: dedupe, generate, send, persist. */
-export async function replyToPrivateMessage(
+/** Records an incoming message, returning undefined when Feishu redelivers it. */
+export async function recordPrivateMessage(
   message: IncomingMessage,
+  { store }: Pick<ReplyDeps, "store">,
+): Promise<RecordedMessage | undefined> {
+  const recorded = await store.recordIncoming(message);
+  return recorded ? { message, conversationId: recorded.conversationId } : undefined;
+}
+
+/** Replies once to a batch of recorded messages from the same Private Conversation. */
+export async function replyToPrivateMessages(
+  chatId: string,
+  items: RecordedMessage[],
   { store, send, ...deps }: ReplyDeps,
 ): Promise<void> {
-  const recorded = await store.recordIncoming(message);
-  if (!recorded) return;
+  const conversationId = items[0]?.conversationId;
+  if (conversationId === undefined) return;
 
+  const texts = items
+    .map(({ message }) => message.text)
+    .filter((text): text is string => text !== undefined);
   const text =
-    message.text === undefined
+    texts.length === 0
       ? NON_TEXT_REPLY
       : await generateRecorded(
           deps,
-          { capability: "chat", conversationId: recorded.conversationId },
-          { prompt: message.text },
+          { capability: "chat", conversationId },
+          { prompt: texts.join("\n") },
         );
 
-  const feishuMessageId = await send(message.chatId, text);
-  await store.recordReply(recorded.conversationId, { text, feishuMessageId });
+  const feishuMessageId = await send(chatId, text);
+  await store.recordReply(conversationId, { text, feishuMessageId });
+}
+
+/** Handles one message end to end without batching; the server records and batches instead. */
+export async function replyToPrivateMessage(
+  message: IncomingMessage,
+  deps: ReplyDeps,
+): Promise<void> {
+  const recorded = await recordPrivateMessage(message, deps);
+  if (recorded) await replyToPrivateMessages(message.chatId, [recorded], deps);
 }
