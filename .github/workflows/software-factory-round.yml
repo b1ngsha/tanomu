@@ -86,8 +86,17 @@ jobs:
           PWD=$(pwd -P)
           export PWD
           prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt implement "$ISSUE")
-          timeout 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
-            > "$RUNNER_TEMP/implementation.jsonl" 2> "$RUNNER_TEMP/implementation.stderr"
+          # Raw events and stderr stay on the runner; only the allowlisted summary is printed.
+          started=$(date +%s)
+          status=0
+          timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
+            > "$RUNNER_TEMP/implementation.jsonl" 2> "$RUNNER_TEMP/implementation.stderr" || status=$?
+          python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/implementation.jsonl" \
+            "$status" "$(($(date +%s) - started))" "$started" || echo '::warning::opencode-summary-failed'
+          if [ "$status" -ne 0 ]; then
+            echo "::error::opencode-exit-$status"
+            exit "$status"
+          fi
           python3 -I ../trusted/.github/software-factory/control.py events "$RUNNER_TEMP/implementation.jsonl"
       - name: Validate and export patch
         working-directory: candidate
@@ -287,8 +296,16 @@ jobs:
           export PWD
           mkdir "$RUNNER_TEMP/feedback"
           prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt review "$ISSUE")
-          timeout 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
-            > "$RUNNER_TEMP/review.jsonl" 2> "$RUNNER_TEMP/review.stderr"
+          started=$(date +%s)
+          status=0
+          timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
+            > "$RUNNER_TEMP/review.jsonl" 2> "$RUNNER_TEMP/review.stderr" || status=$?
+          python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/review.jsonl" \
+            "$status" "$(($(date +%s) - started))" "$started" || echo '::warning::opencode-summary-failed'
+          if [ "$status" -ne 0 ]; then
+            echo "::error::opencode-exit-$status"
+            exit "$status"
+          fi
           verdict=$(python3 -I ../trusted/.github/software-factory/control.py review "$RUNNER_TEMP/review.jsonl")
           python3 -I ../trusted/.github/software-factory/control.py scan "$REVIEW_OUTPUT"
           printf 'verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"

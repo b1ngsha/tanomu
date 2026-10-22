@@ -594,6 +594,136 @@ class DiagnoseTest(unittest.TestCase):
             control.diagnose(str(self.output), "rm -rf /", str(self.log))
 
 
+LEAKY_EVENTS = [
+    {"type": "step_start", "timestamp": 1_700_000_001_000},
+    {"type": "text", "part": {"text": SECRET}},
+    {"type": "tool_use", "part": {"tool": "read", "state": {
+        "status": "completed", "input": {"filePath": "/home/runner/.env"}, "output": SECRET}}},
+    {"type": "tool_use", "part": {"tool": "edit", "state": {
+        "status": "error", "error": f"permission denied {SECRET}"}}},
+    {"type": "tool_use", "part": {"tool": "edit", "state": {"status": "error"}}},
+    {"type": "tool_use", "part": {"tool": f"mcp_{SECRET}", "state": {"status": SECRET}}},
+    {"type": "step_finish", "timestamp": 1_700_000_031_000,
+     "part": {"reason": "tool-calls", "tokens": {"input": 10, "output": 5, "reasoning": "x"}}},
+    {"type": f"leak_{SECRET}", "error": {"name": SECRET}},
+]
+
+
+class SummaryTest(unittest.TestCase):
+    def setUp(self):
+        self.path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "events.jsonl"
+
+    def test_counts_only_allowlisted_categories(self):
+        self.path.write_text("\n".join(map(json.dumps, LEAKY_EVENTS)) + "\nnot json\n[1]\n")
+        result = control.summarize(str(self.path), "124", "600", "1700000000")
+        self.assertNotIn(SECRET, json.dumps(result))
+        self.assertNotIn("/home", json.dumps(result))
+        self.assertEqual(result["exit_status"], 124)
+        self.assertEqual((result["events"], result["malformed"]), (8, 2))
+        self.assertEqual(result["event_types"],
+                         {"step_start": 1, "text": 1, "tool_use": 4, "step_finish": 1, "other": 1})
+        self.assertEqual(result["tools"], {"read": {"completed": 1}, "edit": {"error": 2},
+                                           "other": {"other": 1}})
+        self.assertEqual(result["longest_same_tool_streak"], 2)
+        self.assertEqual(result["finish_reasons"], {"tool-calls": 1})
+        self.assertEqual(result["tokens"], {"input": 10, "output": 5, "reasoning": 0})
+        self.assertEqual(result["last_event_after_seconds"], 31)
+
+    def test_bounds_lines_and_tolerates_missing_file(self):
+        with mock.patch.object(control, "MAX_EVENT_LINE_BYTES", 64):
+            self.path.write_text('{"type":"text","part":{"text":"' + "x" * 300 + '"}}\n{"type":"text"}\n')
+            result = control.summarize(str(self.path), "0", "1", "0")
+        self.assertEqual((result["events"], result["oversized"]), (1, 1))
+        missing = control.summarize(str(self.path) + ".missing", "1", "2", "0")
+        self.assertEqual((missing["events"], missing["last_event_after_seconds"]), (0, None))
+
+    def test_unhashable_fields_count_as_other(self):
+        self.path.write_text(json.dumps({"type": ["tool_use"]}) + "\n" + json.dumps(
+            {"type": "tool_use", "part": {"tool": {"x": 1}, "state": {"status": [1]}}}) + "\n" + json.dumps(
+            {"type": "step_finish", "part": {"reason": {"x": 1}, "tokens": []}}) + "\n")
+        result = control.summarize(str(self.path), "0", "1", "0")
+        self.assertEqual(result["event_types"], {"other": 1, "tool_use": 1, "step_finish": 1})
+        self.assertEqual(result["tools"], {"other": {"other": 1}})
+        self.assertEqual(result["finish_reasons"], {"other": 1})
+
+    def test_total_bytes_cap_covers_unterminated_line(self):
+        with mock.patch.object(control, "MAX_EVENT_LINE_BYTES", 64), \
+                mock.patch.object(control, "MAX_EVENT_BYTES", 1000):
+            self.path.write_text('{"type":"text"}\n' + "x" * 100_000)
+            result = control.summarize(str(self.path), "0", "1", "0")
+        self.assertEqual((result["events"], result["oversized"], result["truncated"]), (1, 1, True))
+
+    def test_rejects_non_numeric_inputs(self):
+        self.path.write_text("")
+        for args in (("x", "1", "0"), ("1", "-1", "0"), ("1", "1", "0;rm")):
+            with self.subTest(args=args), self.assertRaisesRegex(ValueError, "^invalid-summary-input$"):
+                control.summarize(str(self.path), *args)
+
+
+class RunnerStepTest(unittest.TestCase):
+    """Runs the real OpenCode step scripts against stub `opencode` and `timeout` binaries."""
+
+    def run_step(self, job, opencode):
+        directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        (directory / "trusted").symlink_to(CONTROL.parents[2])
+        (directory / "candidate").mkdir()
+        bin_dir = directory / "bin"
+        bin_dir.mkdir()
+        # A real deadline shortened to one second; exit 124 mirrors coreutils timeout.
+        (bin_dir / "timeout").write_text(
+            f"#!{sys.executable}\nimport subprocess, sys\nargs = sys.argv[1:]\n"
+            "while args[0].startswith('-'): args.pop(0)\n"
+            "try: sys.exit(subprocess.run(args[1:], timeout=1).returncode)\n"
+            "except subprocess.TimeoutExpired: sys.exit(124)\n")
+        (bin_dir / "opencode").write_text(f"#!/bin/sh\n{opencode}\n")
+        for stub in bin_dir.iterdir():
+            stub.chmod(0o755)
+        auth = directory / "auth.json"
+        auth.write_text(json.dumps({"key": SECRET}))
+        (directory / "temp").mkdir()
+        step = next(step for step in WorkflowContractTest.load("software-factory-round.yml")["jobs"][job]["steps"]
+                    if "opencode run" in step.get("run", ""))
+        env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "MODEL": control.MODEL, "ISSUE": "6",
+               "RUNNER_TEMP": str(directory / "temp"), "FACTORY_AUTH_FILE": str(auth),
+               "GITHUB_OUTPUT": str(directory / "output"), "GITHUB_STEP_SUMMARY": str(directory / "summary"),
+               "REVIEW_OUTPUT": str(directory / "temp/feedback/review.json")}
+        result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=directory / "candidate", env=env,
+                                capture_output=True, text=True, timeout=30)
+        return result, (directory / "summary").read_text() if (directory / "summary").exists() else ""
+
+    def stub_events(self, *events):
+        return "\n".join(f"echo '{json.dumps(event)}'" for event in events)
+
+    def test_timeout_is_summarized_and_preserved_without_leaking(self):
+        leaky = [event for event in LEAKY_EVENTS if "'" not in json.dumps(event)]
+        for job in ("implement", "review"):
+            with self.subTest(job=job):
+                result, summary = self.run_step(job, self.stub_events(*leaky) + f"\necho {SECRET} >&2\nexec sleep 20")
+                self.assertEqual(result.returncode, 124, result.stderr)
+                self.assertIn('"exit_status": 124', result.stdout)
+                self.assertIn('"tool_use": 4', summary)
+                self.assertIn("::error::opencode-exit-124", result.stdout)
+                self.assertNotIn(SECRET, result.stdout + result.stderr + summary)
+
+    def test_nonzero_exit_is_preserved(self):
+        result, _ = self.run_step("implement", self.stub_events({"type": "step_start"}) + "\nexit 3")
+        self.assertEqual(result.returncode, 3)
+        self.assertIn('"exit_status": 3', result.stdout)
+
+    def test_success_still_validates_events(self):
+        result, _ = self.run_step("implement", self.stub_events({"type": "text"}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"exit_status": 0', result.stdout)
+        result, _ = self.run_step("implement", self.stub_events({"type": "error"}))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("::error::invalid-events", result.stderr)
+        review = {"verdict": "approve", "findings": []}
+        result, _ = self.run_step("review", self.stub_events(
+            {"type": "text", "part": {"text": json.dumps(review)}}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"exit_status": 0', result.stdout)
+
+
 class WorkflowContractTest(unittest.TestCase):
     """Wiring between jobs is not exercised by the unit tests above, so pin its invariants."""
 

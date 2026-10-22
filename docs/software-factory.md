@@ -94,6 +94,17 @@ stderr and auth files are never uploaded. Workspace paths are explicitly pinned
 with `PWD`; edit permission permits only the task's relative file paths, after a default deny rule. Shell,
 network tools, external directories and subagents are denied.
 
+Each OpenCode run (implement and review) keeps its 600-second limit, with a 15-second
+kill grace period. After success, timeout (exit 124) or any other nonzero exit, a trusted
+`opencode-summary` line is written to the step log and job summary. It has the exit
+status, elapsed seconds, event and tool-call counts by status, step finish reasons,
+token totals and seconds until the last event. The original exit status is then
+propagated, and nothing is retried. Only allowlisted names and numbers are printed.
+Text, tool inputs and outputs, error messages, paths and stderr are never printed.
+The summary shows what the run did, not why it stopped. For example, a tool error count
+cannot tell a permission denial from another failure, and a gap after the last event
+only means no further JSON was received.
+
 Successful handoff adds `ready-for-human`; failures after the gate add `needs-human`
 and remove `implementing`. Fixed reason codes include `claim-failed`, `round-failed`,
 `checks-exhausted`, `rework-exhausted`, `handoff-failed` and `cancelled`. A gate rejection changes no
