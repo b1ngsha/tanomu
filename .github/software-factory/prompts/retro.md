@@ -26,7 +26,7 @@ shell, network, credentials or external directories. You only propose; you canno
 There is no word, character or candidate-count limit. Output every supported candidate
 in full, including judgement calls, evidence, reasoning and the concrete proposal. Do
 not summarize, truncate or drop candidates to save space. The complete response is
-published verbatim; if it exceeds GitHub's comment budget, publication fails explicitly.
+published verbatim across as many GitHub comments as needed.
 
 Reply with only the candidates as GitHub markdown, most severe first. Each candidate
 names its category, cites the transcript file and event number (or other file) it

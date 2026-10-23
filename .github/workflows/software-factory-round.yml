@@ -363,6 +363,7 @@ jobs:
           verdict=$(python3 -I ../trusted/.github/software-factory/control.py review \
             "$RUNNER_TEMP/review-standards.jsonl" "$RUNNER_TEMP/review-spec.jsonl")
           python3 -I ../trusted/.github/software-factory/control.py scan-output "$REVIEW_OUTPUT"
+          python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/feedback/review.md"
           printf 'verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
       - name: Record sessions
         id: session
@@ -397,6 +398,6 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: feedback-${{ inputs.round }}
-          path: ${{ runner.temp }}/feedback/review.json
+          path: ${{ runner.temp }}/feedback
           retention-days: 3
           if-no-files-found: error

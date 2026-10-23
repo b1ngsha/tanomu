@@ -400,15 +400,51 @@ def retro(filename, output):
     Path(output).write_text(text)
 
 
-def retro_comment(filename, output):
-    scan(filename, public=True, limit=None)
-    text = Path(filename).read_text().replace("@", "@" + chr(0x200b))
-    body = ("## Factory retro — proposals only\n\n"
-            f"Run: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
-            f"{os.environ['GITHUB_RUN_ID']}\n\n"
-            "These suggestions have not been applied. Human review is required.\n\n" + text)
-    require(len(body.encode()) <= 60_000, "comment-too-large")
-    Path(output).write_text(body)
+def review_markdown(standards, spec):
+    sections = []
+    for axis, filename in (("Standards", standards), ("Spec", spec)):
+        text = reply(filename)
+        # A longer fence keeps model-supplied backticks inside the verbatim report.
+        fence = "`" * max(3, max((len(run) + 1 for run in re.findall(r"`+", text)), default=0))
+        sections.append(f"### {axis} — full response\n\n{fence}json\n{text}\n{fence}\n")
+    return "\n".join(sections)
+
+
+COMMENT_BYTES = 60_000
+
+
+def comments(directory, output):
+    """Publishable reports, split losslessly to fit GitHub's comment body limit."""
+    source, target = Path(directory), Path(output)
+    reports = [(f"Factory review — round {number}", source / f"feedback-{number}" / "review.md")
+               for number in range(1, 5)]
+    reports.append(("Factory retro — proposals only", source / "retro" / "retro.md"))
+    target.mkdir(parents=True, exist_ok=True)
+    index = 0
+    for title, path in reports:
+        if not path.is_file():
+            continue
+        scan(path, public=True, limit=None)
+        text = path.read_text().replace("@", "@" + chr(0x200b))
+        preface = (f"## {title}\n\n"
+                   f"Run: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+                   f"{os.environ['GITHUB_RUN_ID']}\n\n")
+        if path.name == "retro.md":
+            preface += "These suggestions have not been applied. Human review is required.\n\n"
+        # Reserve space for the part counter before splitting UTF-8 at character boundaries.
+        budget = COMMENT_BYTES - len(preface.encode()) - 80
+        require(budget > 0, "invalid-comment-header")
+        remaining, chunks = text.encode(), []
+        while remaining:
+            chunk = remaining[:budget].decode("utf-8", errors="ignore")
+            require(bool(chunk), "invalid-comment-budget")
+            chunks.append(chunk)
+            remaining = remaining[len(chunk.encode()):]
+        for part, chunk in enumerate(chunks, 1):
+            index += 1
+            body = f"{preface}Part {part}/{len(chunks)}\n\n{chunk}"
+            require(len(body.encode()) <= COMMENT_BYTES, "comment-too-large")
+            (target / f"{index:04d}.md").write_text(body)
 
 
 def configure(directory, mode):
@@ -472,10 +508,10 @@ if __name__ == "__main__":
             scan(*args, limit=None)
         elif command == "scan-output":
             scan(*args, limit=None)
+        elif command == "comments":
+            comments(*args)
         elif command == "transcript":
             transcript(*args)
-        elif command == "retro-comment":
-            retro_comment(*args)
         elif command == "retro":
             retro(*args)
         elif command == "configure":
@@ -496,6 +532,7 @@ if __name__ == "__main__":
             result = review(*args)
             output = Path(os.environ["REVIEW_OUTPUT"])
             output.write_text(json.dumps(result))
+            output.with_suffix(".md").write_text(review_markdown(*args))
             print(result["verdict"])
         else:
             raise ValueError("unknown-command")

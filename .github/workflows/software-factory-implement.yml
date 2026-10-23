@@ -329,6 +329,11 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          pattern: feedback-*
+          path: ${{ runner.temp }}/reports
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         if: needs.retro.result == 'success'
         with:
           name: retro
@@ -340,17 +345,19 @@ jobs:
           ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
         run: |
           set -euo pipefail
-          report="$RUNNER_TEMP/reports/retro/retro.md"
-          if [ ! -f "$report" ]; then exit 0; fi
-          python3 -I .github/software-factory/control.py retro-comment "$report" "$RUNNER_TEMP/comment.md"
+          python3 -I .github/software-factory/control.py comments "$RUNNER_TEMP/reports" "$RUNNER_TEMP/comments"
+          shopt -s nullglob
+          files=("$RUNNER_TEMP/comments/"*.md)
+          if [ "${#files[@]}" -eq 0 ]; then exit 0; fi
           branch=$(jq -r .branch ".github/software-factory/tasks/$ISSUE.json")
           pr=$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // empty')
-          file="$RUNNER_TEMP/comment.md"
+          for file in "${files[@]}"; do
             if [ -n "$pr" ]; then
               gh pr comment "$pr" --body-file "$file"
             else
               gh issue comment "$ISSUE" --body-file "$file"
             fi
+          done
   report:
     needs: [gate, claim, round1, round2, round3, round4, handoff]
     if: always() && needs.gate.result == 'success'
