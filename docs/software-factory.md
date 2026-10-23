@@ -204,9 +204,13 @@ posts blocking and advisory findings and the complete responses as new comments,
 never editing previous reports. It neutralizes mentions, scans credentials and
 splits losslessly at 60,000 UTF-8 bytes. Invisible first-line markers identify the
 head, report digest and part number. Only markers authored by `github-actions[bot]`
-count for deduplication: automatic entry skips a complete report for that head and
-rerunning the publisher fills missing parts of the same report. A moved head makes the report
-stale and prevents publication. Manual dispatch requests a fresh review.
+count for deduplication: automatic entry skips a complete report for that head.
+For a partial set it attempts to recover the original report from an earlier
+trusted final-review run's artifacts, verifies its PR, head and digest, then posts
+only missing parts. Expired or missing artifacts fall back to a fresh review.
+Rerunning the publisher also fills missing parts from its existing report. A moved
+head makes the report stale and prevents publication. Manual dispatch always
+requests a fresh review.
 
 This review is advisory: it submits no GitHub Review, changes no labels or PR
 state, starts no repair, and is not a required merge check. The maintainer still

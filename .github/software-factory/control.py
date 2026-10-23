@@ -1,5 +1,6 @@
 """Trusted factory gates. Run from the dispatch revision, never the candidate tree."""
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 
 ROOT = Path(__file__).resolve().parent
 MODEL = "opencode/deepseek-v4.1-flash-free"
@@ -625,6 +627,87 @@ def final_comments(directory, identity, current, output):
     return True
 
 
+def recovery_artifact(repo, run):
+    """Read only allowlisted regular files from a validated run; never extract archive paths."""
+    record = api(f"repos/{repo}/actions/runs/{run}")
+    workflow = api(f"repos/{repo}/actions/workflows/final-review.yml")
+    require(record["workflow_id"] == workflow["id"]
+            and record["path"] == ".github/workflows/final-review.yml"
+            and record["head_branch"] == "main"
+            and record["event"] in ("pull_request_target", "workflow_dispatch")
+            and record["repository"]["full_name"] == repo
+            and record["head_repository"]["full_name"] == repo, "untrusted-review-run")
+    artifacts = api(f"repos/{repo}/actions/runs/{run}/artifacts?name=final-review&per_page=100")["artifacts"]
+    matches = [item for item in artifacts if item["name"] == "final-review" and not item["expired"]]
+    require(len(matches) == 1, "missing-review-artifact")
+    archive = subprocess.check_output(["gh", "api", f"repos/{repo}/actions/artifacts/{matches[0]['id']}/zip"],
+                                      stderr=subprocess.DEVNULL)
+    with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+        members = zipped.infolist()
+        require({item.filename for item in members} == {"identity.json", "review.json", "review.md"}
+                and len(members) == 3, "invalid-review-archive")
+        # Do not extract paths; exclude symlinks and special files without capping full reports.
+        require(all((item.external_attr >> 16) & 0o170000 in (0, 0o100000) for item in members),
+                "invalid-review-archive")
+        return {item.filename: zipped.read(item).decode("utf-8") for item in members}
+
+
+def final_resume(number, event, directory, output):
+    """Recover an incomplete automatic publication; unavailable or invalid artifacts mean fresh review."""
+    require(event in ("pull_request_target", "workflow_dispatch"), "invalid-event")
+    if event != "pull_request_target":
+        return False
+    repo = os.environ["GITHUB_REPOSITORY"]
+    identity = Path(directory) / "identity.json"
+    current = json.loads(identity.read_text())
+    require(current["pr"] == int(number), "invalid-pr")
+    pages = json.loads(subprocess.check_output([
+        "gh", "api", "--paginate", "--slurp", f"repos/{repo}/issues/{number}/comments?per_page=100"]))
+    candidates = {}
+    for comment in (item for page in pages for item in page):
+        body, user = comment.get("body") or "", comment["user"]
+        marker = FINAL_MARKER.fullmatch(body.split("\n", 1)[0])
+        if not marker or user["login"] != "github-actions[bot]" or user["type"] != "Bot":
+            continue
+        run = re.search(rf"^Merge base [0-9a-f]{{40}}\. Run: https://github\.com/{re.escape(repo)}"
+                        r"/actions/runs/([1-9][0-9]*)$", body, re.M)
+        if marker[1] == current["head"] and run and run[1] != os.environ["GITHUB_RUN_ID"]:
+            candidates.setdefault((run[1], marker[2]), []).append((int(marker[3]), int(marker[4])))
+    for (run, digest), parts in reversed(list(candidates.items())):
+        totals, seen = {total for _, total in parts}, {part for part, _ in parts}
+        if len(totals) != 1 or max(seen) > parts[0][1] or len(seen) >= parts[0][1]:
+            continue
+        try:
+            files = recovery_artifact(repo, run)
+            reviewed = json.loads(files["identity.json"])
+            require(reviewed["pr"] == current["pr"] and reviewed["head"] == current["head"]
+                    and reviewed["run"] == run and SHA.fullmatch(reviewed["base"])
+                    and isinstance(reviewed["issues"], list)
+                    and all(type(issue) is int and issue > 0 for issue in reviewed["issues"]), "wrong-review-identity")
+            with tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                for name, text in files.items():
+                    (root / name).write_text(text)
+                    scan(root / name, public=True, limit=None)
+                (root / "current.json").write_text(json.dumps({"pr": current["pr"], "head": current["head"],
+                                                              "eligible": True, "posted": []}))
+                final_comments(root, root / "identity.json", root / "current.json", root / "comments")
+                bodies = sorted((root / "comments").glob("*.md"))
+                recreated = FINAL_MARKER.fullmatch(bodies[0].read_text().split("\n", 1)[0])
+                require(recreated[2] == digest and len(bodies) == parts[0][1], "wrong-review-digest")
+            target = Path(output)
+            target.mkdir(parents=True, exist_ok=True)
+            for name, text in files.items():
+                (target / name).write_text(text)
+            identity.write_text(files["identity.json"])
+            return True
+        except (ValueError, KeyError, TypeError, IndexError, OSError, RuntimeError, zipfile.BadZipFile,
+                subprocess.CalledProcessError):
+            # No untrusted response, archive contents or model text reaches logs.
+            continue
+    return False
+
+
 def configure(directory, mode):
     output = Path(directory).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -691,6 +774,8 @@ if __name__ == "__main__":
         elif command == "final-identify":
             for key, value in final_identify(*args).items():
                 print(f"{key}={value}")
+        elif command == "final-resume":
+            print(f"resumed={json.dumps(final_resume(*args))}")
         elif command == "final-head":
             final_head(*args)
         elif command == "pr-diff":
