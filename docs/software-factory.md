@@ -96,7 +96,10 @@ issue and the task's review requirements). Each axis returns
 `{"findings":[{"blocking":bool,"finding":str}]}`; `control.py review` validates both
 and writes `review.json` with the verdict, the blocking findings and the advisory
 ones, each labelled with its axis and never reranked. Only a blocking finding
-requests changes. Smells are always advisory. Both kinds of repair share one budget of four
+requests changes. Smells are always advisory. Each round also saves `review.md`
+with both axes' complete original JSON responses, preserving their order and all
+blocking and advisory findings. These full reports are published as comments after
+handoff, including earlier rounds that requested changes. Both kinds of repair share one budget of four
 rounds. Repair is not a blind retry: every round is checked again, and only the
 patch that passed checks and review is published.
 
@@ -158,11 +161,14 @@ session. It downloads the task, the `session-*`, `feedback-*` and `checked-*`
 artifacts (one download per pattern, each allowed to be missing) and a record of each
 job's outcome. It only proposes; it cannot edit, run shell, or write to GitHub. Its
 reply is validated, scanned and uploaded as the `retro` artifact. A separate
-`retro-publish` job, which holds no model secret, scans the retro again, neutralizes
-`@` mentions and posts it on the open draft PR for the task's branch, or on the issue
-when there is no PR. Retro is labelled "proposals only". Responses exceeding GitHub's
-60,000-byte comment budget fail explicitly; nothing is silently shortened. Nothing is
-applied: the maintainer decides which proposals to act on in an ordinary reviewed change.
+`retro-publish` job, which holds no model secret, rescans all full review reports and
+the retro, neutralizes `@` mentions and posts them on the open draft PR for the
+task's branch, or on the issue when there is no PR. Review reports are still published
+if retro fails. Retro is labelled "proposals only". Each report is split losslessly
+into numbered comments of at most 60,000 UTF-8 bytes when necessary; no model
+summary is substituted and no findings are dropped. The artifact scans for model
+reports have no size cap, while credential checks still reject the entire report. Nothing is applied: the
+maintainer decides which proposals to act on in an ordinary reviewed change.
 
 Successful handoff adds `ready-for-human`; failures after the gate add `needs-human`
 and remove `implementing`. Fixed reason codes include `claim-failed`, `round-failed`,
