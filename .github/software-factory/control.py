@@ -197,6 +197,137 @@ def validate_issue(number, claimed=False, captured=None, compare=False):
     return issue, authorizations[-1], blockers
 
 
+REVIEW_STATES = {"started", "passed", "timeout", "runner-error", "invalid-output"}
+CHECK_STAGES = {"format", "lint", "typecheck", "build", "test"}
+GATE_REASONS = {
+    "invalid-issue", "wrong-ref", "unsupported-model", "wrong-actor", "wrong-triggering-actor",
+    "not-open-issue", "wrong-author", "missing-authorization", "already-claimed",
+    "wrong-label-actor", "open-dependency", "branch-exists", "pr-exists",
+    "credential-pattern-in-artifact", "control-failed", "diagnostics-unavailable",
+}
+
+
+def safe_reason(error):
+    return str(error) if isinstance(error, ValueError) and str(error) in GATE_REASONS else "control-failed"
+
+
+def gate_attempt(number, directory):
+    reason = "passed"
+    try:
+        gate(number, directory)
+    except Exception as error:
+        reason = safe_reason(error)
+        raise
+    finally:
+        with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+            output.write(f"reason={reason}\n")
+        with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+            summary.write(f"Factory gate: {reason}. Inspect this run before authorizing work.\n")
+
+
+def status_comment(number, body):
+    """One bot-owned status comment per run, updated on rerun; never trust public markers."""
+    repo, run = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]
+    require(re.fullmatch(r"[0-9]+", run), "invalid-run")
+    marker = f"<!-- factory-status:{run} -->"
+    pages = json.loads(subprocess.check_output([
+        "gh", "api", "--paginate", "--slurp", f"repos/{repo}/issues/{number}/comments?per_page=100"]))
+    existing = next((item for page in pages for item in page
+                     if item.get("user", {}).get("login") == "github-actions[bot]"
+                     and item.get("body", "").splitlines()[:1] == [marker]), None)
+    path = (f"repos/{repo}/issues/comments/{existing['id']}" if existing
+            else f"repos/{repo}/issues/{number}/comments")
+    subprocess.run(["gh", "api", "--method", "PATCH" if existing else "POST", path,
+                    "--input", "-"], input=json.dumps({"body": marker + "\n" + body}),
+                   text=True, check=True, stdout=subprocess.DEVNULL)
+
+
+def gate_feedback(number, result, reason):
+    reason = reason if reason in GATE_REASONS else "diagnostics-unavailable"
+    if result == "success":
+        return
+    with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+        summary.write(f"Factory gate: {reason}. No task claimed by gate.\n")
+    repo = os.environ["GITHUB_REPOSITORY"]
+    owner = repo.split("/")[0]
+    # Rejection feedback is a separate, narrower write authorization, not execution authorization.
+    if not (os.environ["GITHUB_REF"] == "refs/heads/main"
+            and os.environ["GITHUB_ACTOR"] == owner
+            and os.environ["GITHUB_TRIGGERING_ACTOR"] == owner
+            and (os.environ.get("EVENT_NAME") == "workflow_dispatch"
+                 or (os.environ.get("EVENT_NAME") == "issues"
+                     and os.environ.get("LABEL_NAME") == "agent:implement"))):
+        return
+    if not re.fullmatch(r"[1-9][0-9]*", number):
+        return
+    issue = api(f"repos/{repo}/issues/{number}")
+    if "pull_request" in issue or issue["user"]["login"] != owner:
+        return
+    action = {
+        "open-dependency": "Complete the declared dependencies before deliberate authorization.",
+        "branch-exists": "Inspect the existing task branch and any PR before deliberate authorization.",
+        "pr-exists": "Inspect the existing task PR before deliberate authorization.",
+        "unsupported-model": f"Use the supported model {MODEL} when deliberately authorizing work.",
+    }.get(reason, "Inspect the gate checks and issue authorization before deliberately starting another run.")
+    status_comment(number, f"Factory gate rejected: {reason}. No issue labels changed.\n\n"
+                   f"Next action: {action}\n\nRun: https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}")
+
+
+def round_status(jobs):
+    """Only orchestration outcomes; never echo candidate outputs or model text."""
+    parts = []
+    for stage in ("implement", "verify", "review"):
+        result = jobs.get(stage, {}).get("result", "unknown")
+        result = result if result in {"success", "failure", "cancelled", "skipped"} else "unknown"
+        parts.append(f"{stage}={result}")
+    check = jobs.get("verify", {}).get("outputs", {}).get("failed_check")
+    if check in CHECK_STAGES:
+        parts.append(f"check-failed={check}")
+    outputs = jobs.get("review", {}).get("outputs", {})
+    for axis in ("standards", "spec"):
+        state = outputs.get(axis, "")
+        state = state if state in REVIEW_STATES else "unavailable"
+        if axis == "spec" and state == "unavailable" and outputs.get("standards") in {"timeout", "runner-error", "invalid-output"}:
+            state = "not-started"
+        parts.append(f"{axis}={state}")
+    return ", ".join(parts)
+
+
+def terminal_report(number, directory):
+    metadata(number)
+    jobs = json.loads(os.environ["OUTCOMES"])
+    state, reason = "needs-human", "round-failed"
+    if jobs["claim"]["result"] != "success":
+        reason = "claim-failed"
+    elif jobs["handoff"]["result"] == "success":
+        state, reason = "ready-for-human", "checks-and-review-passed"
+    elif jobs["handoff"]["result"] == "failure":
+        reason = "handoff-failed"
+    elif any(job["result"] == "cancelled" for job in jobs.values()):
+        reason = "cancelled"
+    elif jobs["round4"]["outputs"].get("outcome") in ("checks_failed", "request_changes"):
+        reason = {"checks_failed": "checks-exhausted", "request_changes": "rework-exhausted"}[jobs["round4"]["outputs"]["outcome"]]
+    lines = [f"Factory status: {state}. Reason: {reason}."]
+    for n in range(1, 5):
+        if jobs[f"round{n}"]["result"] == "skipped":
+            continue
+        try:
+            record = json.loads((Path(directory) / f"round-status-{n}" / "status.json").read_text())
+            detail = round_status(record)
+        except (OSError, ValueError, TypeError, AttributeError):
+            detail = "diagnostics-unavailable; inspect job steps"
+        lines.append(f"Round {n}: {detail}.")
+    lines.extend(["Next action: inspect failed job steps and available scanned session/feedback artifacts; "
+                  "resolve authorization and any existing branch/PR before deliberately authorizing work.",
+                  "Diagnostics and cancellation reporting are best effort; missing metadata is not proof a stage never started.",
+                  f"Run and artifacts: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"])
+    body = "\n\n".join(lines)
+    with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+        summary.write(body + "\n")
+    subprocess.run(["gh", "issue", "edit", number, "--remove-label", "implementing", "--add-label", state], check=True)
+    status_comment(number, body)
+
+
 def gate(number, directory):
     issue, event, blockers = validate_issue(number)
     body = issue.get("body") or ""
@@ -774,6 +905,29 @@ if __name__ == "__main__":
         command, *args = sys.argv[1:]
         if command == "gate":
             gate(*args)
+        elif command == "gate-attempt":
+            gate_attempt(*args)
+        elif command == "gate-feedback":
+            gate_feedback(*args)
+        elif command == "terminal-report":
+            terminal_report(*args)
+        elif command == "round-status":
+            jobs = json.loads(os.environ["OUTCOMES"])
+            output = Path(args[0])
+            output.parent.mkdir(parents=True, exist_ok=True)
+            # Preserve only minimal allowlisted metadata, not arbitrary step outputs.
+            safe = {stage: {"result": jobs[stage]["result"]} for stage in ("implement", "verify", "review")}
+            for stage, keys, allowed in (
+                ("review", ("standards", "spec"), REVIEW_STATES),
+                ("verify", ("failed_check",), CHECK_STAGES),
+            ):
+                safe[stage]["outputs"] = {key: value for key in keys
+                                          if (value := jobs[stage].get("outputs", {}).get(key)) in allowed}
+            output.write_text(json.dumps(safe))
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                summary.write(round_status(safe) + "\n")
+        elif command == "review-axis":
+            review_axis(*args)
         elif command == "revalidate":
             revalidate(*args)
         elif command == "record-claim":

@@ -175,8 +175,27 @@ maintainer decides which proposals to act on in an ordinary reviewed change.
 Successful handoff adds `ready-for-human`; failures after the gate add `needs-human`
 and remove `implementing`. Fixed reason codes include `claim-failed`, `round-failed`,
 `checks-exhausted`, `rework-exhausted`, `handoff-failed` and `cancelled`. A gate rejection changes no
-issue state. If GitHub cancels the entire run or its token/API is unavailable, the
-report job may not execute: inspect the run, remove a stale `implementing` label,
+issue state. Gate attempts write an allowlisted reason to the Actions summary. A separate
+reporter can explain rejected maintainer triggers even when gate fails: it requires main,
+both maintainer actors, an applicable event and a maintainer-owned issue. It upserts only
+its own bot status comment for that run, with a reason, next action and run link; public
+or unrelated events cannot authorize comments. Gate rejection never changes labels.
+
+Each round records minimal orchestration outcomes in a `round-status-N` artifact kept
+for three days, independently of candidate code and model credentials. Terminal status
+preserves successful implementation and verification, identifies the failed check when
+available, and distinguishes review axis timeout (124), runner error and invalid output.
+An axis stopped by Standards failure is `not-started`; absent metadata is `unavailable`,
+not proof that no events occurred. Review response validation runs before the next axis.
+The status links to the run and available scanned artifacts and requests human inspection,
+without guessing a provider/network root cause or starting retries. Status comments are
+updated by run ID, and only bot-authored markers count. Final PR review publication and
+its separate deduplication/resume markers are unchanged.
+
+Diagnostics are best effort. Checkout failure, absent outputs/artifacts, API failures or
+hard cancellation can prevent these reporters from completing. If GitHub cancels the
+entire run or its token/API is unavailable, the report job may not execute: inspect the
+run, remove a stale `implementing` label,
 and resolve any existing branch/PR before deliberately authorizing another run.
 Never blindly rerun a claimed or partially published task.
 

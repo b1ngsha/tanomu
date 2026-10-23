@@ -25,11 +25,14 @@ jobs:
       contents: read
       issues: read
       pull-requests: read
+    outputs:
+      reason: ${{ steps.validation.outputs.reason }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
       - name: Validate explicit maintainer authorization
+        id: validation
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
@@ -42,13 +45,38 @@ jobs:
             echo '::notice::Ignoring unrelated issue label'
             exit 0
           fi
-          python3 -I .github/software-factory/control.py gate "$ISSUE" "$RUNNER_TEMP/input"
+          python3 -I .github/software-factory/control.py gate-attempt "$ISSUE" "$RUNNER_TEMP/input"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: factory-input
           path: ${{ runner.temp }}/input
           retention-days: 3
           if-no-files-found: error
+  gate-feedback:
+    needs: gate
+    if: >-
+      always() && needs.gate.result != 'skipped' && github.ref == 'refs/heads/main' &&
+      github.actor == github.repository_owner && github.triggering_actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' || github.event.label.name == 'agent:implement')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Explain rejected gate without claiming the task
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
+          EVENT_NAME: ${{ github.event_name }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          RESULT: ${{ needs.gate.result }}
+          REASON: ${{ needs.gate.outputs.reason }}
+        run: python3 -I .github/software-factory/control.py gate-feedback "$ISSUE" "$RESULT" "$REASON"
   claim:
     needs: gate
     runs-on: ubuntu-latest
@@ -393,32 +421,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      contents: read
       issues: write
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          pattern: round-status-*
+          path: ${{ runner.temp }}/status
       - name: Publish fixed status
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
-          HANDOFF: ${{ needs.handoff.result }}
-          CLAIM: ${{ needs.claim.result }}
-          ROUND1: ${{ needs.round1.result }}
-          ROUND2: ${{ needs.round2.result }}
-          ROUND3: ${{ needs.round3.result }}
-          ROUND4: ${{ needs.round4.result }}
-          FINAL_OUTCOME: ${{ needs.round4.outputs.outcome }}
-        run: |
-          set -euo pipefail
-          state=needs-human
-          reason=round-failed
-          if [ "$CLAIM" != success ]; then reason=claim-failed
-          elif [ "$HANDOFF" = success ]; then state=ready-for-human; reason=checks-and-review-passed
-          elif [ "$HANDOFF" = failure ]; then reason=handoff-failed
-          elif [ "$FINAL_OUTCOME" = checks_failed ]; then reason=checks-exhausted
-          elif [ "$FINAL_OUTCOME" = request_changes ]; then reason=rework-exhausted
-          elif [[ " $ROUND1 $ROUND2 $ROUND3 $ROUND4 " = *' cancelled '* ]]; then reason=cancelled
-          fi
-          gh issue edit "$ISSUE" --remove-label implementing --add-label "$state"
-          printf 'Factory status: %s. Reason: %s. Run: https://github.com/%s/actions/runs/%s\n' \
-            "$state" "$reason" "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID" > "$RUNNER_TEMP/report.md"
-          gh issue comment "$ISSUE" --body-file "$RUNNER_TEMP/report.md"
+          OUTCOMES: ${{ toJSON(needs) }}
+        run: python3 -I .github/software-factory/control.py terminal-report "$ISSUE" "$RUNNER_TEMP/status"

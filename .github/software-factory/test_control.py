@@ -422,6 +422,86 @@ class GateTest(TaskDirectory):
         self.assertRejects("pr-exists", self.gate)
 
 
+class FeedbackTest(GateTest):
+    def setUp(self):
+        super().setUp()
+        self.enterContext(mock.patch.dict(os.environ, {
+            "EVENT_NAME": "issues", "LABEL_NAME": "agent:implement",
+            "GITHUB_STEP_SUMMARY": str(self.root / "summary"),
+            "GITHUB_OUTPUT": str(self.root / "output"),
+        }))
+
+    def test_gate_attempt_records_safe_rejection(self):
+        for error, expected in ((ValueError("open-dependency"), "open-dependency"),
+                                (RuntimeError(SECRET), "control-failed")):
+            with mock.patch.object(control, "gate", side_effect=error):
+                with self.assertRaises(type(error)):
+                    control.gate_attempt("1", str(self.out))
+            self.assertIn(expected, (self.root / "summary").read_text())
+            self.assertNotIn(SECRET, (self.root / "summary").read_text())
+
+    def test_trusted_rejection_comments_without_changing_labels(self):
+        with mock.patch.object(control, "status_comment") as comment:
+            control.gate_feedback("1", "failure", "open-dependency")
+        body = comment.call_args.args[1]
+        self.assertIn("open-dependency", body)
+        self.assertIn("Complete the declared dependencies", body)
+        self.assertIn("actions/runs/123", body)
+        self.assertEqual(self.calls, [f"repos/{REPO}/issues/1"])
+
+    def test_unknown_reason_does_not_reach_comment(self):
+        with mock.patch.object(control, "status_comment") as comment:
+            control.gate_feedback("1", "failure", SECRET)
+        self.assertIn("diagnostics-unavailable", comment.call_args.args[1])
+        self.assertNotIn(SECRET, comment.call_args.args[1])
+
+    def test_public_unrelated_and_wrong_ref_events_cannot_write(self):
+        for patch in ({"GITHUB_ACTOR": "intruder"}, {"GITHUB_TRIGGERING_ACTOR": "intruder"},
+                      {"GITHUB_REF": "refs/heads/feature"}, {"LABEL_NAME": "ready-for-agent"},
+                      {"EVENT_NAME": "pull_request"}):
+            with self.subTest(patch=patch), mock.patch.dict(os.environ, patch), mock.patch.object(control, "status_comment") as comment:
+                control.gate_feedback("1", "failure", "open-dependency")
+                comment.assert_not_called()
+        self.issue["user"]["login"] = "intruder"
+        with mock.patch.object(control, "status_comment") as comment:
+            control.gate_feedback("1", "failure", "wrong-author")
+            comment.assert_not_called()
+
+    def test_status_comment_updates_only_bot_marker(self):
+        marker = "<!-- factory-status:123 -->"
+        public = {"id": 5, "user": {"login": "intruder"}, "body": marker}
+        bot = {"id": 6, "user": {"login": "github-actions[bot]"}, "body": marker + "\nold"}
+        for pages, method, path in (([[public]], "POST", f"issues/1/comments"),
+                                    ([[public, bot]], "PATCH", "issues/comments/6")):
+            with mock.patch.object(control.subprocess, "check_output", return_value=json.dumps(pages).encode()), mock.patch.object(control.subprocess, "run") as run:
+                control.status_comment("1", "new")
+            self.assertEqual(run.call_args.args[0][3:5], [method, f"repos/{REPO}/{path}"])
+            self.assertEqual(json.loads(run.call_args.kwargs["input"])["body"], marker + "\nnew")
+
+    def test_terminal_report_missing_artifacts_and_safe_check_detail(self):
+        jobs = {name: {"result": "skipped", "outputs": {}} for name in
+                ("claim", "handoff", "round1", "round2", "round3", "round4")}
+        jobs["claim"]["result"] = "success"
+        jobs["round1"]["result"] = "failure"
+        with mock.patch.dict(os.environ, {"OUTCOMES": json.dumps(jobs)}), mock.patch.object(control.subprocess, "run"), mock.patch.object(control, "status_comment") as comment:
+            control.terminal_report("1", str(self.out))
+        self.assertIn("diagnostics-unavailable", comment.call_args.args[1])
+        self.assertIn("Reason: round-failed", comment.call_args.args[1])
+        self.assertIn("check-failed=lint", control.round_status({"verify": {"outputs": {"failed_check": "lint"}}}))
+        self.assertNotIn(SECRET, control.round_status({"verify": {"outputs": {"failed_check": SECRET}}}))
+
+    def test_round_states_preserve_success_and_explicit_not_started(self):
+        jobs = {"implement": {"result": "success"}, "verify": {"result": "success"},
+                "review": {"result": "failure", "outputs": {"standards": "timeout"}}}
+        text = control.round_status(jobs)
+        for part in ("implement=success", "verify=success", "standards=timeout", "spec=not-started"):
+            self.assertIn(part, text)
+        jobs["review"]["outputs"] = {"standards": SECRET}
+        text = control.round_status(jobs)
+        self.assertIn("spec=unavailable", text)
+        self.assertNotIn(SECRET, text)
+
+
 class ClaimedTest(GateTest):
     def setUp(self):
         super().setUp()
@@ -1170,10 +1250,16 @@ class RunnerStepTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 124, result.stderr)
                 self.assertIn('"exit_status": 124', result.stdout)
                 self.assertIn('"tool_use": 4', summary)
-                self.assertIn("::error::opencode-exit-124", result.stdout)
+                self.assertIn("::error::standards-timeout" if job == "review" else "::error::opencode-exit-124", result.stdout)
                 self.assertNotIn(SECRET, result.stdout + result.stderr + summary)
                 # A timed-out review stops before the second axis spends its budget.
                 self.assertEqual(len(self.calls("opencode")), 1)
+
+    def test_review_runner_error_stops_spec_and_retains_exit(self):
+        result, _ = self.run_step("review", "exit 3")
+        self.assertEqual(result.returncode, 3)
+        self.assertEqual((self.directory / "output").read_text(), "standards=started\nstandards=runner-error\n")
+        self.assertEqual(len(self.calls("opencode")), 1)
 
     def test_nonzero_exit_is_preserved(self):
         result, _ = self.run_step("implement", self.stub_events({"type": "step_start"}) + "\nexit 3")
@@ -1202,7 +1288,7 @@ class RunnerStepTest(unittest.TestCase):
                 self.assertIn(axes[axis]["brief"], session[-1])
                 self.assertNotIn(axes[prompt]["brief"], session[-1])
                 self.assertTrue((self.directory / f"temp/review-{axis}.jsonl").is_file())
-        self.assertEqual((self.directory / "output").read_text(), "verdict=approve\n")
+        self.assertEqual((self.directory / "output").read_text(), "standards=started\nstandards=passed\nspec=started\nspec=passed\nverdict=approve\n")
         self.assertEqual(json.loads((self.directory / "temp/feedback/review.json").read_text())["advisory"],
                          ["Standards: src/a.ts: possible Mysterious Name", "Spec: src/a.ts: possible Mysterious Name"])
         raw = json.dumps({"findings": [{"blocking": False, "finding": "src/a.ts: possible Mysterious Name"}]})
@@ -1221,7 +1307,7 @@ class RunnerStepTest(unittest.TestCase):
         result, _ = self.run_step("review", self.reply({"verdict": "approve", "findings": []}))
         self.assertEqual(result.returncode, 1)
         self.assertIn("::error::invalid-review", result.stderr)
-        self.assertFalse((self.directory / "output").exists())
+        self.assertEqual((self.directory / "output").read_text(), "standards=started\nstandards=invalid-output\n")
 
     def test_retro_writes_scanned_proposals(self):
         result, _ = self.run_step("retro", self.stub_events({"type": "text", "part": {"text": "Smooth run."}}))
@@ -1363,11 +1449,23 @@ class WorkflowContractTest(unittest.TestCase):
 
     def test_issue_validation_steps_receive_model(self):
         validating = [step for step in self.steps()
-                      if re.search(r"control\.py (gate|revalidate|record-claim|claimed) ", step.get("run", ""))]
+                      if re.search(r"control\.py (gate-attempt|revalidate|record-claim|claimed) ", step.get("run", ""))]
         self.assertEqual(len(validating), 4)
         for step in validating:
             with self.subTest(step=step.get("name")):
                 self.assertIn("MODEL", step.get("env", {}))
+
+    def test_failure_diagnostics_do_not_require_success_or_model_artifacts(self):
+        jobs = self.implement["jobs"]
+        self.assertIn("always()", jobs["gate-feedback"]["if"])
+        self.assertNotIn("== 'success'", jobs["gate-feedback"]["if"])
+        self.assertIn("github.actor == github.repository_owner", jobs["gate-feedback"]["if"])
+        self.assertEqual(jobs["gate"]["outputs"]["reason"], "${{ steps.validation.outputs.reason }}")
+        diagnostics = self.round["jobs"]["diagnostics"]
+        self.assertEqual(diagnostics["if"], "always()")
+        self.assertNotIn("secrets", str(diagnostics))
+        self.assertNotIn("download-artifact", str(diagnostics))
+        self.assertIn("inputs.base", str(diagnostics))
 
     def test_repairable_outcomes_reach_every_later_round(self):
         jobs = self.implement["jobs"]
@@ -1380,7 +1478,7 @@ class WorkflowContractTest(unittest.TestCase):
                     self.assertIn(f"needs.{previous}.outputs.outcome == '{outcome}'", jobs[current]["if"])
         for job in ("handoff", "report"):
             self.assertLessEqual(set(rounds), set(jobs[job]["needs"]))
-        self.assertIn("needs.round4.outputs.outcome", str(jobs["report"]))
+        self.assertIn("toJSON(needs)", str(jobs["report"]))
 
     def test_checked_patch_is_uploaded_before_candidate_code_runs(self):
         steps = self.round["jobs"]["verify"]["steps"]
