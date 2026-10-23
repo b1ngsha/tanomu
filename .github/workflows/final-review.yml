@@ -1,0 +1,234 @@
+name: Final PR review
+on:
+  # Runs this workflow and control.py from main; the PR head is only ever read as data.
+  pull_request_target:
+    branches: [main]
+    types: [opened, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number to review again
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  group: final-review-${{ github.event.pull_request.number || inputs.pr }}
+  cancel-in-progress: false
+jobs:
+  identify:
+    if: >-
+      github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository ||
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+      pull-requests: read
+    outputs:
+      pr: ${{ steps.identify.outputs.pr }}
+      head: ${{ steps.identify.outputs.head }}
+      base: ${{ steps.identify.outputs.base }}
+      skip: ${{ steps.identify.outputs.skip }}
+      spec: ${{ steps.identify.outputs.spec }}
+      resumed: ${{ steps.resume.outputs.resumed }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: identify
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+          EVENT: ${{ github.event_name }}
+        run: python3 -I .github/software-factory/control.py final-identify "$PR" "$EVENT" "$RUNNER_TEMP/final-input" >> "$GITHUB_OUTPUT"
+      - id: resume
+        if: steps.identify.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.identify.outputs.pr }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          python3 -I .github/software-factory/control.py final-resume "$PR" "$EVENT" \
+            "$RUNNER_TEMP/final-input" "$RUNNER_TEMP/final-review" >> "$GITHUB_OUTPUT"
+      - if: steps.identify.outputs.skip != 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: final-input
+          path: ${{ runner.temp }}/final-input
+          retention-days: 3
+          if-no-files-found: error
+      - if: steps.resume.outputs.resumed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: final-review
+          path: |
+            ${{ runner.temp }}/final-review/review.json
+            ${{ runner.temp }}/final-review/review.md
+            ${{ runner.temp }}/final-review/identity.json
+          retention-days: 3
+          if-no-files-found: error
+  review:
+    needs: identify
+    if: needs.identify.outputs.skip != 'true' && needs.identify.outputs.resumed != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      # --standalone alone still loads and runs the workspace's opencode.json, plugins, AGENTS.md
+      # and .claude skills, all of which the PR controls.
+      OPENCODE_CONFIG_PROJECT_DISABLE: "1"
+      OPENCODE_DISABLE_CLAUDE_CODE: "1"
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ needs.identify.outputs.head }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: final-input
+          path: ${{ runner.temp }}/final-input
+      - name: Stage PR diff and issues as data
+        working-directory: candidate
+        env:
+          HEAD: ${{ needs.identify.outputs.head }}
+          BASE: ${{ needs.identify.outputs.base }}
+        run: |
+          set -euo pipefail
+          # The PR must not choose where trusted input lands.
+          if [ -e .factory-input ] || [ -L .factory-input ]; then echo '::error::factory-input-exists'; exit 1; fi
+          python3 -I ../trusted/.github/software-factory/control.py pr-diff "$HEAD" "$BASE"
+          # A PR symlink could aim the read tool at the model key; the patch still shows it.
+          find . -path ./.git -prune -o -type l -exec rm -f -- {} +
+          cp -- "$RUNNER_TEMP"/final-input/* .factory-input/
+      - name: Install pinned runner
+        run: npm install --global @opencode/cli@2.1.0 --no-audit --no-fund && opencode --version | grep -Fx 'opencode v2.1.0'
+      - name: Configure fresh read-only runner
+        env:
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+        run: python3 -I trusted/.github/software-factory/control.py configure "$RUNNER_TEMP/model" review
+      - name: Review the pull request
+        working-directory: candidate
+        env:
+          MODEL: opencode/deepseek-v4.1-flash-free
+          HEAD: ${{ needs.identify.outputs.head }}
+          BASE: ${{ needs.identify.outputs.base }}
+          SPEC: ${{ needs.identify.outputs.spec }}
+          REVIEW_OUTPUT: ${{ runner.temp }}/final-review/review.json
+        run: |
+          set -euo pipefail
+          PWD=$(pwd -P)
+          export PWD
+          mkdir "$RUNNER_TEMP/final-review"
+          axes=(standards)
+          if [ "$SPEC" = true ]; then axes+=(spec); fi
+          files=()
+          for axis in "${axes[@]}"; do
+            prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt "final-$axis" "$BASE" "$HEAD")
+            started=$(date +%s)
+            status=0
+            timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
+              > "$RUNNER_TEMP/final-$axis.jsonl" 2> "$RUNNER_TEMP/final-$axis.stderr" || status=$?
+            python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/final-$axis.jsonl" \
+              "$status" "$(($(date +%s) - started))" "$started" | tee "$RUNNER_TEMP/final-$axis-summary.txt" || echo '::warning::opencode-summary-failed'
+            if [ "$status" -ne 0 ]; then
+              echo "::error::opencode-exit-$status"
+              exit "$status"
+            fi
+            files+=("$RUNNER_TEMP/final-$axis.jsonl")
+          done
+          # Advisory only: the verdict decides nothing here.
+          python3 -I ../trusted/.github/software-factory/control.py review "${files[@]}" > /dev/null
+          python3 -I ../trusted/.github/software-factory/control.py scan-output "$REVIEW_OUTPUT"
+          python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/final-review/review.md"
+          cp -- "$RUNNER_TEMP/final-input/identity.json" "$RUNNER_TEMP/final-review/identity.json"
+          python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/final-review/identity.json"
+      - name: Record sessions
+        id: session
+        if: always()
+        continue-on-error: true
+        env:
+          SPEC: ${{ needs.identify.outputs.spec }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/session"
+          axes=(standards)
+          if [ "$SPEC" = true ]; then axes+=(spec); fi
+          for axis in "${axes[@]}"; do
+            python3 -I trusted/.github/software-factory/control.py transcript \
+              "$RUNNER_TEMP/final-$axis.jsonl" "$RUNNER_TEMP/session/final-$axis.md"
+            if [ -f "$RUNNER_TEMP/final-$axis-summary.txt" ]; then
+              python3 -I trusted/.github/software-factory/control.py scan-session "$RUNNER_TEMP/final-$axis-summary.txt"
+              cp "$RUNNER_TEMP/final-$axis-summary.txt" "$RUNNER_TEMP/session/final-$axis-summary.txt"
+            fi
+            python3 -I trusted/.github/software-factory/control.py scan-session "$RUNNER_TEMP/session/final-$axis.md"
+          done
+      - if: always() && steps.session.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-final-review
+          path: |
+            ${{ runner.temp }}/session/final-standards.md
+            ${{ runner.temp }}/session/final-standards-summary.txt
+            ${{ runner.temp }}/session/final-spec.md
+            ${{ runner.temp }}/session/final-spec-summary.txt
+          retention-days: 3
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: final-review
+          path: |
+            ${{ runner.temp }}/final-review/review.json
+            ${{ runner.temp }}/final-review/review.md
+            ${{ runner.temp }}/final-review/identity.json
+          retention-days: 3
+          if-no-files-found: error
+  publish:
+    needs: [identify, review]
+    if: >-
+      always() && !cancelled() && needs.identify.result == 'success' && needs.identify.outputs.skip != 'true' &&
+      (needs.review.result == 'success' || needs.identify.outputs.resumed == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: final-input
+          path: ${{ runner.temp }}/input
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: final-review
+          path: ${{ runner.temp }}/review
+      - name: Comment on the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PR: ${{ needs.identify.outputs.pr }}
+        run: |
+          set -euo pipefail
+          python3 -I .github/software-factory/control.py final-head "$PR" "$RUNNER_TEMP/current.json"
+          # Skips a moved head and the parts of this report that are already posted.
+          python3 -I .github/software-factory/control.py final-comments "$RUNNER_TEMP/review" \
+            "$RUNNER_TEMP/input/identity.json" "$RUNNER_TEMP/current.json" "$RUNNER_TEMP/comments"
+          shopt -s nullglob
+          for file in "$RUNNER_TEMP/comments/"*.md; do
+            gh pr comment "$PR" --body-file "$file"
+          done

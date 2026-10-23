@@ -1107,7 +1107,8 @@ class RunnerStepTest(unittest.TestCase):
             "retro": ("software-factory-implement.yml", "retro"),
             "publish": ("software-factory-implement.yml", "retro-publish")}
 
-    def run_step(self, job, opencode="exit 0", gh="exit 0", select="opencode run", env=None, files=None):
+    def run_step(self, job, opencode="exit 0", gh="exit 0", select="opencode run", env=None, files=None,
+                 setup=None):
         workflow, name = self.jobs[job]
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.directory = directory
@@ -1137,6 +1138,8 @@ class RunnerStepTest(unittest.TestCase):
         for filename, content in (files or {}).items():
             (directory / filename).parent.mkdir(parents=True, exist_ok=True)
             (directory / filename).write_text(content)
+        if setup:
+            setup(directory)
         steps = WorkflowContractTest.load(workflow)["jobs"][name]["steps"]
         step = next(step for step in steps if select in step.get("run", "") or select == step.get("name"))
         cwd = directory / step["working-directory"] if "working-directory" in step else directory
