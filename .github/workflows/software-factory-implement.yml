@@ -43,7 +43,6 @@ jobs:
             exit 0
           fi
           python3 -I .github/software-factory/control.py gate "$ISSUE" "$RUNNER_TEMP/input"
-          cp ".github/software-factory/tasks/$ISSUE.json" "$RUNNER_TEMP/input/task.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: factory-input
@@ -62,12 +61,16 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: factory-input
+          path: ${{ runner.temp }}/input
       - name: Revalidate before claiming
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
           MODEL: ${{ github.event_name == 'issues' && 'opencode/deepseek-v4.1-flash-free' || inputs.model }}
-        run: python3 -I .github/software-factory/control.py gate "$ISSUE" "$RUNNER_TEMP/claim"
+        run: python3 -I .github/software-factory/control.py revalidate "$ISSUE" "$RUNNER_TEMP/input"
       - name: Consume authorization
         env:
           GH_TOKEN: ${{ github.token }}
@@ -77,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           gh issue edit "$ISSUE" --add-label implementing --remove-label agent:implement
-          python3 -I .github/software-factory/control.py record-claim "$ISSUE" "$RUNNER_TEMP/claim.json"
+          python3 -I .github/software-factory/control.py record-claim "$ISSUE" "$RUNNER_TEMP/input" "$RUNNER_TEMP/claim.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: factory-claim
@@ -151,7 +154,17 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
+          path: candidate
           persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: factory-input
+          path: ${{ runner.temp }}/input
       - id: approved
         env:
           ROUND1: ${{ needs.round1.outputs.outcome }}
@@ -170,6 +183,7 @@ jobs:
           name: checked-${{ steps.approved.outputs.round }}
           path: ${{ runner.temp }}/patch
       - name: Validate and commit candidate
+        working-directory: candidate
         env:
           ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
           BASE: ${{ github.sha }}
@@ -177,10 +191,10 @@ jobs:
           set -euo pipefail
           git apply "$RUNNER_TEMP/patch/candidate.patch"
           git add -N .
-          python3 -I .github/software-factory/control.py scope "$ISSUE" "$BASE"
-          python3 -I .github/software-factory/control.py scan-public "$RUNNER_TEMP/patch/candidate.patch"
-          branch=$(jq -r .branch ".github/software-factory/tasks/$ISSUE.json")
-          title=$(jq -r .title ".github/software-factory/tasks/$ISSUE.json")
+          python3 -I ../trusted/.github/software-factory/control.py scope "$ISSUE" "$BASE"
+          python3 -I ../trusted/.github/software-factory/control.py scan-public "$RUNNER_TEMP/patch/candidate.patch"
+          branch=$(jq -r .branch "$RUNNER_TEMP/input/input.json")
+          title=$(jq -r .title "$RUNNER_TEMP/input/input.json")
           git switch -c "$branch"
           git add .
           git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
@@ -191,6 +205,7 @@ jobs:
           name: factory-claim
           path: ${{ runner.temp }}/claim
       - name: Push and open draft PR
+        working-directory: candidate
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -198,18 +213,17 @@ jobs:
           MODEL: ${{ github.event_name == 'issues' && 'opencode/deepseek-v4.1-flash-free' || inputs.model }}
         run: |
           set -euo pipefail
-          python3 -I .github/software-factory/control.py claimed "$ISSUE" "$RUNNER_TEMP/claim/claim.json"
+          python3 -I ../trusted/.github/software-factory/control.py claimed "$ISSUE" "$RUNNER_TEMP/input" "$RUNNER_TEMP/claim/claim.json"
           gh auth setup-git
           branch=$(git branch --show-current)
           git push --force-with-lease="refs/heads/$branch:" origin "HEAD:refs/heads/$branch"
-          title=$(jq -r .title ".github/software-factory/tasks/$ISSUE.json")
-          acceptance=$(jq -r .acceptance ".github/software-factory/tasks/$ISSUE.json")
+          title=$(jq -r .title "$RUNNER_TEMP/input/input.json")
           {
             printf 'Implements the approved specification for #%s. Refs #%s.\n\n' "$ISSUE" "$ISSUE"
             printf 'Evidence: format, lint, typecheck, admin build, database tests, scope checks and independent model review passed.\n\n'
             printf 'Run: https://github.com/%s/actions/runs/%s\n\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
             printf 'Merge Danger: human must mark Ready for review to trigger ordinary CI, inspect the diff, perform acceptance and decide whether to merge. Acceptance has not been performed.\n\n'
-            printf 'Acceptance: %s\n\n' "$acceptance"
+            printf 'Acceptance: follow the frozen issue specification attached to this run (factory-input/issue.md).\n\n'
             printf '🤖 Generated with [Claude Code](https://claude.com/claude-code)\n'
           } > "$RUNNER_TEMP/pr.md"
           gh pr create --draft --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/pr.md"
@@ -349,7 +363,7 @@ jobs:
           shopt -s nullglob
           files=("$RUNNER_TEMP/comments/"*.md)
           if [ "${#files[@]}" -eq 0 ]; then exit 0; fi
-          branch=$(jq -r .branch ".github/software-factory/tasks/$ISSUE.json")
+          branch="feat/$ISSUE-implement"
           pr=$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // empty')
           for file in "${files[@]}"; do
             if [ -n "$pr" ]; then

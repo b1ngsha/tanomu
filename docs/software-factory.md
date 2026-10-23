@@ -7,14 +7,14 @@ This repository is public, but the software factory treats repository text as un
 - `ready-for-agent` means that an issue is fully specified. It does not authorize execution.
 - `agent:implement` is the explicit execution label. Only the maintainer adds it after checking the issue, its dependencies, and its acceptance criteria.
 - External issues, comments, pull requests, and fork branches are not factory instructions. A maintainer must copy an accepted request into a maintainer-owned issue before it can enter the factory.
-- The first implementation workflow must verify the label actor, issue author, issue state, open dependencies, and a maintainer-approved body snapshot. It must write untrusted text to a file rather than interpolate it into a shell command.
+- The implementation workflow verifies the label actor, issue author, issue state and explicit `Blocked by #N` dependencies, then captures the issue body automatically for that run. It writes untrusted text to a file rather than interpolating it into a shell command.
 - The agent never receives production secrets, the `production` environment, a GitHub App token, or deployment access.
 
 ## Phased rollout
 
 The first phase is a manually dispatched, read-only smoke workflow. It uses a disposable, redacted fixture in the runner's temporary directory and writes only the Actions step summary as a repository-visible result. It does not check out tanomu, read an issue, write an issue or pull request, create a branch, call Feishu, or contact the production server.
 
-The smoke must be confirmed by the maintainer before a later pull request adds implementation, review, or rework workflows. Those workflows will be separate changes and will use a path allowlist, patch artifacts, independent review context, and human approval before merge.
+The smoke must be confirmed by the maintainer before a later pull request adds implementation, review, or rework workflows. Those workflows use patch artifacts, independent review context, and human approval before merge.
 
 ## Smoke gates
 
@@ -33,24 +33,24 @@ ready-for-agent + agent:implement -> implementing
   -> round: implement -> format + checks -> Standards review + Spec review
        check failure or blocking finding -> next round (four rounds in total)
   -> draft PR -> ready-for-human
-  -> needs-human (authorization, scope, credential or infrastructure failure, or budget exhausted)
+  -> needs-human (authorization, patch validation, credential or infrastructure failure, or budget exhausted)
   -> retro (read-only proposals) -> comment on the draft PR, or on the issue without one
 ```
 
-A task is keyed by issue number and has one concurrency group. The implementation and review runs are independent. The maintainer reviews the draft PR and CI evidence, stops production before real Feishu testing, sends three rapid Private Conversation messages, confirms one ordered merged reply, restores production, and decides whether to merge.
+A task is keyed by issue number and has one concurrency group. The implementation and review runs are independent. The maintainer reviews the draft PR and CI evidence, performs the issue's human acceptance and decides whether to merge. Local real Feishu testing must avoid a competing production listener; acceptance against production itself does not require stopping it.
 
 ## Implementation controls
 
-The trusted controls, task snapshots and prompts live in `.github/software-factory/`.
+The trusted controls and prompts live in `.github/software-factory/`.
 `control.py` runs from the dispatch revision, independently of the candidate tree.
 Run its regression suite with `python3 -I -m unittest discover -s .github/software-factory -p 'test_*.py'`.
-Task #6 permits only six core/server implementation and test files, with a 400-line
-limit. Updating the specification requires a reviewed task snapshot change.
 
-The prompts and workflows are task-independent. Each `tasks/N.json` supplies the
-commit/PR `title`, the `implement` and `review` requirements appended to the generic
-prompts, and the human `acceptance` steps listed in the draft PR. A new task needs
-only its snapshot; `control.py` rejects a snapshot missing any of these fields.
+The issue body is the sole specification for implementation and Spec review. Gate captures it automatically for all rounds and reviews; no per-issue JSON or policy file is required.
+Claim rejects a body changed since gate; later live edits do not change the run. Branch and Conventional Commit title are generated from the issue number.
+Native GitHub dependencies and explicit same-repository `Blocked by #N` references are checked before claim; ordinary references do not block execution.
+
+There is no task path allowlist: source, tests, docs, schema, new migrations, dependencies, environment declarations, `.env.example` and CI/deployment source may change.
+The 600 changed-line limit excludes `pnpm-lock.yaml` and `apps/server/drizzle/meta/**`. Source edits do not authorize production operations, secret provisioning, merges or deployment. Real credential files remain private.
 
 Review and retro follow skills vendored, unmodified, in `skills/` from one pinned
 upstream commit (see `skills/README.md`). The factory never fetches skills at run
@@ -75,24 +75,25 @@ Recheck this policy before changing models. The pinned CLI uses its tested legac
 
 ## Implementation runbook
 
-After both factory PRs are merged, the maintainer creates `agent:implement`,
-`implementing`, `ready-for-human` and `needs-human`, enables Actions to create PRs,
-and configures main protection and production approval. Review issue #6 and its
-snapshot, then add `agent:implement` while `ready-for-agent` is present. The label
+The maintainer creates `agent:implement`, `implementing`, `ready-for-human` and
+`needs-human`, enables Actions to create PRs, and configures main protection and
+production approval. Review the issue body, then add `agent:implement` while
+`ready-for-agent` is present. The label
 event starts **Software factory implement** on `main` with the free model above.
 Manual dispatch remains available for re-running with the same validation. There is
 no dry-run mode.
 
 The gate checks the maintainer actors, issue author, latest authorization label
-actor, body hash, dependencies and branch/PR uniqueness. Claim consumes the execution
+actor, explicit dependencies and branch/PR uniqueness. Claim checks the captured body
+and consumes the execution
 label. Each round generates a patch, then a fresh runner without model credentials
-applies `pnpm format`, rechecks scope, uploads that formatted patch, and only then
-runs lint, typecheck, admin build and database tests. A failing check produces
+installs candidate dependencies, applies `pnpm format`, rechecks the patch and
+uploads the formatted patch before running lint, typecheck, admin build and database tests. A failing check produces
 `checks.json` (the command and a bounded, ANSI-stripped output tail) for the next
 round. Passing checks lead to a read-only review along the two `code-review` axes,
 each in its own fresh OpenCode session so neither sees the other's conversation:
 Standards (documented repository standards plus the smell baseline) and Spec (the
-issue and the task's review requirements). Each axis returns
+captured issue body). Each axis returns
 `{"findings":[{"blocking":bool,"finding":str}]}`; `control.py review` validates both
 and writes `review.json` with the verdict, the blocking findings and the advisory
 ones, each labelled with its axis and never reranked. Only a blocking finding
@@ -103,12 +104,13 @@ handoff, including earlier rounds that requested changes. Both kinds of repair s
 rounds. Repair is not a blind retry: every round is checked again, and only the
 patch that passed checks and review is published.
 
-Authorization, scope, credential-scan, implementer-error and infrastructure failures
+Authorization, patch-validation, credential-scan, implementer-error and infrastructure failures
 are not repairable and stop the run, as does a repair round that leaves the patch
-unchanged. Candidate code runs in the verify job after the checked patch is uploaded;
-ordinary PR CI after Ready for review remains the authoritative check.
+unchanged. Candidate dependencies and checks run on the fresh verify runner without
+model credentials; ordinary PR CI remains authoritative. Handoff validates from a
+separate trusted checkout, never running candidate control scripts with its write token.
 
-Only a passing candidate is committed and pushed to a draft PR, using `Refs #6`.
+Only a passing candidate is committed and pushed to a draft PR, referencing its issue.
 GitHub-token-created PRs do not trigger CI automatically; marking the draft ready
 triggers ordinary CI through `ready_for_review`. Inspect that CI and the diff before
 real Feishu acceptance. The factory never claims real Feishu acceptance passed.
@@ -117,17 +119,16 @@ Patch, structured feedback, session transcript and retro artifacts expire after
 three days. Exact credential values and common credential patterns are checked
 before upload. Raw event files, stderr and auth files are never uploaded; complete event
 lines appear only inside the scanned transcript. Workspace
-paths are explicitly pinned with `PWD`; edit permission permits only the task's
-relative file paths, after a default deny rule. Network tools, external directories,
-subagents and the Skill tool are denied in every session.
+paths are pinned with `PWD`; implementation can edit repository files, with credential paths denied and `.env.example` allowed. External directories, subagents and the Skill tool remain denied.
+Implementation may use shell for dependency installation, migration generation and checks; review and retro have no shell or network tools.
 
 Shell is the one deliberate trust boundary. Only the implementation session gets
 `bash`, so it can run typecheck and single test files as it works. With shell the
 model can reach anything on that runner, including the trusted checkout and the model
-key, and could bypass the edit allowlist. So nothing that runner produces is trusted
+key. So nothing that runner produces is trusted
 beyond its patch: the patch is scanned before upload, and the verify job reapplies it
-on a fresh runner without model credentials and repeats the scope, file-type and
-line-limit checks before any candidate code runs. This is an accepted limitation, not
+on a fresh runner without model credentials and repeats the patch, file-type and
+line-limit checks before installing candidate dependencies and running checks. This is an accepted limitation, not
 a sandbox: running as the same user, the shell can still modify that runner's copy of
 the trusted scanner and write to the Actions environment, output and step summary
 files. Session uploads name only the exact files just scanned, which contains the

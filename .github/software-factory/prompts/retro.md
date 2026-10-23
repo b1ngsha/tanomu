@@ -13,7 +13,7 @@ The session to review is the whole run, recorded in .factory-input/run/:
 - feedback-N/: checks.json (the failing check's output tail) or review.json (the
   aggregated review findings) for round N.
 - checked-N/candidate.patch: the formatted candidate that round N checked.
-  .factory-input/issue.md and .factory-input/task.json are the task. The factory's
+  .factory-input/issue.md is the frozen issue specification. The factory's
   implementer and reviewer instructions are .github/software-factory/prompts/, and its
   orchestration is .github/workflows/software-factory-*.yml and
   .github/software-factory/control.py. Read the repository's own checks (package.json,
