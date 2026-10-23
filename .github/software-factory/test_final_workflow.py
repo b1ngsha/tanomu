@@ -22,14 +22,17 @@ def git(cwd, *args):
 class FinalRunnerStepTest(unittest.TestCase):
     """Runs the real final review step scripts against stub `opencode`, `gh` and `timeout`."""
 
-    jobs = {"review": ("final-review.yml", "review"), "publish": ("final-review.yml", "publish"),
+    jobs = {"identify": ("final-review.yml", "identify"),
+            "review": ("final-review.yml", "review"), "publish": ("final-review.yml", "publish"),
             "handoff": ("software-factory-implement.yml", "handoff")}
     run_step, calls, uploaded = base.RunnerStepTest.run_step, base.RunnerStepTest.calls, base.RunnerStepTest.uploaded
     stub_events, reply = base.RunnerStepTest.stub_events, base.RunnerStepTest.reply
 
     def review(self, opencode, spec="true"):
         env = {"HEAD": HEAD, "BASE": BASE, "SPEC": spec}
-        return self.run_step("review", opencode, env=env, setup=lambda directory: env.update(
+        files = {"temp/final-input/identity.json": '{"run":"42"}',
+                 "candidate/.factory-input/identity.json": '{"run":"forged"}'}
+        return self.run_step("review", opencode, env=env, files=files, setup=lambda directory: env.update(
             REVIEW_OUTPUT=str(directory / "temp/final-review/review.json")))
 
     def temp(self, name):
@@ -51,6 +54,7 @@ class FinalRunnerStepTest(unittest.TestCase):
                 review = json.loads(self.temp("final-review/review.json").read_text())
                 self.assertEqual((review["verdict"], len(review["findings"])), ("request_changes", len(axes)))
                 self.assertTrue(self.temp("final-review/review.md").is_file())
+                self.assertEqual(json.loads(self.temp("final-review/identity.json").read_text()), {"run": "42"})
 
     def test_timeout_and_failure_exits_are_preserved_without_leaking(self):
         for opencode, status in ((f"echo {SECRET} >&2\nexec sleep 20", 124), ("exit 3", 3)):
@@ -159,6 +163,14 @@ class FinalRunnerStepTest(unittest.TestCase):
         self.assertEqual(bodies, [])
         self.assertFalse(any(call[:2] == ["pr", "comment"] for call in self.calls("gh")))
 
+    def test_manual_resume_step_emits_false_without_running_the_model(self):
+        result, _ = self.run_step("identify", select="control.py final-resume", env={
+            "PR": "17", "EVENT": "workflow_dispatch", "GITHUB_REF": "refs/heads/main"},
+            files={"temp/final-input/identity.json": '{"run":"123"}'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.directory / "output").read_text(), "resumed=false\n")
+        self.assertEqual(self.calls("opencode"), [])
+
     def test_handoff_starts_the_review_only_for_a_pr_number(self):
         for pr, started in (("17", True), ("", False), ("0", False), ("17\nx", False), ("1;id", False)):
             with self.subTest(pr=pr):
@@ -197,7 +209,7 @@ class FinalWorkflowContractTest(unittest.TestCase):
 
     def test_permissions_and_secrets_are_split(self):
         self.assertEqual({name: job["permissions"] for name, job in self.jobs.items()}, {
-            "identify": {"contents": "read", "issues": "read", "pull-requests": "read"},
+            "identify": {"actions": "read", "contents": "read", "issues": "read", "pull-requests": "read"},
             "review": {"contents": "read"},
             "publish": {"contents": "read", "issues": "write", "pull-requests": "write"}})
         text = {name: json.dumps(job) for name, job in self.jobs.items()}
@@ -244,16 +256,56 @@ class FinalWorkflowContractTest(unittest.TestCase):
         self.assertIn('configure \\"$RUNNER_TEMP/model\\" review', run)
 
     def test_artifacts_are_explicit_and_expire_after_three_days(self):
-        uploads = {step["with"]["name"]: step for job in self.jobs.values() for step in job["steps"]
-                   if "upload-artifact" in step.get("uses", "")}
+        all_uploads = [step for job in self.jobs.values() for step in job["steps"]
+                       if "upload-artifact" in step.get("uses", "")]
+        uploads = {step["with"]["name"]: step for step in all_uploads}
         self.assertEqual(set(uploads), {"final-input", "final-review", "session-final-review"})
-        for name, step in uploads.items():
+        for step in all_uploads:
+            name = step["with"]["name"]
             with self.subTest(artifact=name):
                 self.assertEqual(step["with"]["retention-days"], 3)
                 self.assertNotIn("*", step["with"]["path"])
         self.assertEqual(uploads["session-final-review"]["if"], "always() && steps.session.outcome == 'success'")
         record = next(step for step in self.jobs["review"]["steps"] if step.get("id") == "session")
         self.assertEqual((record["if"], record["continue-on-error"]), ("always()", True))
+
+    def test_recovery_is_selected_before_upload_and_bypasses_the_model(self):
+        identify = self.jobs["identify"]
+        self.assertEqual(identify["outputs"]["resumed"], "${{ steps.resume.outputs.resumed }}")
+        steps = identify["steps"]
+        resume = next(step for step in steps if step.get("id") == "resume")
+        self.assertEqual(resume["if"], "steps.identify.outputs.skip != 'true'")
+        self.assertIn('final-resume "$PR" "$EVENT"', resume["run"])
+        self.assertIn('"$RUNNER_TEMP/final-input" "$RUNNER_TEMP/final-review" >> "$GITHUB_OUTPUT"', resume["run"])
+        uploads = [step for step in steps if "upload-artifact" in step.get("uses", "")]
+        self.assertTrue(all(steps.index(resume) < steps.index(step) for step in uploads))
+        report = next(step for step in uploads if step["with"]["name"] == "final-review")
+        self.assertEqual(report["if"], "steps.resume.outputs.resumed == 'true'")
+        fresh = next(step for step in self.jobs["review"]["steps"]
+                     if step.get("with", {}).get("name") == "final-review")
+        self.assertEqual(report["with"], fresh["with"])
+        self.assertIn("/identity.json", fresh["with"]["path"])
+        # Evaluate the actual job gates for fresh, resumed, failed, skipped and cancelled runs.
+        for resumed, skip, identified, reviewed, cancelled, expected in (
+                (False, False, "success", "success", False, (True, True)),
+                (True, False, "success", "skipped", False, (False, True)),
+                (False, False, "success", "failure", False, (True, False)),
+                (True, False, "failure", "skipped", False, (False, False)),
+                (True, True, "success", "skipped", False, (False, False)),
+                (True, False, "success", "skipped", True, (False, False))):
+            with self.subTest(resumed=resumed, skip=skip, identified=identified, reviewed=reviewed,
+                              cancelled=cancelled):
+                values = {"needs.identify.outputs.resumed": str(resumed).lower(),
+                          "needs.identify.outputs.skip": str(skip).lower(), "needs.identify.result": identified,
+                          "needs.review.result": reviewed}
+                gates = []
+                for job in ("review", "publish"):
+                    expression = self.jobs[job]["if"].replace("always()", "True").replace("cancelled()", str(cancelled))
+                    for key, value in values.items():
+                        expression = expression.replace(key, repr(value))
+                    expression = re.sub(r"!(?!=)", "not ", expression)
+                    gates.append(eval(expression.replace("&&", "and").replace("||", "or"), {"__builtins__": {}}))
+                self.assertEqual(tuple(gates), expected)
 
     def test_publisher_rechecks_the_head_before_posting(self):
         run = next(step["run"] for step in self.jobs["publish"]["steps"] if "gh pr comment" in step.get("run", ""))

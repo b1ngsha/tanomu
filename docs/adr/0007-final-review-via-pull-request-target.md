@@ -31,7 +31,10 @@ Standards always runs; Spec uses linked same-repository issues and any trusted t
 review requirements, excluding implementation path restrictions. Reports preserve
 all findings and full responses, split into credential-scanned comments with
 invisible head/digest/part markers. Only the Actions bot's markers count for
-complete-report deduplication or filling missing parts. Old reports remain visible.
+complete-report deduplication or filling missing parts. Automatic recovery reuses
+an earlier trusted workflow's report only after checking its PR, head and digest;
+expired artifacts fall back to a fresh review. Manual dispatch always runs a new
+review. Old reports remain visible.
 Sessions expire after three days and are independent of factory retro. The cost is
 an extra model review and an advisory report that can become outdated after a push;
 the maintainer can explicitly request a fresh one.
