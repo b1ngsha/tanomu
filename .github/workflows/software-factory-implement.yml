@@ -213,6 +213,144 @@ jobs:
             printf '🤖 Generated with [Claude Code](https://claude.com/claude-code)\n'
           } > "$RUNNER_TEMP/pr.md"
           gh pr create --draft --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/pr.md"
+  retro:
+    needs: [claim, round1, round2, round3, round4, handoff]
+    if: always() && !cancelled() && needs.claim.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          path: workspace
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: factory-input
+          path: workspace/.factory-input
+      # Some runs fail before producing these artifacts. Keep their original directories.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          pattern: session-*
+          path: workspace/.factory-input/run
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          pattern: feedback-*
+          path: workspace/.factory-input/run
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        continue-on-error: true
+        with:
+          pattern: checked-*
+          path: workspace/.factory-input/run
+      - name: Record run outcome
+        env:
+          OUTCOMES: ${{ toJSON(needs) }}
+        run: |
+          mkdir -p workspace/.factory-input/run
+          jq -n --argjson jobs "$OUTCOMES" '{jobs: $jobs}' > workspace/.factory-input/run/outcome.json
+      - name: Install pinned runner
+        run: npm install --global @opencode/cli@2.1.0 --no-audit --no-fund && opencode --version | grep -Fx 'opencode v2.1.0'
+      - name: Configure read-only retro
+        env:
+          OPENCODE_AUTH_JSON: ${{ secrets.OPENCODE_AUTH_JSON }}
+        run: python3 -I trusted/.github/software-factory/control.py configure "$RUNNER_TEMP/model" retro
+      - name: Propose improvements from the run
+        working-directory: workspace
+        env:
+          MODEL: ${{ github.event_name == 'issues' && 'opencode/deepseek-v4.1-flash-free' || inputs.model }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          test "$MODEL" = opencode/deepseek-v4.1-flash-free
+          PWD=$(pwd -P)
+          export PWD
+          prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt retro "$ISSUE")
+          started=$(date +%s)
+          status=0
+          timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
+            > "$RUNNER_TEMP/retro.jsonl" 2> "$RUNNER_TEMP/retro.stderr" || status=$?
+          python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/retro.jsonl" \
+            "$status" "$(($(date +%s) - started))" "$started" | tee "$RUNNER_TEMP/retro-summary.txt" || echo '::warning::opencode-summary-failed'
+          if [ "$status" -ne 0 ]; then
+            echo "::error::opencode-exit-$status"
+            exit "$status"
+          fi
+          mkdir "$RUNNER_TEMP/retro"
+          python3 -I ../trusted/.github/software-factory/control.py retro "$RUNNER_TEMP/retro.jsonl" "$RUNNER_TEMP/retro/retro.md"
+          python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/retro/retro.md"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: retro
+          path: ${{ runner.temp }}/retro/retro.md
+          retention-days: 3
+          if-no-files-found: error
+      - name: Record retro session
+        id: session
+        if: always()
+        continue-on-error: true
+        run: |
+          mkdir -p "$RUNNER_TEMP/session"
+          python3 -I trusted/.github/software-factory/control.py transcript "$RUNNER_TEMP/retro.jsonl" "$RUNNER_TEMP/session/retro.md"
+          python3 -I trusted/.github/software-factory/control.py scan-session "$RUNNER_TEMP/session/retro.md"
+          if [ -f "$RUNNER_TEMP/retro-summary.txt" ]; then
+            python3 -I trusted/.github/software-factory/control.py scan-session "$RUNNER_TEMP/retro-summary.txt"
+            cp "$RUNNER_TEMP/retro-summary.txt" "$RUNNER_TEMP/session/retro-summary.txt"
+          fi
+      - if: always() && steps.session.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-retro
+          path: |
+            ${{ runner.temp }}/session/retro.md
+            ${{ runner.temp }}/session/retro-summary.txt
+          retention-days: 3
+          if-no-files-found: error
+  retro-publish:
+    needs: [claim, retro]
+    if: always() && !cancelled() && needs.claim.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.retro.result == 'success'
+        with:
+          name: retro
+          path: ${{ runner.temp }}/reports/retro
+      - name: Comment on the PR or issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
+        run: |
+          set -euo pipefail
+          report="$RUNNER_TEMP/reports/retro/retro.md"
+          if [ ! -f "$report" ]; then exit 0; fi
+          python3 -I .github/software-factory/control.py retro-comment "$report" "$RUNNER_TEMP/comment.md"
+          branch=$(jq -r .branch ".github/software-factory/tasks/$ISSUE.json")
+          pr=$(gh pr list --state open --head "$branch" --json number --jq '.[0].number // empty')
+          file="$RUNNER_TEMP/comment.md"
+            if [ -n "$pr" ]; then
+              gh pr comment "$pr" --body-file "$file"
+            else
+              gh issue comment "$ISSUE" --body-file "$file"
+            fi
   report:
     needs: [gate, claim, round1, round2, round3, round4, handoff]
     if: always() && needs.gate.result == 'success'

@@ -34,6 +34,7 @@ ready-for-agent + agent:implement -> implementing
        check failure or blocking finding -> next round (four rounds in total)
   -> draft PR -> ready-for-human
   -> needs-human (authorization, scope, credential or infrastructure failure, or budget exhausted)
+  -> retro (read-only proposals) -> comment on the draft PR, or on the issue without one
 ```
 
 A task is keyed by issue number and has one concurrency group. The implementation and review runs are independent. The maintainer reviews the draft PR and CI evidence, stops production before real Feishu testing, sends three rapid Private Conversation messages, confirms one ordered merged reply, restores production, and decides whether to merge.
@@ -51,19 +52,20 @@ commit/PR `title`, the `implement` and `review` requirements appended to the gen
 prompts, and the human `acceptance` steps listed in the draft PR. A new task needs
 only its snapshot; `control.py` rejects a snapshot missing any of these fields.
 
-Review follows skills vendored, unmodified, in `skills/` from one pinned
+Review and retro follow skills vendored, unmodified, in `skills/` from one pinned
 upstream commit (see `skills/README.md`). The factory never fetches skills at run
 time. `control.py` inlines them into the prompts: the two sub-agent briefs and the
-standards section from `code-review`. The regression suite pins
+standards section from `code-review`, and for retro the `retro` skill together with
+`writing-for-agents` and the `SKILL-MECHANICS.md` it links. The regression suite pins
 the commit and every file's SHA-256, and fails if a vendored skill links a file or
 names a skill that is not vendored. To update, replace all of them from one new
 commit and update both pins; `control.py` rejects a `code-review` skill whose briefs
 or standards section it can no longer find. The prompt builder removes only the
 briefs' upstream "Under 400 words." instruction; vendored files stay unchanged.
-Reviews have no response word, character or finding-count cap, and their
+Review and retro have no response word, character or finding-count cap, and their
 prompts explicitly require supported judgement calls to be included. A provider finish
 reason of `length` or `content-filter` fails with `incomplete-output`, rather than
-accepting a partial review as complete.
+accepting a partial review or retro as complete.
 
 The only accepted model is `opencode/deepseek-v4.1-flash-free`; no paid fallback is
 configured. OpenCode's [provider policy](https://opencode.ai/docs/zen/) states that
@@ -108,7 +110,7 @@ GitHub-token-created PRs do not trigger CI automatically; marking the draft read
 triggers ordinary CI through `ready_for_review`. Inspect that CI and the diff before
 real Feishu acceptance. The factory never claims real Feishu acceptance passed.
 
-Patch, structured feedback and session transcript artifacts expire after
+Patch, structured feedback, session transcript and retro artifacts expire after
 three days. Exact credential values and common credential patterns are checked
 before upload. Raw event files, stderr and auth files are never uploaded; complete event
 lines appear only inside the scanned transcript. Workspace
@@ -126,11 +128,12 @@ line-limit checks before any candidate code runs. This is an accepted limitation
 a sandbox: running as the same user, the shell can still modify that runner's copy of
 the trusted scanner and write to the Actions environment, output and step summary
 files. Session uploads name only the exact files just scanned, which contains the
-artifact path without closing that boundary. Review sessions are
+artifact path without closing that boundary. Review and retro sessions are
 read-only: they may only read, glob, grep and list inside their workspace, with `.env`
 and `auth.json` reads denied.
 
-The implementation run has a 1500-second limit; each review axis has 600 seconds. All have a 15-second
+The implementation run has a 1500-second limit; each review axis and the retro run
+have 600 seconds each. All have a 15-second
 kill grace period. After success, timeout (exit 124) or any other nonzero exit, a trusted
 `opencode-summary` line is written to the step log and job summary. It has the exit
 status, elapsed seconds, event and tool-call counts by status, step finish reasons,
@@ -148,6 +151,18 @@ metadata. Fields and the whole record are retained in full, without truncation. 
 saved beside the transcript, so retro can see timeout status and elapsed time. A step that always runs scans the
 transcript with `scan-session` (the same credential checks, without a size cap) and only then uploads it as a `session-*` artifact kept for three days, naming only
 the scanned files. A transcript that fails the scan is not uploaded.
+
+After every claimed run that was not cancelled, whether or not it reached a PR, a
+retro job runs the vendored `retro` skill on the whole run in a fresh read-only
+session. It downloads the task, the `session-*`, `feedback-*` and `checked-*`
+artifacts (one download per pattern, each allowed to be missing) and a record of each
+job's outcome. It only proposes; it cannot edit, run shell, or write to GitHub. Its
+reply is validated, scanned and uploaded as the `retro` artifact. A separate
+`retro-publish` job, which holds no model secret, scans the retro again, neutralizes
+`@` mentions and posts it on the open draft PR for the task's branch, or on the issue
+when there is no PR. Retro is labelled "proposals only". Responses exceeding GitHub's
+60,000-byte comment budget fail explicitly; nothing is silently shortened. Nothing is
+applied: the maintainer decides which proposals to act on in an ordinary reviewed change.
 
 Successful handoff adds `ready-for-human`; failures after the gate add `needs-human`
 and remove `implementing`. Fixed reason codes include `claim-failed`, `round-failed`,

@@ -104,6 +104,14 @@ class TaskTest(TaskDirectory):
         self.assertIn("Task-specific review requirements:\nCheck the thing.", spec)
         self.assertNotIn("Check the thing.", standards)
 
+    def test_retro_prompt_inlines_skill_closure(self):
+        self.real_prompts()
+        text = control.prompt("retro", "1")
+        for name in ("prompts/retro.md", "skills/retro/SKILL.md", "skills/writing-for-agents/SKILL.md",
+                     "skills/writing-for-agents/SKILL-MECHANICS.md"):
+            with self.subTest(name=name):
+                self.assertIn((CONTROL.parent / name).read_text(), text)
+        self.assertNotIn("Build the thing.", text)
 
     def test_rejects_unknown_prompt_modes(self):
         self.real_prompts()
@@ -832,6 +840,44 @@ class TranscriptTest(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
 
+class RetroTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.events = self.directory / "retro.jsonl"
+        self.output = self.directory / "retro.md"
+
+    def retro(self, *texts, extra=()):
+        self.events.write_text("".join(json.dumps(event) + "\n" for event in (
+            {"type": "step_start"}, *({"type": "text", "part": {"text": text}} for text in texts), *extra)))
+        control.retro(str(self.events), str(self.output))
+        return self.output.read_text()
+
+    def test_writes_reply_text_with_exact_whitespace(self):
+        self.assertEqual(self.retro("\n1. **Navigation**: ", "add a pointer.\n\n"),
+                         "\n1. **Navigation**: add a pointer.\n\n")
+        self.assertEqual(self.retro("  - 缩进\t", "kept 🙂"), "  - 缩进\tkept 🙂")
+
+    def test_rejects_empty_or_failed_runs(self):
+        for texts, extra, reason in (((), (), "invalid-retro"), (("  \n",), (), "invalid-retro"),
+                                     (("ok",), ({"type": "error"},), "invalid-events")):
+            with self.subTest(reason=reason, texts=texts), self.assertRaisesRegex(ValueError, f"^{reason}$"):
+                self.retro(*texts, extra=extra)
+        self.assertFalse(self.output.exists())
+
+    def test_rejects_provider_truncated_replies(self):
+        for reason in ("length", "content-filter"):
+            with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, "^incomplete-output$"):
+                self.retro("1. Half a propo", extra=({"type": "step_finish", "part": {"reason": reason}},))
+        self.assertFalse(self.output.exists())
+        self.assertEqual(self.retro("Done.", extra=({"type": "step_finish", "part": {"reason": "stop"}},)),
+                         "Done.")
+
+    def test_has_no_length_limit(self):
+        self.assertFalse(hasattr(control, "MAX_RETRO_CHARS"))
+        text = "1. **提案** 🙂\n   " + "é" * 300_000 + "\n\n"
+        self.assertEqual(self.retro(text[:7], text[7:]), text)
+
+
 class DiagnoseTest(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -981,7 +1027,7 @@ class RunnerStepTest(unittest.TestCase):
 
     def test_timeout_is_summarized_and_preserved_without_leaking(self):
         leaky = [event for event in LEAKY_EVENTS if "'" not in json.dumps(event)]
-        for job in ("implement", "review"):
+        for job in ("implement", "review", "retro"):
             with self.subTest(job=job):
                 result, summary = self.run_step(job, self.stub_events(*leaky) + f"\necho {SECRET} >&2\nexec sleep 20")
                 self.assertEqual(result.returncode, 124, result.stderr)
@@ -1030,9 +1076,25 @@ class RunnerStepTest(unittest.TestCase):
         self.assertIn("::error::invalid-review", result.stderr)
         self.assertFalse((self.directory / "output").exists())
 
+    def test_retro_writes_scanned_proposals(self):
+        result, _ = self.run_step("retro", self.stub_events({"type": "text", "part": {"text": "Smooth run."}}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.directory / "temp/retro/retro.md").read_text(), "Smooth run.")
+        result, _ = self.run_step("retro", self.stub_events({"type": "text", "part": {"text": f"see {SECRET}"}}))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("::error::credential-in-artifact", result.stderr)
+        self.assertNotIn(SECRET, result.stdout + result.stderr)
+
+    def test_retro_keeps_output_beyond_the_artifact_limit(self):
+        text = "1. 提案 🙂\n" * 100_000
+        result, _ = self.run_step("retro", 'cat "$CALLS/../reply.jsonl"', files={
+            "reply.jsonl": json.dumps({"type": "text", "part": {"text": text}}) + "\n"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.directory / "temp/retro/retro.md").read_text(), text)
 
     def test_sessions_are_always_recorded_and_scanned(self):
-        for job, events in (("implement", ["implementation"]), ("review", ["review-standards", "review-spec"])):
+        for job, events in (("implement", ["implementation"]), ("review", ["review-standards", "review-spec"]),
+                            ("retro", ["retro"])):
             with self.subTest(job=job):
                 # A run that died before writing any event still yields a transcript.
                 result, _ = self.run_step(job, select="control.py transcript")
@@ -1069,6 +1131,42 @@ class RunnerStepTest(unittest.TestCase):
                       .replace("${{ inputs.round }}", "1")) for line in upload["with"]["path"].splitlines())
         return [file.name for path in paths
                 for file in (sorted(path.rglob("*")) if path.is_dir() else [path]) if file.is_file()]
+
+
+    def publish_retro(self, content=None, pr=""):
+        gh = (f'if [ "$1 $2" = "pr list" ]; then printf %s "{pr}"; fi\n'
+              'if [ "$2" = comment ]; then cp "$5" "$CALLS/../published.md"; fi')
+        files = {} if content is None else {"temp/reports/retro/retro.md": content}
+        return self.run_step("publish", gh=gh, select="control.py retro-comment",
+                             env={"FACTORY_AUTH_FILE": ""}, files=files)[0]
+
+    def test_publishes_scanned_retro_on_open_pr_else_issue(self):
+        branch = json.loads((CONTROL.parent / "tasks/6.json").read_text())["branch"]
+        for pr, target in (("17", ["pr", "comment", "17"]), ("", ["issue", "comment", "6"])):
+            with self.subTest(pr=pr):
+                result = self.publish_retro("1. Ping @maintainer.\n", pr)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                calls = self.calls("gh")
+                self.assertEqual(calls[0][:2], ["pr", "list"])
+                self.assertIn(branch, calls[0])
+                self.assertEqual(calls[1][:3], target)
+                body = (self.directory / "published.md").read_text()
+                self.assertIn("proposals only", body)
+                self.assertIn("Human review is required", body)
+                self.assertIn("Ping @​maintainer", body)
+                self.assertIn(f"https://github.com/{REPO}/actions/runs/123", body)
+
+    def test_missing_or_unsafe_retro_is_not_published(self):
+        for content, reason in ((None, None), (SECRET, "credential-pattern-in-artifact"),
+                                ("ü" * 60_000, "comment-too-large")):
+            with self.subTest(reason=reason):
+                result = self.publish_retro(content, "17")
+                self.assertEqual(result.returncode, 1 if reason else 0)
+                if reason:
+                    self.assertIn(f"::error::{reason}", result.stderr)
+                self.assertEqual(self.calls("gh"), [])
+                self.assertFalse((self.directory / "published.md").exists())
+                self.assertNotIn(SECRET, result.stdout + result.stderr)
 
 
 class WorkflowContractTest(unittest.TestCase):
@@ -1153,8 +1251,8 @@ class WorkflowContractTest(unittest.TestCase):
 
     def test_model_deadlines(self):
         steps = self.opencode_steps()
-        self.assertEqual(set(steps), {"implement", "review"})
-        for name, seconds in (("implement", 1500), ("review", 600)):
+        self.assertEqual(set(steps), {"implement", "review", "retro"})
+        for name, seconds in (("implement", 1500), ("review", 600), ("retro", 600)):
             with self.subTest(job=name):
                 self.assertEqual(re.findall(r"timeout --kill-after=15 (\d+) opencode run", steps[name]["run"]),
                                  [str(seconds)])
@@ -1171,7 +1269,7 @@ class WorkflowContractTest(unittest.TestCase):
         modes = {name: re.findall(r"control\.py configure \S+ (\w+)", step["run"])
                  for name, job in self.jobs() for step in job.get("steps", [])
                  if "control.py configure" in step.get("run", "")}
-        self.assertEqual(modes, {"implement": ["implement"], "review": ["review"]})
+        self.assertEqual(modes, {"implement": ["implement"], "review": ["review"], "retro": ["retro"]})
 
     def test_sessions_are_always_scanned_then_uploaded_for_three_days(self):
         uploads = 0
@@ -1198,7 +1296,7 @@ class WorkflowContractTest(unittest.TestCase):
                         self.assertTrue(path.endswith((".md", "-summary.txt")), path)
                         self.assertNotIn("*", path)
                     self.assertEqual(step["with"]["retention-days"], 3)
-        self.assertEqual(uploads, 2)
+        self.assertEqual(uploads, 3)
 
     def test_every_factory_artifact_expires_after_three_days(self):
         for name, job in self.jobs():
@@ -1206,6 +1304,35 @@ class WorkflowContractTest(unittest.TestCase):
                 if "upload-artifact" in step.get("uses", ""):
                     with self.subTest(job=name, artifact=step["with"]["name"]):
                         self.assertEqual(step["with"]["retention-days"], 3)
+
+    def test_retro_publisher_has_no_model_secret(self):
+        publish = self.implement["jobs"]["retro-publish"]
+        self.assertEqual(set(publish["needs"]), {"claim", "retro"})
+        self.assertIn("always()", publish["if"])
+        self.assertNotIn("needs.retro.result", publish["if"])
+        self.assertNotIn("secrets", str(publish))
+        self.assertNotIn("opencode", str(publish))
+        self.assertEqual(publish["permissions"], {"contents": "read", "issues": "write", "pull-requests": "write"})
+
+    def test_retro_reads_the_whole_run_without_write_access(self):
+        retro = self.implement["jobs"]["retro"]
+        self.assertEqual(retro["permissions"], {"contents": "read"})
+        self.assertIn("always()", retro["if"])
+        self.assertIn("needs.claim.result == 'success'", retro["if"])
+        self.assertLessEqual({"claim", "round1", "round2", "round3", "round4", "handoff"}, set(retro["needs"]))
+        downloads = [step["with"] for step in retro["steps"] if "download-artifact" in step.get("uses", "")]
+        self.assertIn({"name": "factory-input", "path": "workspace/.factory-input"}, downloads)
+        # One pattern per download, so a missing kind of artifact cannot hide the others.
+        patterns = [item for item in downloads if "pattern" in item]
+        self.assertEqual(sorted(item["pattern"] for item in patterns), ["checked-*", "feedback-*", "session-*"])
+        for item in patterns:
+            self.assertEqual(item["path"], "workspace/.factory-input/run")
+            self.assertNotIn("merge-multiple", item)
+        steps = [step for step in retro["steps"] if "download-artifact" in step.get("uses", "")
+                 and "pattern" in step["with"]]
+        self.assertTrue(all(step.get("continue-on-error") for step in steps))
+        run = self.opencode_steps()["retro"]["run"]
+        self.assertLess(run.index("control.py retro"), run.index("control.py scan-output "))
 
 
 class ConfigureTest(TaskDirectory):
@@ -1226,7 +1353,7 @@ class ConfigureTest(TaskDirectory):
         return json.loads((self.directory / "oc/opencode.json").read_text())
 
     def test_review_and_retro_are_read_only(self):
-        for mode in ("review",):
+        for mode in ("review", "retro"):
             with self.subTest(mode=mode):
                 config = self.configure(mode)
                 self.assertFalse(config["share"])
