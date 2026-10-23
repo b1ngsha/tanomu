@@ -84,6 +84,15 @@ def prompt(mode, number):
     if mode == "implement":
         instructions = (ROOT / "prompts" / "implement.md").read_text()
         return f"{instructions}\nTask-specific requirements:\n{spec['implement']}\n"
+    if mode == "retro":
+        return "\n\n".join([
+            (ROOT / "prompts" / "retro.md").read_text(),
+            "# Skill: retro\n\n" + skill("retro"),
+            "# Skill: writing-for-agents (already loaded here; do not call the Skill tool)\n\n"
+            + skill("writing-for-agents"),
+            "# writing-for-agents: SKILL-MECHANICS.md\n\n"
+            + skill("writing-for-agents", "SKILL-MECHANICS.md"),
+        ])
     require(mode in ("review-standards", "review-spec"), "invalid-mode")
     name = mode.removeprefix("review-")
     axis = review_axes()[name]
@@ -385,6 +394,23 @@ def transcript(filename, output):
     Path(output).write_text(data)
 
 
+def retro(filename, output):
+    text = reply(filename)
+    require(bool(text.strip()), "invalid-retro")
+    Path(output).write_text(text)
+
+
+def retro_comment(filename, output):
+    scan(filename, public=True, limit=None)
+    text = Path(filename).read_text().replace("@", "@" + chr(0x200b))
+    body = ("## Factory retro — proposals only\n\n"
+            f"Run: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
+            f"{os.environ['GITHUB_RUN_ID']}\n\n"
+            "These suggestions have not been applied. Human review is required.\n\n" + text)
+    require(len(body.encode()) <= 60_000, "comment-too-large")
+    Path(output).write_text(body)
+
+
 def configure(directory, mode):
     output = Path(directory).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -411,7 +437,7 @@ def configure(directory, mode):
         # the scope and file-type checks that count run again on the fresh verify runner.
         permissions["bash"] = "allow"
     else:
-        require(mode == "review", "invalid-mode")
+        require(mode in ("review", "retro"), "invalid-mode")
     auth = output / "data/opencode/auth.json"
     auth.touch(mode=0o600)
     auth.chmod(0o600)
@@ -448,6 +474,10 @@ if __name__ == "__main__":
             scan(*args, limit=None)
         elif command == "transcript":
             transcript(*args)
+        elif command == "retro-comment":
+            retro_comment(*args)
+        elif command == "retro":
+            retro(*args)
         elif command == "configure":
             configure(*args)
         elif command == "prompt":
