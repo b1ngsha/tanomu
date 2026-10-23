@@ -19,7 +19,16 @@ jobs:
     name: Read-only OpenCode smoke
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
+      # Only the pinned supervisor/control helpers are checked out, outside the fixture.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          sparse-checkout: .github/software-factory
+          persist-credentials: false
       - name: Reject unexpected event
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -102,9 +111,10 @@ jobs:
           output_file="$RUNNER_TEMP/opencode-smoke.jsonl"
           started=$(date +%s)
           set +e
-          opencode run --standalone --format json -m "$MODEL" \
-            'Read README.md only. Do not edit files, run commands, access the network, or share the session. Reply with exactly one short sentence.' \
-            >"$output_file" 2>"$RUNNER_TEMP/opencode-smoke.stderr"
+          python3 -I "$GITHUB_WORKSPACE/trusted/.github/software-factory/supervisor.py" \
+            "$output_file" "$RUNNER_TEMP/smoke-summary.txt" smoke 420 -- \
+            opencode run --standalone --format json -m "$MODEL" \
+            'Read README.md only. Do not edit files, run commands, access the network, or share the session. Reply with exactly one short sentence.'
           status=$?
           set -e
           finished=$(date +%s)
@@ -154,5 +164,5 @@ jobs:
             printf '%s\n' "- Model ID: \`$MODEL\`"
             printf '%s\n' "- OpenCode smoke: \`$OPENCODE_STATUS\`"
             printf '%s\n' "- OpenCode duration (seconds): \`${OPENCODE_DURATION:-not recorded}\`"
-            printf '%s\n' '' '- No tanomu checkout, production environment, issue, pull request, branch, or deployment access was used.'
+            printf '%s\n' '' '- Only trusted orchestration helpers were checked out; the model ran in a disposable fixture. No production environment, issue, pull request, branch, or deployment access was used.'
           } >> "$GITHUB_STEP_SUMMARY"
