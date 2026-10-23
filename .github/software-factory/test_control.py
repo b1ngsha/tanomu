@@ -16,30 +16,15 @@ import control  # noqa: E402
 CONTROL = Path(control.__file__).resolve()
 OWNER = "owner"
 REPO = f"{OWNER}/tanomu"
-BODY = "Merge private messages.\n"
+BODY = "Merge private messages.\nBlocked by: #2\n"
 SECRET = "sk-test-0123456789abcdefghijklmnop"
 
 
 class TaskDirectory(unittest.TestCase):
-    """Points control.ROOT at a throwaway tasks/1.json."""
-
-    spec = {
-        "issue": 1,
-        "body_sha256": hashlib.sha256(BODY.encode()).hexdigest(),
-        "blocked_by": [2],
-        "branch": "feat/1-thing",
-        "title": "feat(core): add a thing",
-        "max_changed_lines": 10,
-        "allowed_paths": ["src/a.ts", "src/new.ts", "dir with space/b.ts"],
-        "implement": "Build the thing.",
-        "review": "Check the thing.",
-        "acceptance": "Try the thing.",
-    }
+    """A temporary trusted controller root; no per-issue configuration."""
 
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        (self.root / "tasks").mkdir()
-        (self.root / "tasks" / "1.json").write_text(json.dumps(self.spec))
         self.enterContext(mock.patch.object(control, "ROOT", self.root))
 
     def assertRejects(self, reason, function, *args):
@@ -49,41 +34,22 @@ class TaskDirectory(unittest.TestCase):
 
 
 class TaskTest(TaskDirectory):
-    def test_loads_matching_task(self):
-        self.assertEqual(control.task("1")["branch"], "feat/1-thing")
-
-    def test_rejects_malformed_numbers(self):
+    def test_deterministic_safe_metadata_without_task_files(self):
+        self.assertEqual(control.metadata("10"), {
+            "issue": "10", "branch": "feat/10-implement", "title": "feat(repo): implement issue #10"})
         for number in ("0", "01", "1/../1", "-1", "1 ", ""):
-            with self.subTest(number=number):
-                self.assertRejects("invalid-issue", control.task, number)
-
-    def test_rejects_mismatched_issue(self):
-        (self.root / "tasks" / "3.json").write_text(json.dumps({**self.spec, "issue": 4}))
-        self.assertRejects("invalid-task", control.task, "3")
-
-    def test_rejects_missing_task_text(self):
-        for key in ("implement", "review", "acceptance"):
-            for value in (None, " ", ["x"]):
-                with self.subTest(key=key, value=value):
-                    (self.root / "tasks" / "1.json").write_text(json.dumps({**self.spec, key: value}))
-                    self.assertRejects("invalid-task", control.task, "1")
-
-    def test_rejects_unconventional_titles(self):
-        for title in (None, "add a thing", "feat: add a thing", "feat(core): a\nb",
-                      "feat(core): " + "x" * 73, "Feat(core): add a thing"):
-            with self.subTest(title=title):
-                (self.root / "tasks" / "1.json").write_text(json.dumps({**self.spec, "title": title}))
-                self.assertRejects("invalid-title", control.task, "1")
+            self.assertRejects("invalid-issue", control.metadata, number)
 
     def real_prompts(self):
         for name in ("prompts", "skills"):
             shutil.copytree(CONTROL.parent / name, self.root / name)
 
-    def test_implement_prompt_appends_task_requirements(self):
+    def test_implement_prompt_uses_issue_only(self):
         self.real_prompts()
         text = control.prompt("implement", "1")
         self.assertTrue(text.startswith((CONTROL.parent / "prompts/implement.md").read_text()))
-        self.assertTrue(text.endswith("\nTask-specific requirements:\nBuild the thing.\n"))
+        self.assertIn("frozen gate snapshot", text)
+        self.assertNotIn("task.json", text)
 
     def test_review_axes_get_separate_briefs(self):
         self.real_prompts()
@@ -101,7 +67,7 @@ class TaskTest(TaskDirectory):
         # Only Standards carries the smell baseline; only Spec carries the task's requirements.
         self.assertIn("**Feature Envy**", standards)
         self.assertNotIn("**Feature Envy**", spec)
-        self.assertIn("Task-specific review requirements:\nCheck the thing.", spec)
+        self.assertIn("sole spec is the gate snapshot .factory-input/issue.md", spec)
         self.assertNotIn("Check the thing.", standards)
 
     def test_retro_prompt_inlines_skill_closure(self):
@@ -129,10 +95,6 @@ class TaskTest(TaskDirectory):
                 path.write_text(original.replace(old, new, 1))
                 self.assertRejects("skill-changed", control.prompt, "review-standards", "1")
 
-    def test_real_tasks_are_valid(self):
-        for path in (CONTROL.parent / "tasks").glob("*.json"):
-            with self.subTest(task=path.name), mock.patch.object(control, "ROOT", CONTROL.parent):
-                control.task(path.stem)
 
 
 class SkillPinTest(unittest.TestCase):
@@ -244,37 +206,12 @@ class ScopeTest(TaskDirectory):
     def test_rejects_empty_patch(self):
         self.assertRejects("empty-patch", self.scope)
 
-    def test_rejects_untracked_file_outside_allowlist(self):
-        self.write("src/a.ts", "one\nthree\n")
-        self.write(".github/workflows/evil.yml", "on: push\n")
-        self.assertRejects("path-outside-allowlist", self.scope)
-
-    def test_rejects_staged_file_outside_allowlist(self):
-        self.write("src/a.ts", "one\nthree\n")
-        self.write("package.json", "{}\n")
-        self.run_git("add", "package.json")
-        self.assertRejects("path-outside-allowlist", self.scope)
-
-    def test_rejects_intent_to_add_file_outside_allowlist(self):
-        self.write("src/a.ts", "one\nthree\n")
-        self.write("src/other.ts", "x\n")
-        self.run_git("add", "--intent-to-add", "src/other.ts")
-        self.assertRejects("path-outside-allowlist", self.scope)
-
-    def test_rejects_path_prefix_and_traversal_lookalikes(self):
-        for name in ("src/a.ts.bak", "src/new.ts/inner", "x/../src/z.ts"):
-            with self.subTest(name=name):
-                self.write(name, "x\n")
-                self.assertRejects("path-outside-allowlist", self.scope)
-                self.run_git("clean", "-qfdx")
-
-    def test_rejects_deleting_allowed_file(self):
-        (self.repo / "src/a.ts").unlink()
-        self.assertRejects("invalid-file-type", self.scope)
-
-    def test_rejects_deleting_file_outside_allowlist(self):
+    def test_accepts_unrestricted_feature_paths_additions_and_deletions(self):
+        for name in (".github/workflows/ci.yml", ".github/software-factory/control.py", "package.json",
+                     ".env.example", "apps/server/drizzle/001.sql", "deploy/run.sh", "dir with space/x"):
+            self.write(name, "feature source\n")
         (self.repo / "README.md").unlink()
-        self.assertRejects("path-outside-allowlist", self.scope)
+        self.scope()
 
     def test_rejects_untracked_symlink(self):
         os.symlink("/etc/passwd", self.repo / "src/new.ts")
@@ -285,31 +222,37 @@ class ScopeTest(TaskDirectory):
         os.symlink("../README.md", self.repo / "src/a.ts")
         self.assertRejects("invalid-file-type", self.scope)
 
-    def test_rejects_executable_mode(self):
+    def test_accepts_executable_mode(self):
         os.chmod(self.repo / "src/a.ts", 0o755)
-        self.assertRejects("invalid-file-type", self.scope)
+        self.scope()
 
-    def test_rejects_new_executable_file(self):
+    def test_accepts_new_executable_file(self):
         os.chmod(self.write("src/new.ts", "x\n"), 0o755)
-        self.assertRejects("invalid-file-type", self.scope)
+        self.scope()
 
     def test_rejects_binary_file(self):
         self.write("src/new.ts", b"\x00\x01\x02binary")
         self.assertRejects("binary-patch", self.scope)
 
     def test_rejects_patch_over_line_limit(self):
-        self.write("src/new.ts", "x\n" * 11)
+        self.write("src/new.ts", "x\n" * 601)
         self.assertRejects("patch-too-large", self.scope)
 
     def test_accepts_patch_at_line_limit(self):
-        # 2 removed + 8 added == 10.
-        self.write("src/a.ts", "x\n" * 8)
+        # 2 removed + 598 added == 600.
+        self.write("src/a.ts", "x\n" * 598)
         self.scope()
 
     def test_line_limit_counts_untracked_files(self):
         self.write("src/a.ts", "one\nthree\n")
-        self.write("src/new.ts", "x\n" * 9)
+        self.write("src/new.ts", "x\n" * 599)
         self.assertRejects("patch-too-large", self.scope)
+
+    def test_generated_files_do_not_count_towards_limit(self):
+        self.write("pnpm-lock.yaml", "generated\n" * 900)
+        self.write("apps/server/drizzle/meta/0001_snapshot.json", "generated\n" * 900)
+        self.write("src/new.ts", "feature\n" * 600)
+        self.scope()
 
     def test_rejects_whitespace_errors(self):
         self.write("src/a.ts", "one\ntwo  \n")
@@ -334,7 +277,7 @@ def issue(**overrides):
 
 
 def labeled(event, actor, name="agent:implement"):
-    return {"event": event, "actor": {"login": actor}, "label": {"name": name}}
+    return {"id": 456, "event": event, "actor": {"login": actor}, "label": {"name": name}}
 
 
 class GateTest(TaskDirectory):
@@ -344,6 +287,7 @@ class GateTest(TaskDirectory):
         self.enterContext(mock.patch.dict(os.environ, {
             "GITHUB_REF": "refs/heads/main", "MODEL": control.MODEL, "GITHUB_REPOSITORY": REPO,
             "GITHUB_ACTOR": OWNER, "GITHUB_TRIGGERING_ACTOR": OWNER,
+            "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
         }))
         self.issue = issue()
         self.dependency = {"state": "closed", "state_reason": "completed"}
@@ -361,8 +305,8 @@ class GateTest(TaskDirectory):
         return {
             f"repos/{REPO}/issues/1": self.issue,
             f"repos/{REPO}/issues/2": self.dependency,
-            f"repos/{REPO}/git/matching-refs/heads/feat/1-thing": self.refs,
-            f"repos/{REPO}/pulls?state=all&head={OWNER}:feat/1-thing": self.pulls,
+            f"repos/{REPO}/git/matching-refs/heads/feat/1-implement": self.refs,
+            f"repos/{REPO}/pulls?state=all&head={OWNER}:feat/1-implement": self.pulls,
         }[path]
 
     def fake_events(self, command):
@@ -389,7 +333,7 @@ class GateTest(TaskDirectory):
             with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {key: value}):
                 self.assertRejects(reason, self.gate)
         self.assertEqual(self.calls, [])
-        self.assertFalse(self.out.exists())
+
 
     def test_rejects_issue_state_and_author(self):
         for overrides, reason in (
@@ -406,7 +350,7 @@ class GateTest(TaskDirectory):
             with self.subTest(reason=reason, overrides=overrides):
                 self.issue = issue(**overrides)
                 self.assertRejects(reason, self.gate)
-        self.assertFalse(self.out.exists())
+
 
     def test_rejects_label_from_non_owner(self):
         self.pages = [[labeled("labeled", OWNER)], [labeled("labeled", "intruder")]]
@@ -420,12 +364,32 @@ class GateTest(TaskDirectory):
         self.pages = [[labeled("labeled", OWNER), labeled("unlabeled", OWNER)]]
         self.assertRejects("wrong-label-actor", self.gate)
 
-    def test_rejects_changed_or_missing_body(self):
-        for body in (BODY + "Also deploy to production.\n", None, ""):
-            with self.subTest(body=body):
-                self.issue = issue(body=body)
-                self.assertRejects("body-changed", self.gate)
-        self.assertFalse(self.out.exists())
+    def test_gate_captures_any_current_body_without_manual_config(self):
+        self.issue["body"] = "Implement issue ten. Refs #99. bLoCkEd By #2"
+        self.gate()
+        captured = control.snapshot("1", str(self.out))
+        self.assertEqual(captured["blocked_by"], ["2"])
+        self.assertEqual((self.out / "issue.md").read_text(), self.issue["body"])
+        self.issue["body"] += " changed"
+        self.assertRejects("body-changed", control.revalidate, "1", str(self.out))
+
+    def test_crlf_snapshot_survives_gate_and_claim(self):
+        self.issue["body"] = "Feature.\r\nBlocked by: #2\r\n"
+        self.issue["labels"] = [{"name": n} for n in ("ready-for-agent", "agent:implement")]
+        self.pages = [[labeled("labeled", OWNER)]]
+        control.gate("1", str(self.out))
+        control.revalidate("1", str(self.out))
+        self.issue["labels"] = [{"name": n} for n in ("ready-for-agent", "implementing")]
+        self.pages = [[{**labeled("labeled", "github-actions[bot]", "implementing"), "id": 987}]]
+        control.record_claim("1", str(self.out), str(self.root / "claim.json"))
+        self.assertEqual((self.out / "issue.md").read_bytes(), self.issue["body"].encode())
+
+    def test_issue_ten_needs_no_task_file(self):
+        with mock.patch.object(control, "api", side_effect=lambda path: self.issue if path.endswith("issues/10") else []), \
+                mock.patch.object(control.subprocess, "check_output", return_value=json.dumps(self.pages).encode()):
+            self.issue["body"] = "Feature without task JSON. Refs #99."
+            control.gate("10", str(self.out))
+        self.assertEqual(control.snapshot("10", str(self.out))["branch"], "feat/10-implement")
 
     def test_rejects_unfinished_dependency(self):
         for dependency in ({"state": "open", "state_reason": None},
@@ -436,12 +400,21 @@ class GateTest(TaskDirectory):
                 self.dependency = dependency
                 self.assertRejects("open-dependency", self.gate)
 
+    def test_native_dependency_summary_blocks_gate(self):
+        self.issue["issue_dependencies_summary"] = {"blocked_by": 1}
+        self.assertRejects("open-dependency", self.gate)
+
+    def test_only_explicit_same_repo_refs_are_dependencies(self):
+        self.assertEqual(control.dependencies(
+            "Refs #3. blocked BY: #2, #7; Blocked by #4. Blocked by owner/repo#5. "
+            "Blocked by https://github.com/x/y/issues/6. bLoCkEd By #2"), ["2", "7", "4"])
+
     def test_rejects_existing_branch(self):
-        self.refs = [{"ref": "refs/heads/feat/1-thing"}]
+        self.refs = [{"ref": "refs/heads/feat/1-implement"}]
         self.assertRejects("branch-exists", self.gate)
 
     def test_ignores_branch_prefix_matches(self):
-        self.refs = [{"ref": "refs/heads/feat/1-thing-old"}]
+        self.refs = [{"ref": "refs/heads/feat/1-implement-old"}]
         self.gate()
 
     def test_rejects_existing_pull_request(self):
@@ -452,22 +425,25 @@ class GateTest(TaskDirectory):
 class ClaimedTest(GateTest):
     def setUp(self):
         super().setUp()
+        control.gate("1", str(self.out))
         self.issue["labels"] = [{"name": name} for name in ("ready-for-agent", "implementing")]
         self.event = {**labeled("labeled", "github-actions[bot]", "implementing"), "id": 987}
         self.pages = [[labeled("labeled", OWNER)], [self.event]]
         self.enterContext(mock.patch.dict(os.environ, {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}))
         self.record = self.root / "claim.json"
+        self.calls.clear()
 
     # GateTest's cases also exercise the shared validation against claimed state.
     def gate(self):
-        control.validate_issue("1", claimed=True)
+        control.validate_issue("1", claimed=True, captured=control.snapshot("1", str(self.out)))
 
     def test_accepts_authorized_issue_and_writes_body(self):
-        control.record_claim("1", str(self.record))
-        control.claimed("1", str(self.record))
+        control.record_claim("1", str(self.out), str(self.record))
+        control.claimed("1", str(self.out), str(self.record))
         record = json.loads(self.record.read_text())
         self.assertEqual(record, {"issue": "1", "repository": REPO, "run_id": "123",
-                                  "run_attempt": "1", "event_id": 987})
+                                  "run_attempt": "1", "event_id": 987,
+                                  "snapshot": control.snapshot("1", str(self.out))})
 
     def test_rejects_label_without_event_history(self):
         self.pages = [[labeled("labeled", OWNER)]]
@@ -491,14 +467,28 @@ class ClaimedTest(GateTest):
                 reason = "missing-authorization" if len(labels) == 1 else "already-claimed"
                 self.assertRejects(reason, self.gate)
 
-    def test_rejects_changed_or_missing_body(self):
-        for body in (BODY + "changed", None, ""):
-            with self.subTest(body=body):
-                self.issue["body"] = body
-                self.assertRejects("body-changed", self.gate)
+    def test_native_dependency_summary_blocks_gate(self):
+        self.issue["issue_dependencies_summary"] = {"blocked_by": 1}
+        self.gate()  # After claim, the captured dependencies remain authoritative.
+
+    def test_claim_detects_race_but_later_edits_do_not_change_spec(self):
+        original = self.issue["body"]
+        self.issue["body"] += " changed"
+        self.assertRejects("body-changed", control.record_claim, "1", str(self.out), str(self.record))
+        self.issue["body"] = original
+        control.record_claim("1", str(self.out), str(self.record))
+        self.issue["body"] = "Entirely new spec. Blocked by #99"
+        control.claimed("1", str(self.out), str(self.record))
+        self.assertEqual((self.out / "issue.md").read_text(), original)
+
+    def test_gate_captures_any_current_body_without_manual_config(self):
+        pass  # Gate capture is tested before the claim in GateTest.
+
+    def test_issue_ten_needs_no_task_file(self):
+        pass
 
     def test_rejects_stale_run_attempt_repository_issue_and_event(self):
-        control.record_claim("1", str(self.record))
+        control.record_claim("1", str(self.out), str(self.record))
         original = self.record.read_text()
         for key, value in (("run_id", "999"), ("run_attempt", "2"), ("repository", "other/repo"),
                            ("issue", "2"), ("event_id", 988)):
@@ -506,16 +496,16 @@ class ClaimedTest(GateTest):
                 data = json.loads(original)
                 data[key] = value
                 self.record.write_text(json.dumps(data))
-                self.assertRejects("stale-claim", control.claimed, "1", str(self.record))
+                self.assertRejects("stale-claim", control.claimed, "1", str(self.out), str(self.record))
         self.record.write_text(original)
         self.event["id"] = 989
-        self.assertRejects("stale-claim", control.claimed, "1", str(self.record))
+        self.assertRejects("stale-claim", control.claimed, "1", str(self.out), str(self.record))
 
     def test_rejects_claim_event_without_valid_id(self):
         for value in (None, "987", True, 0):
             with self.subTest(value=value):
                 self.event["id"] = value
-                self.assertRejects("invalid-claim-event", control.record_claim, "1", str(self.record))
+                self.assertRejects("invalid-claim-event", control.record_claim, "1", str(self.out), str(self.record))
         self.assertFalse(self.record.exists())
 
 
@@ -1144,7 +1134,7 @@ class RunnerStepTest(unittest.TestCase):
         (directory / "calls").mkdir()
         auth = directory / "auth.json"
         auth.write_text(json.dumps({"key": SECRET}))
-        (directory / "temp").mkdir()
+        (directory / "temp/input").mkdir(parents=True)
         for filename, content in (files or {}).items():
             (directory / filename).parent.mkdir(parents=True, exist_ok=True)
             (directory / filename).write_text(content)
@@ -1300,7 +1290,7 @@ class RunnerStepTest(unittest.TestCase):
         return result, [path.read_bytes() for path in sorted(bodies.iterdir())] if bodies.exists() else []
 
     def test_retro_publish_comments_every_report_on_open_pr_else_issue(self):
-        branch = json.loads((CONTROL.parent / "tasks/6.json").read_text())["branch"]
+        branch = "feat/6-implement"
         reports = {"feedback-1/review.md": "### Standards — full response\n\n```json\n{}\n```\n",
                    "feedback-2/checks.json": "{}",
                    "retro/retro.md": "1. **Navigation**: ping @maintainer about src/a.ts.\n"}
@@ -1373,7 +1363,7 @@ class WorkflowContractTest(unittest.TestCase):
 
     def test_issue_validation_steps_receive_model(self):
         validating = [step for step in self.steps()
-                      if re.search(r"control\.py (gate|record-claim|claimed) ", step.get("run", ""))]
+                      if re.search(r"control\.py (gate|revalidate|record-claim|claimed) ", step.get("run", ""))]
         self.assertEqual(len(validating), 4)
         for step in validating:
             with self.subTest(step=step.get("name")):
@@ -1402,12 +1392,11 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertNotIn("secrets", str(self.round["jobs"]["verify"]))
 
     def test_shared_files_contain_no_task_specific_text(self):
-        task = json.loads((CONTROL.parent / "tasks" / "6.json").read_text())
         shared = [*(CONTROL.parent / "prompts").glob("*.md"),
                   *(CONTROL.parents[2] / ".github/workflows").glob("software-factory-*.yml")]
         for path in shared:
             text = path.read_text()
-            for fragment in (task["title"], "2.5", "batch"):
+            for fragment in ("merge consecutive private messages", "2.5", "batch"):
                 with self.subTest(path=path.name, fragment=fragment):
                     self.assertNotIn(fragment, text)
 
@@ -1422,9 +1411,29 @@ class WorkflowContractTest(unittest.TestCase):
             "feedback-${{ steps.previous.outputs.round }}"})
         # Findings reach the PR as retro-publish comments, never through the PR body.
         handoff = self.implement["jobs"]["handoff"]
-        self.assertEqual(downloads(handoff), {"checked-${{ steps.approved.outputs.round }}", "factory-claim"})
+        self.assertEqual(downloads(handoff), {"checked-${{ steps.approved.outputs.round }}", "factory-claim", "factory-input"})
         self.assertNotIn("advisory", str(handoff))
         self.assertNotIn("review.json", str(handoff))
+
+    def test_handoff_uses_trusted_control_after_patch_with_write_token(self):
+        steps = self.implement["jobs"]["handoff"]["steps"]
+        checkouts = [step["with"] for step in steps if "actions/checkout@" in step.get("uses", "")]
+        self.assertEqual({item["path"] for item in checkouts}, {"trusted", "candidate"})
+        for step in steps:
+            if "control.py" in step.get("run", ""):
+                self.assertEqual(step["working-directory"], "candidate")
+                self.assertNotRegex(step["run"], r"python3 -I \.github/")
+                self.assertIn("../trusted/.github/software-factory/control.py", step["run"])
+
+    def test_snapshot_is_restored_after_repair_and_review_patch(self):
+        for name in ("implement", "review"):
+            steps = self.round["jobs"][name]["steps"]
+            self.assertTrue(any("git apply" in step.get("run", "") for step in steps))
+            restore = next(i for i, step in enumerate(steps) if 'cp -R "$RUNNER_TEMP/input"' in step.get("run", ""))
+            if name == "implement":
+                self.assertEqual(steps[restore]["env"]["ROUND"], "${{ inputs.round }}")
+                install = next(i for i, step in enumerate(steps) if "pnpm install" in step.get("run", ""))
+                self.assertLess(install, restore)
 
     def test_review_uploads_scanned_json_and_full_responses(self):
         steps = self.round["jobs"]["review"]["steps"]
@@ -1567,7 +1576,7 @@ class ConfigureTest(TaskDirectory):
                 self.assertFalse(config["share"])
                 self.assertEqual(config["permission"]["read"], {
                     "*": "allow", ".env": "deny", ".env.*": "deny", "**/.env": "deny",
-                    "**/.env.*": "deny", "**/auth.json": "deny"})
+                    "**/.env.*": "deny", ".env.example": "allow", "**/.env.example": "allow", "**/auth.json": "deny"})
                 self.assertEqual(config["permission"]["*"], "deny")
                 self.assertEqual(config["permission"]["edit"], "deny")
                 for tool in self.denied:
@@ -1575,27 +1584,13 @@ class ConfigureTest(TaskDirectory):
                 allowed = {tool for tool, rule in config["permission"].items() if rule == "allow"}
                 self.assertEqual(allowed, {"glob", "grep", "list"})
 
-    def test_implement_edits_only_allowed_paths(self):
-        names = ["src/a.ts", "packages/core/test/b.test.ts"]
-        (self.root / "tasks" / "1.json").write_text(json.dumps({**self.spec, "allowed_paths": names}))
+    def test_implement_edits_unrestricted_paths_with_credentials_denied(self):
         permission = self.configure("implement")["permission"]
-        self.assertEqual(permission["edit"], {"*": "deny", **{name: "allow" for name in names}})
-        # Last match wins in OpenCode, so the catch-all deny must precede the allows.
-        self.assertEqual(list(permission["edit"]), ["*", *names])
-        self.assertFalse(any(key.startswith("/") for key in permission["edit"]))
-        # Shell lets implementation run typecheck and tests; verify rechecks on a fresh runner.
+        self.assertEqual(permission["edit"], permission["read"])
+        self.assertEqual(permission["edit"]["*"], "allow")
+        self.assertEqual(permission["edit"][".env.example"], "allow")
+        self.assertEqual(permission["edit"]["**/auth.json"], "deny")
         self.assertEqual(permission["bash"], "allow")
-        for tool in self.denied:
-            if tool != "bash":
-                self.assertEqual(permission[tool], "deny")
-
-    def test_rejects_unsafe_allowed_paths(self):
-        for name in ("../outside.ts", "/etc/passwd", ".git/config", "src/../.git/hooks/pre-commit",
-                     "src/*.ts", "a\nb", "src/../../x.ts"):
-            with self.subTest(name=name):
-                (self.root / "tasks" / "1.json").write_text(json.dumps({**self.spec, "allowed_paths": [name]}))
-                self.assertRejects("invalid-allowed-path", self.configure, "implement")
-        self.assertFalse((self.directory / "oc/data/opencode/auth.json").exists())
 
     def test_rejects_unknown_mode(self):
         self.assertRejects("invalid-mode", self.configure, "admin")

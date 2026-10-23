@@ -26,24 +26,15 @@ class FinalPromptTest(TaskDirectory):
         for name in ("prompts", "skills"):
             shutil.copytree(CONTROL.parent / name, self.root / name)
 
-    def test_round_prompts_are_byte_identical(self):
-        # Rendered before review.md gained its placeholders.
-        for mode, digest in (
-            ("review-standards", "3f139d6901d23acd4ba56bf2024f6c12cad3828addf5127a672a9c30f29461ac"),
-            ("review-spec", "e601a73dc9672922d467c51d75c52d1e17cabc63d0564f67ca2e06b462843d55"),
-        ):
-            with self.subTest(mode=mode):
-                self.assertEqual(hashlib.sha256(control.prompt(mode, "1").encode()).hexdigest(), digest)
-
     def test_final_prompts_name_the_pr_diff(self):
         axes = control.review_axes()
         for axis in ("standards", "spec"):
             with self.subTest(axis=axis):
                 text = control.prompt(f"final-{axis}", BASE, HEAD)
                 for expected in (BASE, HEAD, ".factory-input/final.patch", ".factory-input/issue-*.md",
-                                 ".factory-input/task-*.md", "AGENTS.md", f"You are the {axis.title()} sub-agent", axes[axis]["brief"]):
+                                 "AGENTS.md", f"You are the {axis.title()} sub-agent", axes[axis]["brief"]):
                     self.assertIn(expected, text)
-                for absent in ("no commit", "candidate.patch", "task.json", "Check the thing.",
+                for absent in ("no commit", "candidate.patch", "task.json", "Check the thing.", "task-*.md",
                                "AXIS", "BLOCKING", "DIFF", "ACCEPTANCE"):
                     self.assertNotIn(absent, text)
 
@@ -90,10 +81,8 @@ class FinalIdentifyTest(TaskDirectory):
         self.assertEqual(self.identify(), {"pr": "2", "head": HEAD, "base": BASE, "skip": "false",
                                            "spec": "true"})
         self.assertEqual(sorted(path.name for path in self.output.iterdir()),
-                         ["identity.json", "issue-1.md", "issue-3.md", "task-1.md"])
+                         ["identity.json", "issue-1.md", "issue-3.md"])
         self.assertEqual((self.output / "issue-1.md").read_text(), "# Issue #1: Thing\n\nDo it.\n")
-        self.assertEqual((self.output / "task-1.md").read_text(),
-                         "Task-specific review requirements for issue #1:\nCheck the thing.\n")
         self.assertEqual((self.output / "issue-3.md").read_text(), "# Issue #3: Other\n\n\n")
         self.assertEqual(json.loads((self.output / "identity.json").read_text()),
                          {"pr": 2, "head": HEAD, "base": BASE, "issues": [1, 3], "run": "123"})
