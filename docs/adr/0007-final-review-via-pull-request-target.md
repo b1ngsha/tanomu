@@ -1,0 +1,40 @@
+---
+status: accepted
+---
+
+# Review new PRs using trusted main code
+
+Every new same-repository PR gets an independent Agent review published as plain
+comments before the maintainer decides Ready for review or merge. This complements
+the factory's round review, which drives repair, and ordinary PR CI. It has no
+merge authority and does not run candidate code.
+
+Use a separate `pull_request_target` workflow for opened, reopened and
+ready_for_review events, with trusted controls and prompts from main. A
+`pull_request` workflow can be rewritten by the candidate and is unsuitable for a
+review job holding a model credential. The candidate's exact head is data for
+read-only inspection; the diff starts at its merge base. OpenCode's standalone
+flag only starts a private server, so project config and Claude compatibility
+loading are explicitly disabled to prevent candidate plugins executing at startup.
+Repository and issue text are untrusted, including instructions embedded in them.
+The model job has only
+read permissions; a separate publisher has GitHub write permissions and no model
+secret. Neither job receives production access.
+
+Skip forks and automatically triggered Bot-authored PRs. Factory PRs created with
+`GITHUB_TOKEN` do not fire PR events, so handoff explicitly dispatches the workflow
+on main. Manual dispatch also forces a new review. Pushes do not trigger it. Runs
+are serialized per PR without cancelling the previous run; stale heads are not
+published.
+
+Standards always runs; Spec uses linked same-repository issues and any trusted task
+review requirements, excluding implementation path restrictions. Reports preserve
+all findings and full responses, split into credential-scanned comments with
+invisible head/digest/part markers. Only the Actions bot's markers count for
+complete-report deduplication or filling missing parts. Automatic recovery reuses
+an earlier trusted workflow's report only after checking its PR, head and digest;
+expired artifacts fall back to a fresh review. Manual dispatch always runs a new
+review. Old reports remain visible.
+Sessions expire after three days and are independent of factory retro. The cost is
+an extra model review and an advisory report that can become outdated after a push;
+the maintainer can explicitly request a fresh one.
