@@ -33,6 +33,7 @@ ready-for-agent + agent:implement -> implementing
   -> round: implement -> format + checks -> Standards review + Spec review
        check failure or blocking finding -> next round (four rounds in total)
   -> draft PR -> ready-for-human
+       -> independent final PR review -> advisory comments
   -> needs-human (authorization, scope, credential or infrastructure failure, or budget exhausted)
   -> retro (read-only proposals) -> comment on the draft PR, or on the issue without one
 ```
@@ -177,6 +178,42 @@ issue state. If GitHub cancels the entire run or its token/API is unavailable, t
 report job may not execute: inspect the run, remove a stale `implementing` label,
 and resolve any existing branch/PR before deliberately authorizing another run.
 Never blindly rerun a claimed or partially published task.
+
+## Final PR review
+
+`final-review.yml` starts a fresh read-only review when a same-repository PR is
+opened, reopened or marked Ready for review. Automatic entry skips Bot authors and
+forks. The factory explicitly dispatches it after creating its draft PR, because
+`GITHUB_TOKEN` creation does not fire PR workflows. Maintainers can force another
+review with `gh workflow run final-review.yml --ref main -f pr=N`. Pushes alone do
+not start another review.
+
+Workflow code, prompts and `control.py` come from main. The candidate is checked
+out at its exact head SHA only for inspection; no candidate code is executed.
+Symlinks remain in the diff but are removed from the inspection tree so they
+cannot redirect reads outside it. OpenCode project configuration and Claude
+compatibility loading are disabled; repository standards are read as data. The review uses the merge-base-to-head diff,
+so later unrelated main commits are excluded. Standards always runs. Spec uses
+this repository's issues referenced by
+`Closes`, `Fixes`, `Resolves` or `Refs #N` in the PR body, plus any task snapshot's
+`review` requirements on main. Task path allowlists are not part of this review.
+Without a linked issue, Spec is skipped and the report explains why.
+
+The model job has no GitHub write token. A separate publisher with no model secret
+posts blocking and advisory findings and the complete responses as new comments,
+never editing previous reports. It neutralizes mentions, scans credentials and
+splits losslessly at 60,000 UTF-8 bytes. Invisible first-line markers identify the
+head, report digest and part number. Only markers authored by `github-actions[bot]`
+count for deduplication: automatic entry skips a complete report for that head and
+rerunning the publisher fills missing parts of the same report. A moved head makes the report
+stale and prevents publication. Manual dispatch requests a fresh review.
+
+This review is advisory: it submits no GitHub Review, changes no labels or PR
+state, starts no repair, and is not a required merge check. The maintainer still
+inspects CI and decides Ready for review and merge. Factory retro neither waits
+for nor reads it; its scanned sessions stay in the separate review run's artifacts
+for three days. See [ADR 0007](adr/0007-final-review-via-pull-request-target.md).
+The automatic trigger can be validated live only after the workflow reaches main.
 
 ## Human-only operations
 
