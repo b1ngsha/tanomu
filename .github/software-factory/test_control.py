@@ -87,6 +87,49 @@ class TaskTest(TaskDirectory):
                 control.task(path.stem)
 
 
+class SkillPinTest(unittest.TestCase):
+    """The vendored skills are trusted prompt text, so pin them to one upstream commit."""
+
+    commit = "5beb35b040e3de97e54fa9e386d7e42d15c295c2"
+    # sha256 of the unmodified upstream files at `commit`.
+    files = {
+        "LICENSE": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
+        "code-review/SKILL.md": "09eb147f793e4647949edd32dbad278f0554dfb56e0d46b699cd4c2c55bf0357",
+        "retro/SKILL.md": "33fbc28568e3146f20fd908b12998bc0ab30aa4f4c87288199a40793efa94696",
+        "writing-for-agents/SKILL.md": "551adca942227b44192edba88acd4e8db911f0121ce58ad16944ccf6a896a74a",
+        "writing-for-agents/SKILL-MECHANICS.md":
+            "c768e6307c7c10728c401c213f2c4ba71c542127eeb7ad2956aabd15a0fa0059",
+    }
+    skills = CONTROL.parent / "skills"
+
+    def test_vendored_files_match_pinned_commit(self):
+        present = {path.relative_to(self.skills).as_posix() for path in self.skills.rglob("*")
+                   if path.is_file()}
+        self.assertEqual(present, {*self.files, "README.md"})
+        for name, digest in self.files.items():
+            with self.subTest(name=name):
+                self.assertEqual(hashlib.sha256((self.skills / name).read_bytes()).hexdigest(), digest)
+        readme = (self.skills / "README.md").read_text()
+        self.assertIn(self.commit, readme)
+        for name in self.files:
+            if name != "LICENSE":
+                self.assertIn(Path(name).name, readme)
+
+    def test_dependencies_are_vendored(self):
+        for name in self.files:
+            if not name.endswith(".md"):
+                continue
+            text = (self.skills / name).read_text()
+            with self.subTest(name=name):
+                for target in re.findall(r"\]\(([^)#]+)\)", text):
+                    if not re.match(r"[a-z]+:", target):
+                        self.assertTrue((self.skills / name).parent.joinpath(target).is_file(), target)
+                for skill in re.findall(r"Skill tool with `([a-z-]+)`", text):
+                    self.assertTrue((self.skills / skill / "SKILL.md").is_file(), skill)
+
+
+
+
 class ScopeTest(TaskDirectory):
     def setUp(self):
         super().setUp()

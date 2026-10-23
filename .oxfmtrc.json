@@ -1,4 +1,4 @@
 {
   "printWidth": 100,
-  "ignorePatterns": ["pnpm-lock.yaml", "**/drizzle/meta/**"]
+  "ignorePatterns": ["pnpm-lock.yaml", "**/drizzle/meta/**", ".github/software-factory/skills/**"]
 }
