@@ -25,9 +25,18 @@ permissions: {}
 jobs:
   implement:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 35
     permissions:
       contents: read
+    services:
+      db:
+        image: pgvector/pgvector:pg18
+        env:
+          POSTGRES_USER: tanomu
+          POSTGRES_PASSWORD: tanomu
+          POSTGRES_DB: tanomu
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U tanomu" --health-interval 5s --health-retries 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -67,6 +76,17 @@ jobs:
           set -euo pipefail
           printf '.factory-input/\n' >> .git/info/exclude
           if [ "$ROUND" -gt 1 ]; then git apply ../previous/candidate.patch; fi
+      # Installed from the trusted base before the model runs, so it can typecheck and test offline.
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          package_json_file: candidate/package.json
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: candidate/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: candidate
       - name: Install pinned runner
         run: npm install --global @opencode/cli@2.1.0 --no-audit --no-fund && opencode --version | grep -Fx 'opencode v2.1.0'
       - name: Configure isolated runner
@@ -80,24 +100,55 @@ jobs:
         env:
           MODEL: ${{ inputs.model }}
           ISSUE: ${{ inputs.issue }}
+          TEST_DATABASE_URL: postgres://tanomu:tanomu@localhost:5432/tanomu
         run: |
           set -euo pipefail
           test "$MODEL" = opencode/deepseek-v4.1-flash-free
           PWD=$(pwd -P)
           export PWD
           prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt implement "$ISSUE")
-          # Raw events and stderr stay on the runner; only the allowlisted summary is printed.
+          # Events go to a transcript artifact for retro; the log gets only the allowlisted summary.
           started=$(date +%s)
           status=0
-          timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
+          timeout --kill-after=15 1500 opencode run --standalone --format json -m "$MODEL" "$prompt" \
             > "$RUNNER_TEMP/implementation.jsonl" 2> "$RUNNER_TEMP/implementation.stderr" || status=$?
           python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/implementation.jsonl" \
-            "$status" "$(($(date +%s) - started))" "$started" || echo '::warning::opencode-summary-failed'
+            "$status" "$(($(date +%s) - started))" "$started" | tee "$RUNNER_TEMP/implementation-summary.txt" || echo '::warning::opencode-summary-failed'
           if [ "$status" -ne 0 ]; then
             echo "::error::opencode-exit-$status"
             exit "$status"
           fi
           python3 -I ../trusted/.github/software-factory/control.py events "$RUNNER_TEMP/implementation.jsonl"
+      # Recorded even when the run fails or times out: those sessions teach retro the most.
+      - name: Record session
+        id: session
+        if: always()
+        continue-on-error: true
+        env:
+          ROUND: ${{ inputs.round }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/session"
+          python3 -I trusted/.github/software-factory/control.py transcript \
+            "$RUNNER_TEMP/implementation.jsonl" "$RUNNER_TEMP/session/round$ROUND-implement.md"
+          if [ -f "$RUNNER_TEMP/implementation-summary.txt" ]; then
+            python3 -I trusted/.github/software-factory/control.py scan-session "$RUNNER_TEMP/implementation-summary.txt"
+            cp "$RUNNER_TEMP/implementation-summary.txt" "$RUNNER_TEMP/session/round$ROUND-implement-summary.txt"
+          fi
+          python3 -I trusted/.github/software-factory/control.py scan-session \
+            "$RUNNER_TEMP/session/round$ROUND-implement.md"
+      - if: always() && steps.session.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-implement-${{ inputs.round }}
+          # Only the files just scanned: the model's shell could have left others here.
+          path: |
+            ${{ runner.temp }}/session/round${{ inputs.round }}-implement.md
+            ${{ runner.temp }}/session/round${{ inputs.round }}-implement-summary.txt
+          retention-days: 3
+          if-no-files-found: error
+      # A best-effort early stop: after shell access nothing on this runner is trusted, so verify
+      # repeats the scope check on a fresh runner.
       - name: Validate and export patch
         working-directory: candidate
         env:
@@ -303,7 +354,7 @@ jobs:
             timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
               > "$RUNNER_TEMP/review-$axis.jsonl" 2> "$RUNNER_TEMP/review-$axis.stderr" || status=$?
             python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/review-$axis.jsonl" \
-              "$status" "$(($(date +%s) - started))" "$started" || echo '::warning::opencode-summary-failed'
+              "$status" "$(($(date +%s) - started))" "$started" | tee "$RUNNER_TEMP/review-$axis-summary.txt" || echo '::warning::opencode-summary-failed'
             if [ "$status" -ne 0 ]; then
               echo "::error::opencode-exit-$status"
               exit "$status"
@@ -313,6 +364,36 @@ jobs:
             "$RUNNER_TEMP/review-standards.jsonl" "$RUNNER_TEMP/review-spec.jsonl")
           python3 -I ../trusted/.github/software-factory/control.py scan-output "$REVIEW_OUTPUT"
           printf 'verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
+      - name: Record sessions
+        id: session
+        if: always()
+        continue-on-error: true
+        env:
+          ROUND: ${{ inputs.round }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/session"
+          for axis in standards spec; do
+            python3 -I trusted/.github/software-factory/control.py transcript \
+              "$RUNNER_TEMP/review-$axis.jsonl" "$RUNNER_TEMP/session/round$ROUND-review-$axis.md"
+            if [ -f "$RUNNER_TEMP/review-$axis-summary.txt" ]; then
+              python3 -I trusted/.github/software-factory/control.py scan-session "$RUNNER_TEMP/review-$axis-summary.txt"
+              cp "$RUNNER_TEMP/review-$axis-summary.txt" "$RUNNER_TEMP/session/round$ROUND-review-$axis-summary.txt"
+            fi
+            python3 -I trusted/.github/software-factory/control.py scan-session \
+              "$RUNNER_TEMP/session/round$ROUND-review-$axis.md"
+          done
+      - if: always() && steps.session.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: session-review-${{ inputs.round }}
+          path: |
+            ${{ runner.temp }}/session/round${{ inputs.round }}-review-standards.md
+            ${{ runner.temp }}/session/round${{ inputs.round }}-review-standards-summary.txt
+            ${{ runner.temp }}/session/round${{ inputs.round }}-review-spec.md
+            ${{ runner.temp }}/session/round${{ inputs.round }}-review-spec-summary.txt
+          retention-days: 3
+          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: feedback-${{ inputs.round }}

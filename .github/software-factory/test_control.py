@@ -736,6 +736,102 @@ class EventsTest(unittest.TestCase):
             self.assertEqual(len(control.events(str(path))), 2)
 
 
+class TranscriptTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.events = self.directory / "events.jsonl"
+        self.output = self.directory / "session.md"
+
+    def transcript(self, *lines):
+        self.events.write_text("".join(line if isinstance(line, str) else json.dumps(line) + "\n"
+                                       for line in lines))
+        control.transcript(str(self.events), str(self.output))
+        return self.output.read_text()
+
+    def test_renders_readable_events_in_order(self):
+        text = self.transcript(
+            {"type": "step_start", "timestamp": 1_000_000},
+            {"type": "reasoning", "timestamp": 1_002_500, "part": {"text": "Plan the test."}},
+            {"type": "tool_use", "timestamp": 1_005_000, "part": {"tool": "read", "state": {
+                "status": "completed", "input": {"filePath": "src/a.ts"}, "output": "one"}}},
+            {"type": "tool_use", "part": {"tool": "bash", "state": {"status": "error", "error": "exit 1"}}},
+            {"type": "step_finish", "part": {"reason": "stop", "tokens": {"input": 3}}},
+            "not json\n")
+        raw = self.events.read_text().splitlines()
+        expected = [
+            '### 1 step_start +0s\n{"type": "step_start", "timestamp": 1000000}',
+            "### 2 reasoning +2s\nPlan the test.",
+            '### 3 tool_use +5s\nread completed\ninput: {"filePath": "src/a.ts"}\noutput: one',
+            "### 4 tool_use\nbash error\ninput: null\noutput: exit 1",
+            '### 5 step_finish\nreason: stop, tokens: {"input": 3}',
+        ]
+        self.assertEqual(text, "\n\n".join(f"{body}\n\nRaw event:\n{line}"
+                                            for body, line in zip(expected, raw))
+                         + "\n\n### 6 unparseable\nnot json\n")
+
+    def test_keeps_long_fields_whole(self):
+        self.assertFalse(hasattr(control, "MAX_TRANSCRIPT_FIELD"))
+        long = "长🙂 " * 20_000
+        text = self.transcript({"type": "text", "part": {"text": long}},
+                               {"type": "tool_use", "part": {"tool": "read", "state": {
+                                   "status": "completed", "input": {"filePath": "é" * 5_000}, "output": long}}})
+        raw = self.events.read_text().splitlines()
+        self.assertEqual(text, f"### 1 text\n{long}\n\nRaw event:\n{raw[0]}\n\n"
+                         f'### 2 tool_use\nread completed\ninput: {json.dumps({"filePath": "é" * 5_000}, ensure_ascii=False)}\n'
+                         f"output: {long}\n\nRaw event:\n{raw[1]}\n")
+        self.assertNotIn("more characters", text)
+
+    def test_tolerates_missing_and_hostile_events(self):
+        control.transcript(str(self.directory / "missing.jsonl"), str(self.output))
+        self.assertEqual(self.output.read_text(), "No events were recorded.\n")
+        text = self.transcript([1], {"type": "tool_use", "part": {"tool": {"x": 1}, "state": []}},
+                               {"type": "text", "part": "x"}, "[" * 100_000 + "\n", b"\xff".decode("latin-1"))
+        self.assertIn("### 1 unparseable", text)
+        self.assertIn("### 4 unparseable", text)
+
+    def test_keeps_every_event_of_a_large_session(self):
+        self.assertFalse(hasattr(control, "MAX_TRANSCRIPT_BYTES"))
+        text = self.transcript(*({"type": "text", "part": {"text": f"event {n} " + "ü" * 1000}}
+                                 for n in range(4000)))
+        self.assertGreater(len(text.encode()), 8_000_000)
+        raw = self.events.read_text().splitlines()
+        self.assertEqual(text, "\n\n".join(f"### {n + 1} text\nevent {n} " + "ü" * 1000
+                                           + f"\n\nRaw event:\n{raw[n]}" for n in range(4000)) + "\n")
+
+    def test_retains_unknown_metadata_and_exact_raw_lines(self):
+        raw = '  {"type":"text", "extra":{"a":[1]}, "part":{"text":"ok", "metadata":"kept"}}  \n'
+        self.assertIn(raw, self.transcript(raw))
+        auth = self.directory / "auth.json"
+        auth.write_text(json.dumps({"key": "opaque-credential-value"}))
+        self.transcript({"type": "tool_use", "part": {"tool": "read", "state": {
+            "output": "clean", "metadata": "opaque-credential-value"}}})
+        with mock.patch.dict(os.environ, {"FACTORY_AUTH_FILE": str(auth)}), \
+                self.assertRaisesRegex(ValueError, "^credential-in-artifact$"):
+            control.scan(str(self.output), limit=None)
+
+    def test_session_scan_allows_any_transcript_size_but_rejects_credentials(self):
+        auth = self.directory / "auth.json"
+        auth.write_text(json.dumps({"key": "opaque-credential-value"}))
+        large = [{"type": "text", "part": {"text": "x" * 1000}}] * 600
+        with mock.patch.dict(os.environ, {"FACTORY_AUTH_FILE": str(auth)}):
+            self.transcript(*large)
+            with self.assertRaisesRegex(ValueError, "^artifact-too-large$"):
+                control.scan(str(self.output))
+            control.scan(str(self.output), limit=None)
+            for leak, reason in (("opaque-credential-value", "credential-in-artifact"),
+                                 (SECRET, "credential-pattern-in-artifact")):
+                with self.subTest(leak=leak[:6]), self.assertRaisesRegex(ValueError, f"^{reason}$"):
+                    self.transcript(*large, {"type": "tool_use", "part": {"tool": "read", "state": {"output": leak}}})
+                    control.scan(str(self.output), limit=None)
+            result = subprocess.run([sys.executable, "-I", str(CONTROL), "scan-session", str(self.output)],
+                                    capture_output=True, text=True, env={**os.environ})
+            self.assertEqual((result.returncode, result.stderr), (1, "::error::credential-pattern-in-artifact\n"))
+            self.transcript(*large)
+            result = subprocess.run([sys.executable, "-I", str(CONTROL), "scan-session", str(self.output)],
+                                    capture_output=True, text=True, env={**os.environ})
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+
 class DiagnoseTest(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -935,6 +1031,46 @@ class RunnerStepTest(unittest.TestCase):
         self.assertFalse((self.directory / "output").exists())
 
 
+    def test_sessions_are_always_recorded_and_scanned(self):
+        for job, events in (("implement", ["implementation"]), ("review", ["review-standards", "review-spec"])):
+            with self.subTest(job=job):
+                # A run that died before writing any event still yields a transcript.
+                result, _ = self.run_step(job, select="control.py transcript")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                sessions = sorted((self.directory / "temp/session").iterdir())
+                self.assertEqual(len(sessions), len(events))
+                for session in sessions:
+                    self.assertEqual(session.read_text(), "No events were recorded.\n")
+                summaries = {f"temp/{name}-summary.txt": 'opencode-summary {"exit_status": 124}\n'
+                             for name in events}
+                # The implementation's shell can leave other files beside the transcripts.
+                summaries["temp/session/leak.txt"] = SECRET
+                result, _ = self.run_step(job, select="control.py transcript", files=summaries)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                saved = list((self.directory / "temp/session").glob("*-summary.txt"))
+                self.assertEqual(len(saved), len(events))
+                self.assertTrue(all('"exit_status": 124' in path.read_text() for path in saved))
+                uploaded = self.uploaded(job)
+                self.assertEqual(len(uploaded), 2 * len(events))
+                self.assertNotIn("leak.txt", uploaded)
+                leak = json.dumps({"type": "text", "part": {"text": SECRET}}) + "\n"
+                result, _ = self.run_step(job, select="control.py transcript",
+                                          files={f"temp/{name}.jsonl": leak for name in events})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("::error::credential-in-artifact", result.stderr)
+                self.assertNotIn(SECRET, result.stdout + result.stderr)
+
+    def uploaded(self, job):
+        """Files the session upload step would pick up from the last run's temp directory."""
+        workflow, name = self.jobs[job]
+        upload = next(step for step in WorkflowContractTest.load(workflow)["jobs"][name]["steps"]
+                      if str(step.get("with", {}).get("name", "")).startswith("session-"))
+        paths = (Path(line.replace("${{ runner.temp }}", str(self.directory / "temp"))
+                      .replace("${{ inputs.round }}", "1")) for line in upload["with"]["path"].splitlines())
+        return [file.name for path in paths
+                for file in (sorted(path.rglob("*")) if path.is_dir() else [path]) if file.is_file()]
+
+
 class WorkflowContractTest(unittest.TestCase):
     """Wiring between jobs is not exercised by the unit tests above, so pin its invariants."""
 
@@ -1015,6 +1151,13 @@ class WorkflowContractTest(unittest.TestCase):
         return {name: step for name, job in self.jobs() for step in job.get("steps", [])
                 if "opencode run" in step.get("run", "")}
 
+    def test_model_deadlines(self):
+        steps = self.opencode_steps()
+        self.assertEqual(set(steps), {"implement", "review"})
+        for name, seconds in (("implement", 1500), ("review", 600)):
+            with self.subTest(job=name):
+                self.assertEqual(re.findall(r"timeout --kill-after=15 (\d+) opencode run", steps[name]["run"]),
+                                 [str(seconds)])
 
     def test_review_runs_both_axes_and_aggregates_both_files(self):
         run = self.opencode_steps()["review"]["run"]
@@ -1024,6 +1167,38 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertRegex(run, r'control\.py review \\\s+"\$RUNNER_TEMP/review-standards\.jsonl" '
                               r'"\$RUNNER_TEMP/review-spec\.jsonl"\)')
 
+    def test_only_implementation_gets_shell(self):
+        modes = {name: re.findall(r"control\.py configure \S+ (\w+)", step["run"])
+                 for name, job in self.jobs() for step in job.get("steps", [])
+                 if "control.py configure" in step.get("run", "")}
+        self.assertEqual(modes, {"implement": ["implement"], "review": ["review"]})
+
+    def test_sessions_are_always_scanned_then_uploaded_for_three_days(self):
+        uploads = 0
+        for name, job in self.jobs():
+            steps = job.get("steps", [])
+            for index, step in enumerate(steps):
+                if not str(step.get("with", {}).get("name", "")).startswith("session-"):
+                    continue
+                uploads += 1
+                with self.subTest(job=name):
+                    record = steps[index - 1]
+                    self.assertEqual((record.get("id"), record.get("if")), ("session", "always()"))
+                    self.assertTrue(record.get("continue-on-error"))
+                    run = record["run"]
+                    self.assertLess(run.index("control.py transcript"), run.index("control.py scan-session"))
+                    self.assertEqual(run.count("control.py transcript"), 1)
+                    self.assertEqual(run.count("control.py scan-session"), 2)
+                    self.assertLess(run.index('scan-session "$RUNNER_TEMP/'), run.index('cp "$RUNNER_TEMP/'))
+                    self.assertEqual(step["if"], "always() && steps.session.outcome == 'success'")
+                    # Exact scanned files only, never the whole directory or a wildcard.
+                    paths = step["with"]["path"].splitlines()
+                    for path in paths:
+                        self.assertTrue(path.startswith("${{ runner.temp }}/session/"), path)
+                        self.assertTrue(path.endswith((".md", "-summary.txt")), path)
+                        self.assertNotIn("*", path)
+                    self.assertEqual(step["with"]["retention-days"], 3)
+        self.assertEqual(uploads, 2)
 
     def test_every_factory_artifact_expires_after_three_days(self):
         for name, job in self.jobs():
@@ -1050,16 +1225,20 @@ class ConfigureTest(TaskDirectory):
         control.configure(str(self.directory / "oc"), mode)
         return json.loads((self.directory / "oc/opencode.json").read_text())
 
-    def test_review_is_read_only(self):
-        config = self.configure("review")
-        self.assertFalse(config["share"])
-        self.assertEqual(config["permission"]["read"], {
-            "*": "allow", ".env": "deny", ".env.*": "deny", "**/.env": "deny",
-            "**/.env.*": "deny", "**/auth.json": "deny"})
-        self.assertEqual(config["permission"]["*"], "deny")
-        self.assertEqual(config["permission"]["edit"], "deny")
-        for tool in self.denied:
-            self.assertEqual(config["permission"][tool], "deny")
+    def test_review_and_retro_are_read_only(self):
+        for mode in ("review",):
+            with self.subTest(mode=mode):
+                config = self.configure(mode)
+                self.assertFalse(config["share"])
+                self.assertEqual(config["permission"]["read"], {
+                    "*": "allow", ".env": "deny", ".env.*": "deny", "**/.env": "deny",
+                    "**/.env.*": "deny", "**/auth.json": "deny"})
+                self.assertEqual(config["permission"]["*"], "deny")
+                self.assertEqual(config["permission"]["edit"], "deny")
+                for tool in self.denied:
+                    self.assertEqual(config["permission"][tool], "deny")
+                allowed = {tool for tool, rule in config["permission"].items() if rule == "allow"}
+                self.assertEqual(allowed, {"glob", "grep", "list"})
 
     def test_implement_edits_only_allowed_paths(self):
         names = ["src/a.ts", "packages/core/test/b.test.ts"]
@@ -1069,8 +1248,11 @@ class ConfigureTest(TaskDirectory):
         # Last match wins in OpenCode, so the catch-all deny must precede the allows.
         self.assertEqual(list(permission["edit"]), ["*", *names])
         self.assertFalse(any(key.startswith("/") for key in permission["edit"]))
+        # Shell lets implementation run typecheck and tests; verify rechecks on a fresh runner.
+        self.assertEqual(permission["bash"], "allow")
         for tool in self.denied:
-            self.assertEqual(permission[tool], "deny")
+            if tool != "bash":
+                self.assertEqual(permission[tool], "deny")
 
     def test_rejects_unsafe_allowed_paths(self):
         for name in ("../outside.ts", "/etc/passwd", ".git/config", "src/../.git/hooks/pre-commit",
