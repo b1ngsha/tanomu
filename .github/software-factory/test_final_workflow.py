@@ -20,7 +20,7 @@ def git(cwd, *args):
 
 
 class FinalRunnerStepTest(unittest.TestCase):
-    """Runs the real final review step scripts against stub `opencode`, `gh` and `timeout`."""
+    """Runs real supervised final review steps against stub `opencode` and `gh`."""
 
     jobs = {"identify": ("final-review.yml", "identify"),
             "review": ("final-review.yml", "review"), "publish": ("final-review.yml", "publish"),
@@ -174,10 +174,10 @@ class FinalRunnerStepTest(unittest.TestCase):
     def test_handoff_starts_the_review_only_for_a_pr_number(self):
         for pr, started in (("17", True), ("", False), ("0", False), ("17\nx", False), ("1;id", False)):
             with self.subTest(pr=pr):
-                result, _ = self.run_step("handoff", select="gh workflow run", env={"PR": pr})
+                result, _ = self.run_step("handoff", select="gh workflow run", env={"PR": pr, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"})
                 self.assertEqual(result.returncode, 0 if started else 1)
                 self.assertEqual(self.calls("gh"), [["workflow", "run", "final-review.yml", "--ref", "main",
-                                                     "-f", f"pr={pr}"]] if started else [])
+                                                     "-f", f"pr={pr}", "-f", "parent=123.2"]] if started else [])
 
 
 class FinalWorkflowContractTest(unittest.TestCase):
@@ -252,7 +252,7 @@ class FinalWorkflowContractTest(unittest.TestCase):
                       run)
         model = next(step for step in self.jobs["review"]["steps"] if "opencode run" in step.get("run", ""))
         self.assertEqual(model["env"]["MODEL"], control.MODEL)
-        self.assertEqual(re.findall(r"timeout --kill-after=15 (\d+) opencode run", model["run"]), ["600"])
+        self.assertEqual(re.findall(r' (\d+) -- \\\s+opencode run', model["run"]), ["600"])
         self.assertIn('configure \\"$RUNNER_TEMP/model\\" review', run)
 
     def test_artifacts_are_explicit_and_expire_after_three_days(self):

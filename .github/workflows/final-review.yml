@@ -1,4 +1,5 @@
 name: Final PR review
+run-name: "Final PR #${{ github.event.pull_request.number || inputs.pr }} · parent ${{ inputs.parent || 'none' }}"
 on:
   # Runs this workflow and control.py from main; the PR head is only ever read as data.
   pull_request_target:
@@ -9,6 +10,10 @@ on:
       pr:
         description: Pull request number to review again
         required: true
+        type: string
+      parent:
+        description: Optional originating factory run_id.run_attempt (metadata only)
+        required: false
         type: string
 permissions: {}
 concurrency:
@@ -135,12 +140,10 @@ jobs:
           files=()
           for axis in "${axes[@]}"; do
             prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt "final-$axis" "$BASE" "$HEAD")
-            started=$(date +%s)
             status=0
-            timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
-              > "$RUNNER_TEMP/final-$axis.jsonl" 2> "$RUNNER_TEMP/final-$axis.stderr" || status=$?
-            python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/final-$axis.jsonl" \
-              "$status" "$(($(date +%s) - started))" "$started" | tee "$RUNNER_TEMP/final-$axis-summary.txt" || echo '::warning::opencode-summary-failed'
+            python3 -I ../trusted/.github/software-factory/supervisor.py \
+              "$RUNNER_TEMP/final-$axis.jsonl" "$RUNNER_TEMP/final-$axis-summary.txt" "final-$axis" 600 -- \
+              opencode run --standalone --format json -m "$MODEL" "$prompt" || status=$?
             if [ "$status" -ne 0 ]; then
               echo "::error::opencode-exit-$status"
               exit "$status"

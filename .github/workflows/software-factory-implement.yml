@@ -1,4 +1,5 @@
 name: Software factory implement
+run-name: "Factory issue #${{ github.event.issue.number || inputs.issue_number }} · attempt ${{ github.run_attempt }}"
 on:
   issues:
     types: [labeled]
@@ -269,7 +270,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo '::warning::invalid-pr-number'; exit 1; }
-          gh workflow run final-review.yml --ref main -f pr="$PR"
+          gh workflow run final-review.yml --ref main -f pr="$PR" -f parent="$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT"
   retro:
     needs: [claim, round1, round2, round3, round4, handoff]
     if: always() && !cancelled() && needs.claim.result == 'success'
@@ -331,12 +332,10 @@ jobs:
           PWD=$(pwd -P)
           export PWD
           prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt retro "$ISSUE")
-          started=$(date +%s)
           status=0
-          timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
-            > "$RUNNER_TEMP/retro.jsonl" 2> "$RUNNER_TEMP/retro.stderr" || status=$?
-          python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/retro.jsonl" \
-            "$status" "$(($(date +%s) - started))" "$started" | tee "$RUNNER_TEMP/retro-summary.txt" || echo '::warning::opencode-summary-failed'
+          python3 -I ../trusted/.github/software-factory/supervisor.py \
+            "$RUNNER_TEMP/retro.jsonl" "$RUNNER_TEMP/retro-summary.txt" "retro" 600 -- \
+            opencode run --standalone --format json -m "$MODEL" "$prompt" || status=$?
           if [ "$status" -ne 0 ]; then
             echo "::error::opencode-exit-$status"
             exit "$status"

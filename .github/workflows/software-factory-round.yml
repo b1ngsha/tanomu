@@ -112,12 +112,10 @@ jobs:
           if [ "$ROUND" -gt 1 ]; then cp "$RUNNER_TEMP/feedback/"* .factory-input/; fi
           prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt implement "$ISSUE")
           # Events go to a transcript artifact for retro; the log gets only the allowlisted summary.
-          started=$(date +%s)
           status=0
-          timeout --kill-after=15 1500 opencode run --standalone --format json -m "$MODEL" "$prompt" \
-            > "$RUNNER_TEMP/implementation.jsonl" 2> "$RUNNER_TEMP/implementation.stderr" || status=$?
-          python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/implementation.jsonl" \
-            "$status" "$(($(date +%s) - started))" "$started" | tee "$RUNNER_TEMP/implementation-summary.txt" || echo '::warning::opencode-summary-failed'
+          python3 -I ../trusted/.github/software-factory/supervisor.py \
+            "$RUNNER_TEMP/implementation.jsonl" "$RUNNER_TEMP/implementation-summary.txt" "implement" 1500 -- \
+            opencode run --standalone --format json -m "$MODEL" "$prompt" || status=$?
           if [ "$status" -ne 0 ]; then
             echo "::error::opencode-exit-$status"
             exit "$status"
@@ -365,12 +363,10 @@ jobs:
           for axis in standards spec; do
             prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt "review-$axis" "$ISSUE")
             printf '%s=started\n' "$axis" >> "$GITHUB_OUTPUT"
-            started=$(date +%s)
             status=0
-            timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
-              > "$RUNNER_TEMP/review-$axis.jsonl" 2> "$RUNNER_TEMP/review-$axis.stderr" || status=$?
-            python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/review-$axis.jsonl" \
-              "$status" "$(($(date +%s) - started))" "$started" | tee "$RUNNER_TEMP/review-$axis-summary.txt" || echo '::warning::opencode-summary-failed'
+            python3 -I ../trusted/.github/software-factory/supervisor.py \
+              "$RUNNER_TEMP/review-$axis.jsonl" "$RUNNER_TEMP/review-$axis-summary.txt" "review-$axis" 600 -- \
+              opencode run --standalone --format json -m "$MODEL" "$prompt" || status=$?
             if [ "$status" -ne 0 ]; then
               failure=runner-error
               if [ "$status" -eq 124 ]; then failure=timeout; fi

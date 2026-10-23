@@ -12,7 +12,7 @@ This repository is public, but the software factory treats repository text as un
 
 ## Phased rollout
 
-The first phase is a manually dispatched, read-only smoke workflow. It uses a disposable, redacted fixture in the runner's temporary directory and writes only the Actions step summary as a repository-visible result. It does not check out tanomu, read an issue, write an issue or pull request, create a branch, call Feishu, or contact the production server.
+The first phase is a manually dispatched, read-only smoke workflow. It uses a disposable, redacted fixture in the runner's temporary directory and writes only the Actions step summary as a repository-visible result. It checks out only trusted orchestration helpers outside the model fixture; it does not read an issue, write an issue or pull request, create a branch, call Feishu, or contact the production server.
 
 The smoke must be confirmed by the maintainer before a later pull request adds implementation, review, or rework workflows. Those workflows use patch artifacts, independent review context, and human approval before merge.
 
@@ -137,8 +137,18 @@ artifact path without closing that boundary. Review and retro sessions are
 read-only: they may only read, glob, grep and list inside their workspace, with `.env`
 and `auth.json` reads denied.
 
+The shared trusted `supervisor.py` owns process-group deadlines and cleanup for implementation,
+review, retro, final review and smoke. Every 60 seconds it writes an allowlisted heartbeat
+with phase/axis, elapsed time, event/tool counts and last observed event age. The age is
+based on local file activity when event counts advance, not a provider diagnosis. Closed or
+full log pipes may drop telemetry without blocking cleanup. Normal/nonzero exits retain their
+status; deadlines return 124, signals return 128 + signal. Descendants receive TERM and,
+after at most 15 seconds, KILL, even if the leader already exited. Hard runner termination
+can still prevent cleanup or terminal reporting. Heartbeats stay in Actions logs; GitHub
+comments change only when orchestration phases/outcomes change.
+
 The implementation run has a 1500-second limit; each review axis and the retro run
-have 600 seconds each. All have a 15-second
+have 600 seconds each (smoke has 420 seconds within its ten-minute job). All have a 15-second
 kill grace period. After success, timeout (exit 124) or any other nonzero exit, a trusted
 `opencode-summary` line is written to the step log and job summary. It has the exit
 status, elapsed seconds, event and tool-call counts by status, step finish reasons,

@@ -1180,7 +1180,7 @@ class SummaryTest(unittest.TestCase):
 
 
 class RunnerStepTest(unittest.TestCase):
-    """Runs the real OpenCode step scripts against stub `opencode` and `timeout` binaries."""
+    """Runs real supervised OpenCode step scripts against stub `opencode` binaries."""
 
     jobs = {"implement": ("software-factory-round.yml", "implement"),
             "review": ("software-factory-round.yml", "review"),
@@ -1199,12 +1199,6 @@ class RunnerStepTest(unittest.TestCase):
         (directory / "workspace").mkdir()
         bin_dir = directory / "bin"
         bin_dir.mkdir()
-        # A real deadline shortened to one second; exit 124 mirrors coreutils timeout.
-        (bin_dir / "timeout").write_text(
-            f"#!{sys.executable}\nimport subprocess, sys\nargs = sys.argv[1:]\n"
-            "while args[0].startswith('-'): args.pop(0)\n"
-            "try: sys.exit(subprocess.run(args[1:], timeout=1).returncode)\n"
-            "except subprocess.TimeoutExpired: sys.exit(124)\n")
         # Every call is logged in order, NUL-separated, so tests can count sessions and calls.
         log = 'printf "%s\\0" "$@" > "$CALLS/$(printf %03d $(($(ls "$CALLS" | wc -l))))"\n'
         (bin_dir / "opencode").write_text(f"#!/bin/bash\n{log}{opencode}\n")
@@ -1228,7 +1222,9 @@ class RunnerStepTest(unittest.TestCase):
                "GITHUB_OUTPUT": str(directory / "output"), "GITHUB_STEP_SUMMARY": str(directory / "summary"),
                "GITHUB_REPOSITORY": REPO, "GITHUB_RUN_ID": "123", "CALLS": str(directory / "calls"),
                "REVIEW_OUTPUT": str(directory / "temp/feedback/review.json"), **(env or {})}
-        result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=cwd, env=env,
+        # Keep the real supervisor and cleanup; shorten only the workflow's model budget.
+        script = re.sub(r' (600|1500) --', ' 1 --', step["run"])
+        result = subprocess.run(["bash", "-e", "-c", script], cwd=cwd, env=env,
                                 capture_output=True, text=True, timeout=30)
         return result, (directory / "summary").read_text() if (directory / "summary").exists() else ""
 
@@ -1557,14 +1553,14 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(set(steps), {"implement", "review", "retro"})
         for name, seconds in (("implement", 1500), ("review", 600), ("retro", 600)):
             with self.subTest(job=name):
-                self.assertEqual(re.findall(r"timeout --kill-after=15 (\d+) opencode run", steps[name]["run"]),
+                self.assertEqual(re.findall(r' (\d+) -- \\\s+opencode run', steps[name]["run"]),
                                  [str(seconds)])
 
     def test_review_runs_both_axes_and_aggregates_both_files(self):
         run = self.opencode_steps()["review"]["run"]
         self.assertIn("for axis in standards spec; do", run)
         self.assertIn('prompt "review-$axis"', run)
-        self.assertIn('> "$RUNNER_TEMP/review-$axis.jsonl"', run)
+        self.assertIn('"$RUNNER_TEMP/review-$axis.jsonl" "$RUNNER_TEMP/review-$axis-summary.txt" "review-$axis"', run)
         self.assertRegex(run, r'control\.py review \\\s+"\$RUNNER_TEMP/review-standards\.jsonl" '
                               r'"\$RUNNER_TEMP/review-spec\.jsonl"\)')
 
