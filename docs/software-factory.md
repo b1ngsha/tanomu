@@ -30,8 +30,8 @@ The implementation lifecycle is:
 
 ```text
 ready-for-agent + agent:implement -> implementing
-  -> round: implement -> format + checks -> independent review
-       check failure or review findings -> next round (four rounds in total)
+  -> round: implement -> format + checks -> Standards review + Spec review
+       check failure or blocking finding -> next round (four rounds in total)
   -> draft PR -> ready-for-human
   -> needs-human (authorization, scope, credential or infrastructure failure, or budget exhausted)
 ```
@@ -50,6 +50,20 @@ The prompts and workflows are task-independent. Each `tasks/N.json` supplies the
 commit/PR `title`, the `implement` and `review` requirements appended to the generic
 prompts, and the human `acceptance` steps listed in the draft PR. A new task needs
 only its snapshot; `control.py` rejects a snapshot missing any of these fields.
+
+Review follows skills vendored, unmodified, in `skills/` from one pinned
+upstream commit (see `skills/README.md`). The factory never fetches skills at run
+time. `control.py` inlines them into the prompts: the two sub-agent briefs and the
+standards section from `code-review`. The regression suite pins
+the commit and every file's SHA-256, and fails if a vendored skill links a file or
+names a skill that is not vendored. To update, replace all of them from one new
+commit and update both pins; `control.py` rejects a `code-review` skill whose briefs
+or standards section it can no longer find. The prompt builder removes only the
+briefs' upstream "Under 400 words." instruction; vendored files stay unchanged.
+Reviews have no response word, character or finding-count cap, and their
+prompts explicitly require supported judgement calls to be included. A provider finish
+reason of `length` or `content-filter` fails with `incomplete-output`, rather than
+accepting a partial review as complete.
 
 The only accepted model is `opencode/deepseek-v4.1-flash-free`; no paid fallback is
 configured. OpenCode's [provider policy](https://opencode.ai/docs/zen/) states that
@@ -73,10 +87,16 @@ label. Each round generates a patch, then a fresh runner without model credentia
 applies `pnpm format`, rechecks scope, uploads that formatted patch, and only then
 runs lint, typecheck, admin build and database tests. A failing check produces
 `checks.json` (the command and a bounded, ANSI-stripped output tail) for the next
-round; passing checks lead to a fresh read-only review, whose findings produce
-`review.json`. Both kinds of repair share one budget of four rounds. Repair is not
-a blind retry: every round is checked again, and only the patch that passed checks
-and review is published.
+round. Passing checks lead to a read-only review along the two `code-review` axes,
+each in its own fresh OpenCode session so neither sees the other's conversation:
+Standards (documented repository standards plus the smell baseline) and Spec (the
+issue and the task's review requirements). Each axis returns
+`{"findings":[{"blocking":bool,"finding":str}]}`; `control.py review` validates both
+and writes `review.json` with the verdict, the blocking findings and the advisory
+ones, each labelled with its axis and never reranked. Only a blocking finding
+requests changes. Smells are always advisory. Both kinds of repair share one budget of four
+rounds. Repair is not a blind retry: every round is checked again, and only the
+patch that passed checks and review is published.
 
 Authorization, scope, credential-scan, implementer-error and infrastructure failures
 are not repairable and stop the run, as does a repair round that leaves the patch
@@ -94,7 +114,7 @@ stderr and auth files are never uploaded. Workspace paths are explicitly pinned
 with `PWD`; edit permission permits only the task's relative file paths, after a default deny rule. Shell,
 network tools, external directories and subagents are denied.
 
-Each OpenCode run (implement and review) keeps its 600-second limit, with a 15-second
+Implementation and each review axis have a 600-second limit, with a 15-second
 kill grace period. After success, timeout (exit 124) or any other nonzero exit, a trusted
 `opencode-summary` line is written to the step log and job summary. It has the exit
 status, elapsed seconds, event and tool-call counts by status, step finish reasons,
