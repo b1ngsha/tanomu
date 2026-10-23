@@ -1,0 +1,37 @@
+name: Software factory observation
+on:
+  workflow_run:
+    workflows: [Software factory implement, Final PR review]
+    types: [in_progress, completed]
+permissions: {}
+concurrency:
+  group: factory-observation-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+jobs:
+  observe:
+    if: github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 310
+    permissions:
+      actions: read
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      # workflow_run executes from main; never check out the source run's candidate.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Observe trusted execution metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id }}
+        run: python3 -I .github/software-factory/observe.py "$SOURCE_RUN" "$RUNNER_TEMP/metadata/execution.json"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: factory-metadata-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/metadata/execution.json
+          retention-days: 90
+          if-no-files-found: ignore

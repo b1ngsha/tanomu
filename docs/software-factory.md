@@ -248,6 +248,41 @@ for nor reads it; its scanned sessions stay in the separate review run's artifac
 for three days. See [ADR 0007](adr/0007-final-review-via-pull-request-target.md).
 The automatic trigger can be validated live only after the workflow reaches main.
 
+## Execution observation and recovery
+
+GitHub is the status store: bot-owned issue/PR comments are the durable entry point,
+Actions summaries provide aggregate views, and safe metadata artifacts last 90 days.
+Sensitive session/patch/review/retro artifacts retain their three-day lifetime and scans.
+No database, external telemetry, secret or notification integration is needed.
+
+`software-factory-observe.yml` runs trusted main code on implementation/final-review
+`workflow_run` in-progress and completed events. It polls orchestration metadata once per
+minute for at most five hours, updating its bot-owned comment only when phase/outcomes
+change. This is STARTED and phase progress, not a model heartbeat notification. It writes
+one schema-versioned execution manifest with repository, run/attempt, issue/PR, explicit
+parent identity, branch/head/base when known, state/reason, phase/jobs, times, next action
+and evidence links. Missing fields remain unavailable. Implementation delivery, independent
+final-review publication, retro publication and ordinary PR CI are separate states.
+The existing gate rejection/round diagnostics remain detailed evidence; observer comments
+use their own marker and cannot overwrite those diagnostics or final-review report markers.
+
+The observer verifies workflow ID/path, repository, main, event, owner actors, issue/PR
+ownership and same-repository target before writes. Public/unrelated events are summary-only.
+The observer never downloads model artifacts or executes candidate code. Final bot dispatch
+must name its originating `run_id.run_attempt`; trusted parent metadata, successful handoff
+and exact task PR branch bind that identity. The dispatch API returns no child run ID:
+only an observed child supplies its own link/state. A standalone review has no parent.
+The final-review dedupe/resume protocol remains unchanged. No automatic retry follows
+failed dispatch, final review, retro, CI or observation.
+
+Comments survive artifact expiry, but observers are best effort: checkout/API/token failures,
+GitHub scheduling delays, hard cancellation and a run exceeding the observation window may
+leave a partial snapshot. Reruns share a source run marker and show the current attempt;
+parent/child correlation retains the explicit originating attempt. Inspect the Actions run
+and bounded recovery summary before removing stale labels, resolving existing branches/PRs
+and deliberately authorizing a new task. A green implementation is not proof of final review,
+retro delivery, ordinary CI, deployment or human acceptance.
+
 ## Human-only operations
 
 The maintainer must configure GitHub rulesets, the `production` environment, secrets, the GitHub App, server SSH policy, and the model provider account. The maintainer must also confirm the deployment after setting `SESSION_SECRET`, review every factory PR, and perform real Feishu acceptance. No workflow in this phase performs those operations.
