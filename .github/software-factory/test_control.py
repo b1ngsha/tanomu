@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -74,12 +75,51 @@ class TaskTest(TaskDirectory):
                 (self.root / "tasks" / "1.json").write_text(json.dumps({**self.spec, "title": title}))
                 self.assertRejects("invalid-title", control.task, "1")
 
-    def test_prompt_appends_task_requirements(self):
-        (self.root / "prompts").mkdir()
-        (self.root / "prompts" / "review.md").write_text("Generic review.\n")
-        self.assertEqual(control.prompt("review", "1"),
-                         "Generic review.\n\nTask-specific requirements:\nCheck the thing.\n")
-        self.assertRejects("invalid-mode", control.prompt, "acceptance", "1")
+    def real_prompts(self):
+        for name in ("prompts", "skills"):
+            shutil.copytree(CONTROL.parent / name, self.root / name)
+
+    def test_implement_prompt_appends_task_requirements(self):
+        self.real_prompts()
+        text = control.prompt("implement", "1")
+        self.assertTrue(text.startswith((CONTROL.parent / "prompts/implement.md").read_text()))
+        self.assertTrue(text.endswith("\nTask-specific requirements:\nBuild the thing.\n"))
+
+    def test_review_axes_get_separate_briefs(self):
+        self.real_prompts()
+        standards = control.prompt("review-standards", "1")
+        spec = control.prompt("review-spec", "1")
+        axes = control.review_axes()
+        for text, axis, other in ((standards, "standards", "spec"), (spec, "spec", "standards")):
+            with self.subTest(axis=axis):
+                self.assertIn(f"You are the {axis.title()} sub-agent", text)
+                self.assertIn(f"Brief: {axes[axis]['brief']}", text)
+                self.assertIn(axes[axis]["blocking"], text)
+                self.assertNotIn(axes[other]["brief"], text)
+                self.assertNotIn("AXIS", text)
+                self.assertNotIn("BLOCKING", text)
+        # Only Standards carries the smell baseline; only Spec carries the task's requirements.
+        self.assertIn("**Feature Envy**", standards)
+        self.assertNotIn("**Feature Envy**", spec)
+        self.assertIn("Task-specific review requirements:\nCheck the thing.", spec)
+        self.assertNotIn("Check the thing.", standards)
+
+
+    def test_rejects_unknown_prompt_modes(self):
+        self.real_prompts()
+        for mode in ("acceptance", "review", "review-", "review-security"):
+            with self.subTest(mode=mode):
+                self.assertRejects("invalid-mode", control.prompt, mode, "1")
+
+    def test_rejects_changed_review_skill(self):
+        self.real_prompts()
+        path = self.root / "skills/code-review/SKILL.md"
+        original = path.read_text()
+        for old, new in (("- The brief: ", "- Brief: "),
+                         ("### 3. Identify the standards sources", "### 3. Standards")):
+            with self.subTest(old=old):
+                path.write_text(original.replace(old, new, 1))
+                self.assertRejects("skill-changed", control.prompt, "review-standards", "1")
 
     def test_real_tasks_are_valid(self):
         for path in (CONTROL.parent / "tasks").glob("*.json"):
@@ -127,7 +167,12 @@ class SkillPinTest(unittest.TestCase):
                 for skill in re.findall(r"Skill tool with `([a-z-]+)`", text):
                     self.assertTrue((self.skills / skill / "SKILL.md").is_file(), skill)
 
-
+    def test_review_axes_parse_from_pinned_skill(self):
+        axes = control.review_axes()
+        self.assertEqual(set(axes), {"standards", "spec"})
+        self.assertTrue(axes["standards"]["brief"].startswith("Report, per file/hunk"))
+        self.assertTrue(axes["spec"]["brief"].startswith("Report: (a) requirements"))
+        self.assertTrue(axes["standards"]["context"].startswith("### 3. Identify the standards sources"))
 
 
 class ScopeTest(TaskDirectory):
@@ -520,6 +565,36 @@ class ScanTest(unittest.TestCase):
     def test_accepts_artifact_at_size_limit(self):
         control.scan(self.artifact(b"a" * control.MAX_ARTIFACT_BYTES))
 
+    def test_unlimited_scan_accepts_any_size_but_still_finds_credentials(self):
+        large = "检查🙂 é\n" * (control.MAX_ARTIFACT_BYTES // 4)
+        self.assertGreater(len(large.encode()), control.MAX_ARTIFACT_BYTES)
+        control.scan(self.artifact(large), limit=None)
+        control.scan(self.artifact(large), public=True, limit=None)
+        # A leak at the very end of a large artifact is still found.
+        for leak, reason in ((SECRET, "credential-pattern-in-artifact"),
+                             ('Zq9/"opaque+cred', "credential-in-artifact")):
+            for public in (False, True):
+                with self.subTest(reason=reason, public=public), \
+                        self.assertRaisesRegex(ValueError, f"^{reason}$"):
+                    control.scan(self.artifact(large + leak), public=public, limit=None)
+        with mock.patch.dict(os.environ):
+            del os.environ["FACTORY_AUTH_FILE"]
+            with self.assertRaisesRegex(ValueError, "^missing-auth-file$"):
+                control.scan(self.artifact(large), limit=None)
+
+    def test_cli_scan_output_is_private_and_unlimited(self):
+        def run(content, env):
+            return subprocess.run([sys.executable, "-I", str(CONTROL), "scan-output", self.artifact(content)],
+                                  capture_output=True, text=True, env=env)
+        large = "ü" * control.MAX_ARTIFACT_BYTES
+        result = run(large, {**os.environ})
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
+        result = run(large + SECRET, {**os.environ})
+        self.assertEqual((result.returncode, result.stderr), (1, "::error::credential-pattern-in-artifact\n"))
+        self.assertNotIn(SECRET, result.stdout + result.stderr)
+        result = run("ok", {key: value for key, value in os.environ.items() if key != "FACTORY_AUTH_FILE"})
+        self.assertEqual((result.returncode, result.stderr), (1, "::error::missing-auth-file\n"))
+
     def test_cli_failure_does_not_expose_credential(self):
         for content, reason in ((f"x {SECRET}", "credential-pattern-in-artifact"),
                                 ('Zq9/"opaque+cred', "credential-in-artifact")):
@@ -543,33 +618,61 @@ class ReviewTest(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
-    def events(self, *texts, extra=()):
-        path = self.directory / "events.jsonl"
+    def events(self, *texts, extra=(), name="events.jsonl"):
+        path = self.directory / name
         lines = [json.dumps({"type": "step_start"})]
         lines += [json.dumps({"type": "text", "part": {"text": text}}) for text in texts]
         lines += [json.dumps(event) for event in extra]
         path.write_text("\n".join(lines) + "\n")
         return str(path)
 
+    def axis(self, *findings, name):
+        return self.events(json.dumps({"findings": [{"blocking": blocking, "finding": finding}
+                                                    for blocking, finding in findings]}), name=name)
+
+    def review(self, standards=(), spec=()):
+        return control.review(self.axis(*standards, name="standards.jsonl"),
+                              self.axis(*spec, name="spec.jsonl"))
+
     def assertRejects(self, reason, filename):
-        with self.assertRaises(ValueError) as caught:
-            control.review(filename)
-        self.assertEqual(str(caught.exception), reason)
+        clean = self.axis(name="clean.jsonl")
+        for args in ((filename, clean), (clean, filename)):
+            with self.subTest(axis="standards" if args[0] == filename else "spec"), \
+                    self.assertRaises(ValueError) as caught:
+                control.review(*args)
+            self.assertEqual(str(caught.exception), reason)
 
     def test_accepts_approval(self):
-        self.assertEqual(control.review(self.events('{"verdict":"approve",', '"findings":[]}')),
-                         {"verdict": "approve", "findings": []})
+        empty = self.events('{"findings":', '[]}', name="split.jsonl")
+        self.assertEqual(control.review(empty, empty),
+                         {"verdict": "approve", "findings": [], "advisory": []})
 
-    def test_accepts_request_changes(self):
-        result = control.review(self.events(json.dumps(
-            {"verdict": "request_changes", "findings": ["src/a.ts: fix timer reset"]})))
-        self.assertEqual(result["findings"], ["src/a.ts: fix timer reset"])
+    def test_advisory_findings_do_not_block(self):
+        self.assertEqual(self.review(standards=[(False, "src/a.ts: possible Feature Envy")]), {
+            "verdict": "approve", "findings": [],
+            "advisory": ["Standards: src/a.ts: possible Feature Envy"]})
+
+    def test_blocking_finding_on_either_axis_requests_changes(self):
+        for standards, spec in (([(True, "x")], []), ([], [(True, "x")])):
+            with self.subTest(standards=standards, spec=spec):
+                self.assertEqual(self.review(standards, spec)["verdict"], "request_changes")
+
+    def test_findings_keep_axis_labels_and_order(self):
+        result = self.review(standards=[(True, "a"), (False, "b")], spec=[(False, "c"), (True, "d")])
+        self.assertEqual(result, {"verdict": "request_changes", "findings": ["Standards: a", "Spec: d"],
+                                  "advisory": ["Standards: b", "Spec: c"]})
 
     def test_rejects_error_events(self):
         for event in ({"type": "error"}, {"type": "step_finish", "error": {"message": "boom"}}):
             with self.subTest(event=event):
-                self.assertRejects("invalid-events",
-                                   self.events('{"verdict":"approve","findings":[]}', extra=[event]))
+                self.assertRejects("invalid-events", self.events('{"findings":[]}', extra=[event]))
+
+    def test_rejects_provider_truncated_replies(self):
+        # A truncated reply can still parse, so the finish reason decides completeness.
+        for reason in ("length", "content-filter"):
+            with self.subTest(reason=reason):
+                self.assertRejects("incomplete-output", self.events(
+                    '{"findings":[]}', extra=[{"type": "step_finish", "part": {"reason": reason}}]))
 
     def test_rejects_non_object_events(self):
         path = self.directory / "list.jsonl"
@@ -579,30 +682,47 @@ class ReviewTest(unittest.TestCase):
         self.assertRejects("invalid-events", str(path))
 
     def test_rejects_malformed_schema(self):
+        item = {"blocking": True, "finding": "x"}
         for text, reason in (
             ("Looks good!", "invalid-review"),
-            ('```json\n{"verdict":"approve","findings":[]}\n```', "invalid-review"),
-            ('["verdict", "findings"]', "invalid-review"),
-            ('{"verdict":"approve"}', "invalid-review"),
-            ('{"verdict":"approve","findings":[],"extra":1}', "invalid-review"),
-            ('{"verdict":"request_changes","findings":["x"],"verdict":"approve","findings":[]}',
-             "invalid-review"),
-            ('{"verdict":"APPROVE","findings":[]}', "invalid-verdict"),
-            ('{"verdict":["approve"],"findings":[]}', "invalid-verdict"),
-            ('{"verdict":"request_changes","findings":"x"}', "invalid-findings"),
-            ('{"verdict":"request_changes","findings":[1]}', "invalid-findings"),
-            ('{"verdict":"request_changes","findings":["  "]}', "invalid-findings"),
-            (json.dumps({"verdict": "request_changes", "findings": ["x" * 2001]}), "invalid-findings"),
-            (json.dumps({"verdict": "request_changes", "findings": ["x"] * 21}), "invalid-findings"),
-            ('{"verdict":"approve","findings":["x"]}', "inconsistent-review"),
-            ('{"verdict":"request_changes","findings":[]}', "inconsistent-review"),
+            ('```json\n{"findings":[]}\n```', "invalid-review"),
+            ('["findings"]', "invalid-review"),
+            ("{}", "invalid-review"),
+            ('{"verdict":"approve","findings":[]}', "invalid-review"),
+            ('{"findings":[],"extra":1}', "invalid-review"),
+            ('{"findings":[{"blocking":true,"finding":"x"}],"findings":[]}', "invalid-review"),
+            ('{"findings":[{"blocking":true,"blocking":false,"finding":"x"}]}', "invalid-review"),
+            ('{"findings":"x"}', "invalid-findings"),
+            ('{"findings":["x"]}', "invalid-findings"),
+            ('{"findings":[{"finding":"x"}]}', "invalid-findings"),
+            ('{"findings":[{"blocking":true,"finding":"x","axis":"spec"}]}', "invalid-findings"),
+            ('{"findings":[{"blocking":"true","finding":"x"}]}', "invalid-findings"),
+            ('{"findings":[{"blocking":1,"finding":"x"}]}', "invalid-findings"),
+            ('{"findings":[{"blocking":true,"finding":"  "}]}', "invalid-findings"),
+            ('{"findings":[{"blocking":true,"finding":1}]}', "invalid-findings"),
         ):
             with self.subTest(text=text[:60]):
                 self.assertRejects(reason, self.events(text))
 
-    def test_accepts_limits(self):
-        control.review(self.events(json.dumps(
-            {"verdict": "request_changes", "findings": ["x" * 2000] * 20})))
+    def test_findings_have_no_count_or_length_limit(self):
+        finding = "src/a.ts: 名前が不明瞭 🙂 " + "x" * 50_000
+        result = self.review([(True, finding)] * 100, [(False, finding)] * 100)
+        self.assertEqual(set(result), {"verdict", "findings", "advisory"})
+        self.assertEqual(result["findings"], [f"Standards: {finding}"] * 100)
+        self.assertEqual(result["advisory"], [f"Spec: {finding}"] * 100)
+
+    def test_cli_writes_review_output(self):
+        output = self.directory / "review.json"
+        result = subprocess.run(
+            [sys.executable, "-I", str(CONTROL), "review", self.axis((False, "b"), name="standards.jsonl"),
+             self.axis((True, "d"), name="spec.jsonl")],
+            capture_output=True, text=True, env={**os.environ, "REVIEW_OUTPUT": str(output)})
+        self.assertEqual((result.returncode, result.stdout), (0, "request_changes\n"), result.stderr)
+        self.assertEqual(json.loads(output.read_text()),
+                         {"verdict": "request_changes", "findings": ["Spec: d"], "advisory": ["Standards: b"]})
+        result = subprocess.run([sys.executable, "-I", str(CONTROL), "review", str(output)],
+                                capture_output=True, text=True, env={**os.environ, "REVIEW_OUTPUT": str(output)})
+        self.assertEqual(result.returncode, 1)
 
 
 class EventsTest(unittest.TestCase):
@@ -706,10 +826,20 @@ class SummaryTest(unittest.TestCase):
 class RunnerStepTest(unittest.TestCase):
     """Runs the real OpenCode step scripts against stub `opencode` and `timeout` binaries."""
 
-    def run_step(self, job, opencode):
+    jobs = {"implement": ("software-factory-round.yml", "implement"),
+            "review": ("software-factory-round.yml", "review"),
+            "retro": ("software-factory-implement.yml", "retro"),
+            "publish": ("software-factory-implement.yml", "retro-publish")}
+
+    def run_step(self, job, opencode="exit 0", gh="exit 0", select="opencode run", env=None, files=None):
+        workflow, name = self.jobs[job]
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.directory = directory
         (directory / "trusted").symlink_to(CONTROL.parents[2])
+        # Publishing steps run from a plain checkout of the trusted revision.
+        (directory / ".github").symlink_to(CONTROL.parents[2] / ".github")
         (directory / "candidate").mkdir()
+        (directory / "workspace").mkdir()
         bin_dir = directory / "bin"
         bin_dir.mkdir()
         # A real deadline shortened to one second; exit 124 mirrors coreutils timeout.
@@ -718,24 +848,40 @@ class RunnerStepTest(unittest.TestCase):
             "while args[0].startswith('-'): args.pop(0)\n"
             "try: sys.exit(subprocess.run(args[1:], timeout=1).returncode)\n"
             "except subprocess.TimeoutExpired: sys.exit(124)\n")
-        (bin_dir / "opencode").write_text(f"#!/bin/sh\n{opencode}\n")
+        # Every call is logged in order, NUL-separated, so tests can count sessions and calls.
+        log = 'printf "%s\\0" "$@" > "$CALLS/$(printf %03d $(($(ls "$CALLS" | wc -l))))"\n'
+        (bin_dir / "opencode").write_text(f"#!/bin/bash\n{log}{opencode}\n")
+        (bin_dir / "gh").write_text(f"#!/bin/bash\n{log}{gh}\n")
         for stub in bin_dir.iterdir():
             stub.chmod(0o755)
+        (directory / "calls").mkdir()
         auth = directory / "auth.json"
         auth.write_text(json.dumps({"key": SECRET}))
         (directory / "temp").mkdir()
-        step = next(step for step in WorkflowContractTest.load("software-factory-round.yml")["jobs"][job]["steps"]
-                    if "opencode run" in step.get("run", ""))
+        for filename, content in (files or {}).items():
+            (directory / filename).parent.mkdir(parents=True, exist_ok=True)
+            (directory / filename).write_text(content)
+        steps = WorkflowContractTest.load(workflow)["jobs"][name]["steps"]
+        step = next(step for step in steps if select in step.get("run", "") or select == step.get("name"))
+        cwd = directory / step["working-directory"] if "working-directory" in step else directory
         env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "MODEL": control.MODEL, "ISSUE": "6",
-               "RUNNER_TEMP": str(directory / "temp"), "FACTORY_AUTH_FILE": str(auth),
+               "ROUND": "1", "RUNNER_TEMP": str(directory / "temp"), "FACTORY_AUTH_FILE": str(auth),
                "GITHUB_OUTPUT": str(directory / "output"), "GITHUB_STEP_SUMMARY": str(directory / "summary"),
-               "REVIEW_OUTPUT": str(directory / "temp/feedback/review.json")}
-        result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=directory / "candidate", env=env,
+               "GITHUB_REPOSITORY": REPO, "GITHUB_RUN_ID": "123", "CALLS": str(directory / "calls"),
+               "REVIEW_OUTPUT": str(directory / "temp/feedback/review.json"), **(env or {})}
+        result = subprocess.run(["bash", "-e", "-c", step["run"]], cwd=cwd, env=env,
                                 capture_output=True, text=True, timeout=30)
         return result, (directory / "summary").read_text() if (directory / "summary").exists() else ""
 
+    def calls(self, program):
+        calls = [path.read_text().split("\0")[:-1] for path in sorted((self.directory / "calls").iterdir())]
+        return [call for call in calls if (call[:1] == ["run"]) == (program == "opencode")]
+
     def stub_events(self, *events):
         return "\n".join(f"echo '{json.dumps(event)}'" for event in events)
+
+    def reply(self, value):
+        return self.stub_events({"type": "text", "part": {"text": json.dumps(value)}})
 
     def test_timeout_is_summarized_and_preserved_without_leaking(self):
         leaky = [event for event in LEAKY_EVENTS if "'" not in json.dumps(event)]
@@ -747,6 +893,8 @@ class RunnerStepTest(unittest.TestCase):
                 self.assertIn('"tool_use": 4', summary)
                 self.assertIn("::error::opencode-exit-124", result.stdout)
                 self.assertNotIn(SECRET, result.stdout + result.stderr + summary)
+                # A timed-out review stops before the second axis spends its budget.
+                self.assertEqual(len(self.calls("opencode")), 1)
 
     def test_nonzero_exit_is_preserved(self):
         result, _ = self.run_step("implement", self.stub_events({"type": "step_start"}) + "\nexit 3")
@@ -760,11 +908,31 @@ class RunnerStepTest(unittest.TestCase):
         result, _ = self.run_step("implement", self.stub_events({"type": "error"}))
         self.assertEqual(result.returncode, 1)
         self.assertIn("::error::invalid-events", result.stderr)
-        review = {"verdict": "approve", "findings": []}
-        result, _ = self.run_step("review", self.stub_events(
-            {"type": "text", "part": {"text": json.dumps(review)}}))
+
+    def test_review_runs_each_axis_in_its_own_session(self):
+        result, summary = self.run_step("review", self.reply(
+            {"findings": [{"blocking": False, "finding": "src/a.ts: possible Mysterious Name"}]}))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('"exit_status": 0', result.stdout)
+        self.assertEqual(summary.count("### OpenCode run"), 2)
+        sessions = self.calls("opencode")
+        self.assertEqual(len(sessions), 2)
+        axes = control.review_axes()
+        for (axis, prompt), session in zip((("standards", "spec"), ("spec", "standards")), sessions):
+            with self.subTest(axis=axis):
+                self.assertIn("--standalone", session)
+                self.assertIn(axes[axis]["brief"], session[-1])
+                self.assertNotIn(axes[prompt]["brief"], session[-1])
+                self.assertTrue((self.directory / f"temp/review-{axis}.jsonl").is_file())
+        self.assertEqual((self.directory / "output").read_text(), "verdict=approve\n")
+        self.assertEqual(json.loads((self.directory / "temp/feedback/review.json").read_text())["advisory"],
+                         ["Standards: src/a.ts: possible Mysterious Name", "Spec: src/a.ts: possible Mysterious Name"])
+
+
+    def test_review_rejects_old_schema(self):
+        result, _ = self.run_step("review", self.reply({"verdict": "approve", "findings": []}))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("::error::invalid-review", result.stderr)
+        self.assertFalse((self.directory / "output").exists())
 
 
 class WorkflowContractTest(unittest.TestCase):
@@ -816,7 +984,7 @@ class WorkflowContractTest(unittest.TestCase):
 
     def test_shared_files_contain_no_task_specific_text(self):
         task = json.loads((CONTROL.parent / "tasks" / "6.json").read_text())
-        shared = [CONTROL.parent / "prompts" / "implement.md", CONTROL.parent / "prompts" / "review.md",
+        shared = [*(CONTROL.parent / "prompts").glob("*.md"),
                   *(CONTROL.parents[2] / ".github/workflows").glob("software-factory-*.yml")]
         for path in shared:
             text = path.read_text()
@@ -833,8 +1001,36 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(downloads(jobs["implement"]), {
             "factory-input", "checked-${{ steps.previous.outputs.round }}",
             "feedback-${{ steps.previous.outputs.round }}"})
-        self.assertEqual(downloads(self.implement["jobs"]["handoff"]),
-                         {"checked-${{ steps.approved.outputs.round }}", "factory-claim"})
+        handoff = self.implement["jobs"]["handoff"]
+        self.assertEqual(downloads(handoff), {"checked-${{ steps.approved.outputs.round }}", "factory-claim"})
+        self.assertNotIn("advisory", str(handoff))
+        self.assertNotIn("review.json", str(handoff))
+
+
+    def jobs(self):
+        for workflow in (self.implement, self.round):
+            yield from workflow["jobs"].items()
+
+    def opencode_steps(self):
+        return {name: step for name, job in self.jobs() for step in job.get("steps", [])
+                if "opencode run" in step.get("run", "")}
+
+
+    def test_review_runs_both_axes_and_aggregates_both_files(self):
+        run = self.opencode_steps()["review"]["run"]
+        self.assertIn("for axis in standards spec; do", run)
+        self.assertIn('prompt "review-$axis"', run)
+        self.assertIn('> "$RUNNER_TEMP/review-$axis.jsonl"', run)
+        self.assertRegex(run, r'control\.py review \\\s+"\$RUNNER_TEMP/review-standards\.jsonl" '
+                              r'"\$RUNNER_TEMP/review-spec\.jsonl"\)')
+
+
+    def test_every_factory_artifact_expires_after_three_days(self):
+        for name, job in self.jobs():
+            for step in job.get("steps", []):
+                if "upload-artifact" in step.get("uses", ""):
+                    with self.subTest(job=name, artifact=step["with"]["name"]):
+                        self.assertEqual(step["with"]["retention-days"], 3)
 
 
 class ConfigureTest(TaskDirectory):

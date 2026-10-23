@@ -249,7 +249,7 @@ jobs:
     needs: verify
     if: needs.verify.outputs.checks == 'passed'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     permissions:
       contents: read
     outputs:
@@ -295,19 +295,23 @@ jobs:
           PWD=$(pwd -P)
           export PWD
           mkdir "$RUNNER_TEMP/feedback"
-          prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt review "$ISSUE")
-          started=$(date +%s)
-          status=0
-          timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
-            > "$RUNNER_TEMP/review.jsonl" 2> "$RUNNER_TEMP/review.stderr" || status=$?
-          python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/review.jsonl" \
-            "$status" "$(($(date +%s) - started))" "$started" || echo '::warning::opencode-summary-failed'
-          if [ "$status" -ne 0 ]; then
-            echo "::error::opencode-exit-$status"
-            exit "$status"
-          fi
-          verdict=$(python3 -I ../trusted/.github/software-factory/control.py review "$RUNNER_TEMP/review.jsonl")
-          python3 -I ../trusted/.github/software-factory/control.py scan "$REVIEW_OUTPUT"
+          # Each invocation starts a fresh session; neither axis sees the other's conversation.
+          for axis in standards spec; do
+            prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt "review-$axis" "$ISSUE")
+            started=$(date +%s)
+            status=0
+            timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
+              > "$RUNNER_TEMP/review-$axis.jsonl" 2> "$RUNNER_TEMP/review-$axis.stderr" || status=$?
+            python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/review-$axis.jsonl" \
+              "$status" "$(($(date +%s) - started))" "$started" || echo '::warning::opencode-summary-failed'
+            if [ "$status" -ne 0 ]; then
+              echo "::error::opencode-exit-$status"
+              exit "$status"
+            fi
+          done
+          verdict=$(python3 -I ../trusted/.github/software-factory/control.py review \
+            "$RUNNER_TEMP/review-standards.jsonl" "$RUNNER_TEMP/review-spec.jsonl")
+          python3 -I ../trusted/.github/software-factory/control.py scan-output "$REVIEW_OUTPUT"
           printf 'verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

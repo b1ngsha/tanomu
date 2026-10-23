@@ -48,10 +48,53 @@ def task(number):
     return value
 
 
+def skill(name, filename="SKILL.md"):
+    return (ROOT / "skills" / name / filename).read_text()
+
+
+def section(text, start, end):
+    require(start in text and end in text, "skill-changed")
+    return text[text.index(start):text.index(end)].strip()
+
+
+def review_axes():
+    """The sub-agent briefs from the pinned code-review skill; re-vendoring must keep them parseable."""
+    text = skill("code-review")
+    briefs = [brief.replace(" Under 400 words.", "")
+              for brief in re.findall(r'^- The brief: "(.+)"$', text, re.M)]
+    require(len(briefs) == 2, "skill-changed")
+    return {
+        "standards": {
+            "brief": briefs[0],
+            "context": section(text, "### 3. Identify the standards sources", "### 4."),
+            "blocking": "a breach of a documented repository standard. Baseline smells are "
+                        "judgement calls: always set blocking to false for them.",
+        },
+        "spec": {
+            "brief": briefs[1],
+            "context": "",
+            "blocking": "a missing, partial or wrongly implemented requirement, or behaviour the "
+                        "spec did not ask for. Quote the spec line in every finding.",
+        },
+    }
+
+
 def prompt(mode, number):
-    require(mode in ("implement", "review"), "invalid-mode")
-    instructions = (ROOT / "prompts" / f"{mode}.md").read_text()
-    return f"{instructions}\nTask-specific requirements:\n{task(number)[mode]}\n"
+    spec = task(number)
+    if mode == "implement":
+        instructions = (ROOT / "prompts" / "implement.md").read_text()
+        return f"{instructions}\nTask-specific requirements:\n{spec['implement']}\n"
+    require(mode in ("review-standards", "review-spec"), "invalid-mode")
+    name = mode.removeprefix("review-")
+    axis = review_axes()[name]
+    parts = [(ROOT / "prompts" / "review.md").read_text().replace("AXIS", name.title())
+             .replace("BLOCKING", axis["blocking"]),
+             f"Brief: {axis['brief']}"]
+    if axis["context"]:
+        parts.append(axis["context"])
+    if name == "spec":
+        parts.append(f"Task-specific review requirements:\n{spec['review']}")
+    return "\n\n".join(parts) + "\n"
 
 
 def validate_issue(number, claimed=False):
@@ -150,11 +193,11 @@ def scope(number, base):
         require(check.returncode == 0, "whitespace-error")
 
 
-def scan(filename, public=False):
+def scan(filename, public=False, limit=MAX_ARTIFACT_BYTES):
     require(public or bool(os.environ.get("FACTORY_AUTH_FILE")), "missing-auth-file")
-    require(Path(filename).stat().st_size <= MAX_ARTIFACT_BYTES, "artifact-too-large")
+    require(limit is None or Path(filename).stat().st_size <= limit, "artifact-too-large")
     data = Path(filename).read_bytes()
-    require(len(data) <= MAX_ARTIFACT_BYTES, "artifact-too-large")
+    require(limit is None or len(data) <= limit, "artifact-too-large")
     auth_path = os.environ.get("FACTORY_AUTH_FILE")
     if auth_path:
         def values(value):
@@ -265,25 +308,42 @@ def diagnose(filename, command, log):
     Path(filename).write_text(json.dumps({"command": command, "output": ANSI.sub("", tail)}))
 
 
-def review(filename):
-    text = "".join(event.get("part", {}).get("text", "") for event in events(filename)
+def reply(filename):
+    parsed = events(filename)
+    require(not any(event.get("type") == "step_finish"
+                    and event.get("part", {}).get("reason") in ("length", "content-filter")
+                    for event in parsed), "incomplete-output")
+    return "".join(event.get("part", {}).get("text", "") for event in parsed
                    if event.get("type") == "text")
+
+
+def review_axis(filename):
     def unique(pairs):
         keys = [key for key, _ in pairs]
         require(len(keys) == len(set(keys)), "invalid-review")
         return dict(pairs)
     try:
-        result = json.loads(text, object_pairs_hook=unique)
+        result = json.loads(reply(filename), object_pairs_hook=unique)
     except json.JSONDecodeError:
         raise ValueError("invalid-review") from None
-    require(isinstance(result, dict) and set(result) == {"verdict", "findings"}, "invalid-review")
-    require(result["verdict"] in ("approve", "request_changes"), "invalid-verdict")
-    require(isinstance(result["findings"], list) and len(result["findings"]) <= 20
-            and all(isinstance(item, str) and item.strip() and len(item) <= 2000
-                    for item in result["findings"]),
+    require(isinstance(result, dict) and set(result) == {"findings"}, "invalid-review")
+    findings = result["findings"]
+    require(isinstance(findings, list)
+            and all(isinstance(item, dict) and set(item) == {"blocking", "finding"}
+                    and type(item["blocking"]) is bool and isinstance(item["finding"], str)
+                    and item["finding"].strip()
+                    for item in findings),
             "invalid-findings")
-    require((result["verdict"] == "approve") == (not result["findings"]), "inconsistent-review")
-    return result
+    return findings
+
+
+def review(standards, spec):
+    # The axes stay labelled rather than reranked; only blocking findings cost a repair round.
+    findings = [(axis, item) for axis, filename in (("Standards", standards), ("Spec", spec))
+                for item in review_axis(filename)]
+    blocking = [f"{axis}: {item['finding']}" for axis, item in findings if item["blocking"]]
+    return {"verdict": "request_changes" if blocking else "approve", "findings": blocking,
+            "advisory": [f"{axis}: {item['finding']}" for axis, item in findings if not item["blocking"]]}
 
 
 def configure(directory, mode):
@@ -340,6 +400,8 @@ if __name__ == "__main__":
             scan(*args)
         elif command == "scan-public":
             scan(*args, public=True)
+        elif command == "scan-output":
+            scan(*args, limit=None)
         elif command == "configure":
             configure(*args)
         elif command == "prompt":
@@ -356,7 +418,8 @@ if __name__ == "__main__":
             diagnose(*args)
         elif command == "review":
             result = review(*args)
-            Path(os.environ["REVIEW_OUTPUT"]).write_text(json.dumps(result))
+            output = Path(os.environ["REVIEW_OUTPUT"])
+            output.write_text(json.dumps(result))
             print(result["verdict"])
         else:
             raise ValueError("unknown-command")
