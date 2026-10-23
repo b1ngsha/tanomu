@@ -275,6 +275,22 @@ only an observed child supplies its own link/state. A standalone review has no p
 The final-review dedupe/resume protocol remains unchanged. No automatic retry follows
 failed dispatch, final review, retro, CI or observation.
 
+`software-factory-reconcile.yml` runs every six hours or manually on main with read-only
+permissions. Its Actions summary links recent trusted executions and reports stale running
+implementation (>3 hours), completed tasks retaining `implementing`, final review not
+observed >30 minutes after delivery, failed/missing publication and recorded expired
+evidence. It links available PR/head CI and merged-head deployment metadata; pending and
+unavailable remain explicit. It proposes concrete human inspection steps and never changes
+labels, authorizes implementation, retries, merges or deploys. This schedule performs only
+metadata reads; enabling it does not enable an automated implementation run.
+
+Recovery bounds are 90 days, three pages of 100 runs per workflow, 20 detailed runs per
+workflow, three pages of 100 jobs per run, one page of 100 artifact records and a hard
+300-request budget. Partial failures and scan limits are shown. A recorded expired artifact
+is distinct from absent/unknown evidence: deletion or API omission cannot prove it was
+never produced. Arbitrary comments, titles, artifacts and candidate output cannot authorize
+recovery writes; reconciliation makes no writes at all.
+
 Comments survive artifact expiry, but observers are best effort: checkout/API/token failures,
 GitHub scheduling delays, hard cancellation and a run exceeding the observation window may
 leave a partial snapshot. Reruns share a source run marker and show the current attempt;
