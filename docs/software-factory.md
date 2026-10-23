@@ -108,13 +108,29 @@ GitHub-token-created PRs do not trigger CI automatically; marking the draft read
 triggers ordinary CI through `ready_for_review`. Inspect that CI and the diff before
 real Feishu acceptance. The factory never claims real Feishu acceptance passed.
 
-Patch and structured feedback artifacts expire after three days. Exact credential
-values and common credential patterns are checked before upload. Raw model events,
-stderr and auth files are never uploaded. Workspace paths are explicitly pinned
-with `PWD`; edit permission permits only the task's relative file paths, after a default deny rule. Shell,
-network tools, external directories and subagents are denied.
+Patch, structured feedback and session transcript artifacts expire after
+three days. Exact credential values and common credential patterns are checked
+before upload. Raw event files, stderr and auth files are never uploaded; complete event
+lines appear only inside the scanned transcript. Workspace
+paths are explicitly pinned with `PWD`; edit permission permits only the task's
+relative file paths, after a default deny rule. Network tools, external directories,
+subagents and the Skill tool are denied in every session.
 
-Implementation and each review axis have a 600-second limit, with a 15-second
+Shell is the one deliberate trust boundary. Only the implementation session gets
+`bash`, so it can run typecheck and single test files as it works. With shell the
+model can reach anything on that runner, including the trusted checkout and the model
+key, and could bypass the edit allowlist. So nothing that runner produces is trusted
+beyond its patch: the patch is scanned before upload, and the verify job reapplies it
+on a fresh runner without model credentials and repeats the scope, file-type and
+line-limit checks before any candidate code runs. This is an accepted limitation, not
+a sandbox: running as the same user, the shell can still modify that runner's copy of
+the trusted scanner and write to the Actions environment, output and step summary
+files. Session uploads name only the exact files just scanned, which contains the
+artifact path without closing that boundary. Review sessions are
+read-only: they may only read, glob, grep and list inside their workspace, with `.env`
+and `auth.json` reads denied.
+
+The implementation run has a 1500-second limit; each review axis has 600 seconds. All have a 15-second
 kill grace period. After success, timeout (exit 124) or any other nonzero exit, a trusted
 `opencode-summary` line is written to the step log and job summary. It has the exit
 status, elapsed seconds, event and tool-call counts by status, step finish reasons,
@@ -124,6 +140,14 @@ Text, tool inputs and outputs, error messages, paths and stderr are never printe
 The summary shows what the run did, not why it stopped. For example, a tool error count
 cannot tell a permission denial from another failure, and a gap after the last event
 only means no further JSON was received.
+
+Every session, including a failed or timed-out one, is also rendered by
+`control.py transcript` into a readable record for retro: events in order with
+seconds since the first timestamped event. Each readable entry includes the complete original JSON line, including unknown
+metadata. Fields and the whole record are retained in full, without truncation. The safe CLI summary is also scanned and
+saved beside the transcript, so retro can see timeout status and elapsed time. A step that always runs scans the
+transcript with `scan-session` (the same credential checks, without a size cap) and only then uploads it as a `session-*` artifact kept for three days, naming only
+the scanned files. A transcript that fails the scan is not uploaded.
 
 Successful handoff adds `ready-for-human`; failures after the gate add `needs-human`
 and remove `implementing`. Fixed reason codes include `claim-failed`, `round-failed`,

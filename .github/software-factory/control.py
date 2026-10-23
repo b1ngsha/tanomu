@@ -346,6 +346,45 @@ def review(standards, spec):
             "advisory": [f"{axis}: {item['finding']}" for axis, item in findings if not item["blocking"]]}
 
 
+def transcript(filename, output):
+    """Render the full session in event order, retaining every field without shortening."""
+    def render(value):
+        return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+
+    path = Path(filename)
+    with (path.open("rb") if path.is_file() else open(os.devnull, "rb")) as stream:
+        raw = stream.read().decode(errors="replace").splitlines()
+    entries, first = [], None
+    for number, line in enumerate(raw, 1):
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError):
+            event = None
+        if not isinstance(event, dict):
+            entries.append(f"### {number} unparseable\n{render(line)}")
+            continue
+        kind = event.get("type")
+        part = event.get("part") if isinstance(event.get("part"), dict) else {}
+        if type(event.get("timestamp")) is int:
+            first = event["timestamp"] if first is None else first
+            kind = f"{kind} +{(event['timestamp'] - first) // 1000}s"
+        if event.get("type") in ("text", "reasoning"):
+            body = render(part.get("text", ""))
+        elif event.get("type") == "tool_use":
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            body = (f"{render(part.get('tool'))} {render(state.get('status'))}\n"
+                    f"input: {render(state.get('input'))}\n"
+                    f"output: {render(state.get('output', state.get('error')))}")
+        elif event.get("type") == "step_finish":
+            body = f"reason: {render(part.get('reason'))}, tokens: {render(part.get('tokens'))}"
+        else:
+            body = render(event)
+        # Keep the original event too: readable fields above are only an index into it.
+        entries.append(f"### {number} {kind}\n{body}\n\nRaw event:\n{line}")
+    data = ("\n\n".join(entries) if entries else "No events were recorded.") + "\n"
+    Path(output).write_text(data)
+
+
 def configure(directory, mode):
     output = Path(directory).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -357,9 +396,8 @@ def configure(directory, mode):
                    "edit": "deny", "external_directory": "deny", "bash": "deny", "webfetch": "deny",
                    "websearch": "deny", "task": "deny", "skill": "deny"}
     if mode == "implement":
-        # Edits are limited to the task's files so the model cannot touch .git config or hooks
-        # that later trusted git commands would execute. OpenCode matches workspace-relative
-        # paths and the last matching rule wins, so the "*" deny must come first.
+        # Guide the edit tool to the task's files. Shell access is broader; verify enforces
+        # the actual boundary. OpenCode's last matching rule wins, so deny must come first.
         workspace = Path(os.environ["FACTORY_WORKSPACE"]).resolve()
         edit = {"*": "deny"}
         for name in task(os.environ["FACTORY_ISSUE"])["allowed_paths"]:
@@ -368,6 +406,10 @@ def configure(directory, mode):
                     and ".git" not in Path(name).parts, "invalid-allowed-path")
             edit[path.relative_to(workspace).as_posix()] = "allow"
         permissions["edit"] = edit
+        # Implementation runs typecheck and tests as it goes. Shell makes everything on this
+        # runner, including the trusted checkout and the model key, reachable by the model, so
+        # the scope and file-type checks that count run again on the fresh verify runner.
+        permissions["bash"] = "allow"
     else:
         require(mode == "review", "invalid-mode")
     auth = output / "data/opencode/auth.json"
@@ -400,8 +442,12 @@ if __name__ == "__main__":
             scan(*args)
         elif command == "scan-public":
             scan(*args, public=True)
+        elif command == "scan-session":
+            scan(*args, limit=None)
         elif command == "scan-output":
             scan(*args, limit=None)
+        elif command == "transcript":
+            transcript(*args)
         elif command == "configure":
             configure(*args)
         elif command == "prompt":
