@@ -189,6 +189,10 @@ jobs:
     outputs:
       # Derived from step outcomes, which candidate code cannot rewrite.
       checks: ${{ steps.test.outcome == 'success' && 'passed' || 'failed' }}
+      failed_check: >-
+        ${{ steps.format.outcome == 'failure' && 'format' || steps.lint.outcome == 'failure' && 'lint' ||
+            steps.typecheck.outcome == 'failure' && 'typecheck' || steps.build.outcome == 'failure' && 'build' ||
+            steps.test.outcome == 'failure' && 'test' || '' }}
     services:
       db:
         image: pgvector/pgvector:pg18
@@ -309,6 +313,8 @@ jobs:
       contents: read
     outputs:
       verdict: ${{ steps.review.outputs.verdict }}
+      standards: ${{ steps.review.outputs.standards }}
+      spec: ${{ steps.review.outputs.spec }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -358,6 +364,7 @@ jobs:
           # Each invocation starts a fresh session; neither axis sees the other's conversation.
           for axis in standards spec; do
             prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt "review-$axis" "$ISSUE")
+            printf '%s=started\n' "$axis" >> "$GITHUB_OUTPUT"
             started=$(date +%s)
             status=0
             timeout --kill-after=15 600 opencode run --standalone --format json -m "$MODEL" "$prompt" \
@@ -365,9 +372,17 @@ jobs:
             python3 -I ../trusted/.github/software-factory/control.py summary "$RUNNER_TEMP/review-$axis.jsonl" \
               "$status" "$(($(date +%s) - started))" "$started" | tee "$RUNNER_TEMP/review-$axis-summary.txt" || echo '::warning::opencode-summary-failed'
             if [ "$status" -ne 0 ]; then
-              echo "::error::opencode-exit-$status"
+              failure=runner-error
+              if [ "$status" -eq 124 ]; then failure=timeout; fi
+              printf '%s=%s\n' "$axis" "$failure" >> "$GITHUB_OUTPUT"
+              echo "::error::$axis-$failure"
               exit "$status"
             fi
+            if ! python3 -I ../trusted/.github/software-factory/control.py review-axis "$RUNNER_TEMP/review-$axis.jsonl"; then
+              printf '%s=invalid-output\n' "$axis" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+            printf '%s=passed\n' "$axis" >> "$GITHUB_OUTPUT"
           done
           verdict=$(python3 -I ../trusted/.github/software-factory/control.py review \
             "$RUNNER_TEMP/review-standards.jsonl" "$RUNNER_TEMP/review-spec.jsonl")
@@ -408,5 +423,27 @@ jobs:
         with:
           name: feedback-${{ inputs.round }}
           path: ${{ runner.temp }}/feedback
+          retention-days: 3
+          if-no-files-found: error
+  diagnostics:
+    needs: [implement, verify, review]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ inputs.base }}
+          persist-credentials: false
+      - name: Record trusted orchestration outcomes
+        env:
+          OUTCOMES: ${{ toJSON(needs) }}
+        run: python3 -I .github/software-factory/control.py round-status "$RUNNER_TEMP/status/status.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: round-status-${{ inputs.round }}
+          path: ${{ runner.temp }}/status/status.json
           retention-days: 3
           if-no-files-found: error
