@@ -86,20 +86,22 @@ Variables (not sensitive, readable in logs):
 
 Secrets:
 
-| Secret                                             | Value                                                                                                                                                                 |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `DEPLOY_HOST`                                      | Server address                                                                                                                                                        |
-| `DEPLOY_SSH_KEY`                                   | The private key `tanomu-deploy`, set from the file: `gh secret set DEPLOY_SSH_KEY --env production < tanomu-deploy` (pasting interactively keeps only the first line) |
-| `DEPLOY_KNOWN_HOSTS`                               | Output of `ssh-keyscan <server>`                                                                                                                                      |
-| `POSTGRES_PASSWORD`                                | `openssl rand -hex 32` (hex only, since it is embedded in a connection URL)                                                                                           |
-| `FEISHU_APP_ID` / `FEISHU_APP_SECRET`              | Credentials of the **production** Feishu app                                                                                                                          |
-| `CHAT_PROVIDER_BASE_URL` / `CHAT_PROVIDER_API_KEY` | Chat model Provider                                                                                                                                                   |
-
-| `SESSION_SECRET` | Random signing secret (at least 32 characters): generate with `openssl rand -hex 32` and set with `gh secret set SESSION_SECRET --env production` before merging the sign-in PR |
+| Secret                                             | Value                                                                                                                                                                           |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DEPLOY_HOST`                                      | Server address                                                                                                                                                                  |
+| `DEPLOY_SSH_KEY`                                   | The private key `tanomu-deploy`, set from the file: `gh secret set DEPLOY_SSH_KEY --env production < tanomu-deploy` (pasting interactively keeps only the first line)           |
+| `DEPLOY_KNOWN_HOSTS`                               | Output of `ssh-keyscan <server>`                                                                                                                                                |
+| `POSTGRES_PASSWORD`                                | `openssl rand -hex 32` (hex only, since it is embedded in a connection URL)                                                                                                     |
+| `FEISHU_APP_ID` / `FEISHU_APP_SECRET`              | Credentials of the **production** Feishu app                                                                                                                                    |
+| `CHAT_PROVIDER_BASE_URL` / `CHAT_PROVIDER_API_KEY` | Chat model Provider                                                                                                                                                             |
+| `SESSION_SECRET`                                   | Random signing secret (at least 32 characters): generate with `openssl rand -hex 32` and set with `gh secret set SESSION_SECRET --env production` before merging the sign-in PR |
+| `MASTER_KEY`                                       | Encrypts Provider API keys in the database: exactly 64 hex chars from `openssl rand -hex 32`, set with `gh secret set MASTER_KEY --env production`                              |
 
 Before using sign-in, add `http://localhost:3000/auth/feishu/callback` in the Feishu developer console's Security settings and publish a new app version. Put a generated `SESSION_SECRET` in local `.env` too. Rotating this secret signs everyone out.
 
 GitHub secrets can't be read back. Keep a copy of `POSTGRES_PASSWORD` in a password manager: it only takes effect when the database volume is first created, and losing it locks you out of the database (changing it later also requires `ALTER USER` inside Postgres).
+
+Keep a copy of `MASTER_KEY` there too, and back it up separately from the database dumps. There is no key rotation: changing or losing it makes every stored Provider API key undecryptable, and each one has to be entered again in the admin console's Providers section (until that section ships, delete the `capability_bindings` and `providers` rows so the next start imports them again from the `CHAT_*` variables).
 
 Adding a new app variable means adding it to this environment **and** to the `app_vars` list and `env:` block of the deploy step. A variable missing from the environment fails the deploy before anything is written to the server.
 
@@ -129,7 +131,7 @@ Leave it running, then in another terminal run `curl http://localhost:3000/healt
 ## Operations
 
 - **Deploy**: merge to `main`. A failed build leaves the running container untouched. After restarting, the job fails if the server doesn't log `tanomu is listening` within 60 s, and prints the last 50 log lines.
-- **Change config or rotate a secret**: update the `production` environment, then re-run the latest deploy job on `main`.
+- **Change config or rotate a secret**: update the `production` environment, then re-run the latest deploy job on `main`. This does not support rotating `MASTER_KEY`: changing it makes stored Provider API keys undecryptable; follow the recovery note under [GitHub `production` environment](#3-github-production-environment). Changing `POSTGRES_PASSWORD` also requires `ALTER USER` inside Postgres, as noted there.
 - **Roll back**: re-run the deploy job of an earlier successful run on `main` (it rebuilds that commit on the server). For a quick fix, images from the last week are still on the server: set `TANOMU_IMAGE` in `.env` to `tanomu-server:<git sha>` and run `docker compose up -d`; the next deploy overwrites it.
 - **Upgrade Postgres or add a third-party image**: change the image in `deploy/compose.yml`; the server pulls it through the proxy on the next deploy.
 - **Logs**: `docker compose logs -f server`.

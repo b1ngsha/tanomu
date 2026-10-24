@@ -31,8 +31,12 @@ A kind of function tanomu offers, such as chat, summarization, image generation,
 _Avoid_: skill, feature module
 
 **Provider**:
-An API endpoint that serves models or search, identified by its address, key, and protocol type.
+An API endpoint that serves models or search, reached through its address, key, and protocol type, and known by a unique name. One Provider can serve several Capabilities.
 _Avoid_: channel, vendor, supplier
+
+**Binding**:
+The current choice of Provider and model for one Capability. A Capability has at most one Binding at a time.
+_Avoid_: assignment, route, mapping
 
 ## Software Factory
 
