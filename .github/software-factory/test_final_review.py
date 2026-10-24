@@ -409,6 +409,20 @@ class SpikeWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("--dangerously-skip-permissions", text)
         self.assertNotIn("bypassPermissions", text)
 
+    def test_identify_writes_the_uploaded_input(self):
+        identify, upload = self.jobs["identify"]["steps"][1:3]
+        self.assertIn('final-identify "$PR" workflow_dispatch "$RUNNER_TEMP/final-input"', identify["run"])
+        self.assertEqual(upload["with"]["path"], "${{ runner.temp }}/final-input")
+
+    def test_trusted_scripts_resolve_from_each_working_directory(self):
+        prefixes = {("identify", None): {""}, ("review", None): {"trusted/"},
+                    ("review", "candidate"): {"../trusted/", '"$GITHUB_WORKSPACE/trusted/'}}
+        for name, job in self.jobs.items():
+            for step in job["steps"]:
+                for prefix in re.findall(r'(\S*)\.github/software-factory/', step.get("run", "")):
+                    with self.subTest(job=name, step=step.get("name"), prefix=prefix):
+                        self.assertIn(prefix, prefixes[(name, step.get("working-directory"))])
+
     def test_runner_and_artifacts_are_pinned(self):
         text = json.dumps(self.jobs["review"])
         self.assertIn("@anthropic-ai/claude-code@2.1.304", text)

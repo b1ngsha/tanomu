@@ -34,7 +34,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ inputs.pr }}
-        run: python3 -I .github/software-factory/control.py final-identify "$PR" workflow_dispatch >> "$GITHUB_OUTPUT"
+        run: python3 -I .github/software-factory/control.py final-identify "$PR" workflow_dispatch "$RUNNER_TEMP/final-input" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: claude-final-input
@@ -99,6 +99,10 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.FACTORY_REVIEW_API_KEY }}
           ANTHROPIC_AUTH_TOKEN: ${{ secrets.FACTORY_REVIEW_API_KEY }}
           ANTHROPIC_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
+          ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
+          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
+          ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
+          CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
         run: |
           set -euo pipefail
           schema=$(python3 -I ../trusted/.github/software-factory/control.py claude-schema)
@@ -118,10 +122,10 @@ jobs:
           test "$status" -eq 0 || { echo '::error::claude-canary-exit'; exit "$status"; }
           test ! -e "$canary/hook-ran" || { echo '::error::claude-canary-hook-ran'; exit 1; }
           test ! -e "$canary/mcp-ran" || { echo '::error::claude-canary-mcp-ran'; exit 1; }
-          python3 -I trusted/.github/software-factory/control.py claude-result \
+          python3 -I ../trusted/.github/software-factory/control.py claude-result \
             "Canary=$RUNNER_TEMP/claude-canary.jsonl=0" "$RUNNER_TEMP/claude-canary-review.json"
-          python3 -I trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/claude-canary.jsonl"
-          python3 -I trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/claude-canary-review.json"
+          python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/claude-canary.jsonl"
+          python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/claude-canary-review.json"
           ! grep -Fq CANARY_INSTRUCTION "$RUNNER_TEMP/claude-canary-review.json"
       - name: Review the pull request
         id: review
