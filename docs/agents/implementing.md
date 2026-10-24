@@ -36,7 +36,7 @@ Only `ready-for-agent` tickets are detailed enough to implement directly (Contex
 
 ## Finishing
 
-1. Run `/simplify` on the change, then `/code-review` against `main` with the ticket as spec, and fix what's worth fixing.
+1. In an interactive agent session, run `/simplify` on the change, then `/code-review` against `main` with the ticket as spec, and fix what's worth fixing. In the factory, the orchestrator runs independent review; its restricted implementation session does not invoke skills, commit or open PRs. The trusted handoff uses the pinned `pr` skill's template to create the draft PR without model-generated publication text.
 2. Commit with Conventional Commits and a scope (`AGENTS.md`), body `Refs #N`, or `Closes #N` on the ticket's last PR.
 3. Open the PR with the `pr` skill's template (Summary / Evidence / Merge Danger). Evidence must be real output: test names and results, or what you observed running it. List any human steps (Feishu console changes, new GitHub variables or secrets) under Merge Danger.
 4. If a step needs a human (Feishu console, server root access, secrets), stop and say exactly what to do; don't work around it.

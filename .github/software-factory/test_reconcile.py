@@ -99,6 +99,22 @@ class ReconcileTests(unittest.TestCase):
         api.pr["head"]["ref"] = "feat/8-implement"
         self.assertEqual(len(r.reconcile(api, REPO, NOW)["runs"]), 1)
 
+    def test_round_review_delivery_requires_claim_and_complete_jobs(self):
+        api = Fake({"implementation": [run()]})
+        path = "actions/runs/10/attempts/2/jobs?per_page=100&page=1"
+        for claim, publish, conclusion, expected in (
+                ('success', 'failure', 'failure', True), ('success', 'skipped', 'success', True),
+                ('failure', 'skipped', 'failure', False), ('skipped', 'failure', 'failure', False),
+                ('success', 'success', 'success', False), ('success', 'skipped', 'cancelled', False)):
+            with self.subTest(claim=claim, publish=publish, conclusion=conclusion):
+                api.runs['implementation'] = [run(conclusion=conclusion)]
+                api.overrides[path] = {'jobs': [{'name': 'claim', 'conclusion': claim},
+                                              {'name': 'publish-reviews', 'conclusion': publish}]}
+                record = r.reconcile(api, REPO, NOW)['runs'][0]
+                self.assertEqual('round-reviews-not-delivered' in record['findings'], expected)
+        api.overrides[path] = RuntimeError('unavailable')
+        self.assertNotIn('round-reviews-not-delivered', r.reconcile(api, REPO, NOW)['runs'][0]['findings'])
+
     def test_artifact_expiry_publish_failure_and_partial_api(self):
         api = Fake({"final-review": [run("final-review", display_title="Final PR #9 · parent none")]})
         api.overrides["actions/runs/20/artifacts?per_page=100&page=1"] = {"artifacts": [{"name": "final-review", "expired": True}]}
@@ -115,6 +131,19 @@ class ReconcileTests(unittest.TestCase):
             {"name": name, "conclusion": conclusion} for name, conclusion in (("identify", "success"), ("review", "skipped"), ("publish", "skipped"))]}
         self.assertNotIn("final-review-not-delivered", r.reconcile(api, REPO, NOW)["runs"][0]["findings"])
         self.assertNotIn("secret", str(report))
+
+    def test_expiry_in_round_evidence_including_historical_rounds_is_observed(self):
+        api = Fake({"implementation": [run()]})
+        for name in ('session-implement-1', 'session-review-2', 'feedback-2', 'checked-2',
+                     'session-review-4', 'feedback-4', 'checked-4'):
+            with self.subTest(name=name):
+                api.overrides['actions/runs/10/artifacts?per_page=100&page=1'] = {'artifacts': [
+                    {'name': name, 'expired': True}, {'name': 'secret-prompt', 'expired': True}]}
+                record = r.reconcile(api, REPO, NOW)['runs'][0]
+                self.assertIn('evidence-expired', record['findings'])
+                self.assertEqual(record['artifacts'][name], ['recorded-expired'])
+                self.assertNotIn('secret', str(record))
+                self.assertFalse(any('/zip' in call or '/logs' in call for call in api.calls))
 
     def test_jobs_budget_and_unrelated_issue_labels(self):
         api = Fake({"implementation": [run(event="issues")]})
