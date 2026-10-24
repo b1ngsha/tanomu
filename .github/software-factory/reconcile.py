@@ -5,11 +5,13 @@ import json
 import os
 import re
 import subprocess
+import sys
+from pathlib import Path
 
-FILES = {"implementation": "software-factory-implement.yml", "final-review": "final-review.yml"}
-STATES = {"queued", "in_progress", "completed", "waiting", "pending", "requested"}
-RESULTS = {"success", "failure", "cancelled", "skipped", "timed_out", "neutral", "action_required", "stale"}
-ARTIFACTS = {"factory-input", "factory-claim", "final-input", "final-review"}
+# -I excludes the script directory; import only from this trusted checkout.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from execution import ARTIFACTS, FILES, RESULTS, SHA, STATES, job_states, publication_findings, state
+
 NUMBER = r"[1-9][0-9]{0,19}"
 ISSUE = re.compile(rf"Factory issue #({NUMBER}) · attempt ({NUMBER})")
 CHILD = re.compile(rf"Final PR #({NUMBER}) · parent ({NUMBER})\.({NUMBER})")
@@ -18,8 +20,8 @@ ACTIONS = {"stale-implementation": "Inspect queued/running jobs; owner may cance
            "stale-implementing-label": "Owner should inspect delivery before manually correcting the issue state.",
            "final-review-not-observed": "Owner should inspect the handoff and dispatch a final review if needed.",
            "final-review-not-delivered": "Owner should inspect final review publish before manually rerunning it.",
+           "round-reviews-not-delivered": "Owner should inspect round review publication before manually rerunning it.",
            "evidence-expired": "Recorded evidence expired; inspect retained job metadata and request a fresh run if needed."}
-SHA = re.compile(r"[0-9a-f]{40}")
 
 
 def integer(value):
@@ -32,10 +34,6 @@ def instant(value):
         return result if result.tzinfo else None
     except (ValueError, TypeError, AttributeError):
         return None
-
-
-def state(value, choices):
-    return value if isinstance(value, str) and value in choices else "unknown"
 
 
 class Reader:
@@ -88,7 +86,7 @@ def trusted(run, workflow, repo, kind):
 def jobs(reader, run):
     rows, complete = reader.pages(
         f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs", "jobs")
-    return {item.get("name"): state(item.get("conclusion"), RESULTS) for item in rows}, complete
+    return job_states(rows), complete
 
 
 def artifacts(reader, run):
@@ -230,9 +228,8 @@ def reconcile(api, repo, now=None):
                 standalone = STANDALONE.fullmatch(run.get("display_title", ""))
                 if standalone:
                     record["pr"] = int(standalone[1])
-                deduplicated = job_states.get("identify") == "success" and job_states.get("review") == "skipped" and job_states.get("publish") == "skipped"
-                if run.get("status") == "completed" and complete and job_states.get("publish") != "success" and not deduplicated:
-                    record["findings"].append("final-review-not-delivered")
+            record["findings"].extend(publication_findings(
+                kind, record["status"], record["conclusion"], job_states, complete))
             if any("recorded-expired" in values for values in recorded.values()):
                 record["findings"].append("evidence-expired")
             reports.append(record)
