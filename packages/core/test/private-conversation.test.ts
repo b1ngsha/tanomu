@@ -5,6 +5,7 @@ import {
   recordPrivateMessage,
   replyToPrivateMessage,
   replyToPrivateMessages,
+  type ChatModel,
   type ConversationStore,
   type IncomingMessage,
   type LlmCall,
@@ -75,6 +76,11 @@ function recordingLlmCallLog() {
   return { llmCallLog, calls };
 }
 
+/** A chat Binding that doesn't change between replies. */
+function boundTo(model: MockLanguageModelV4, vision = false): Pick<ReplyDeps, "resolveChatModel"> {
+  return { resolveChatModel: async () => ({ model, vision }) };
+}
+
 const message: IncomingMessage = { id: "m1", chatId: "c1", senderId: "u1", text: "在吗" };
 /** For tests that send no images. */
 const { downloadImage } = recordingDownload();
@@ -105,7 +111,13 @@ function setupBatch(model = fakeModel("好的"), { vision = false } = {}) {
   const { send, sent } = recordingSend();
   const { llmCallLog, calls } = recordingLlmCallLog();
   const download = recordingDownload();
-  const deps = { store, model, vision, send, llmCallLog, downloadImage: download.downloadImage };
+  const deps = {
+    store,
+    ...boundTo(model, vision),
+    send,
+    llmCallLog,
+    downloadImage: download.downloadImage,
+  };
   const { batcher, flushes } = createTestBatcher(deps);
   return { store, replies, sent, calls, downloads: download.downloads, model, batcher, flushes };
 }
@@ -129,7 +141,7 @@ describe("replyToPrivateMessage", () => {
 
     await replyToPrivateMessage(message, {
       store,
-      model: fakeModel("在，说吧"),
+      ...boundTo(fakeModel("在，说吧")),
       send,
       llmCallLog,
       downloadImage,
@@ -145,7 +157,7 @@ describe("replyToPrivateMessage", () => {
     const { store } = memoryStore();
     const { send, sent } = recordingSend();
     const { llmCallLog } = recordingLlmCallLog();
-    const deps = { store, model: fakeModel("在"), send, llmCallLog, downloadImage };
+    const deps = { store, ...boundTo(fakeModel("在")), send, llmCallLog, downloadImage };
 
     await replyToPrivateMessage(message, deps);
     await replyToPrivateMessage(message, deps);
@@ -160,7 +172,7 @@ describe("replyToPrivateMessage", () => {
 
     await replyToPrivateMessage(message, {
       store,
-      model: fakeModel("在，说吧"),
+      ...boundTo(fakeModel("在，说吧")),
       send,
       llmCallLog,
       downloadImage,
@@ -192,7 +204,7 @@ describe("replyToPrivateMessage", () => {
     });
 
     await expect(
-      replyToPrivateMessage(message, { store, model, send, llmCallLog, downloadImage }),
+      replyToPrivateMessage(message, { store, ...boundTo(model), send, llmCallLog, downloadImage }),
     ).rejects.toThrow("provider down");
 
     expect(sent).toHaveLength(0);
@@ -212,7 +224,7 @@ describe("replyToPrivateMessage", () => {
 
     await replyToPrivateMessage(message, {
       store,
-      model: fakeModel("在"),
+      ...boundTo(fakeModel("在")),
       send,
       llmCallLog,
       downloadImage,
@@ -229,7 +241,7 @@ describe("replyToPrivateMessage", () => {
 
     await replyToPrivateMessage(
       { ...message, text: undefined },
-      { store, model, send, llmCallLog, downloadImage },
+      { store, ...boundTo(model), send, llmCallLog, downloadImage },
     );
 
     expect(model.doGenerateCalls).toHaveLength(0);
@@ -247,8 +259,7 @@ describe("replyToPrivateMessage", () => {
       { ...message, text: undefined, attachment: { kind: "image", key: "img-1" } },
       {
         store,
-        model: fakeModel("一只猫"),
-        vision: true,
+        ...boundTo(fakeModel("一只猫"), true),
         send,
         llmCallLog,
         downloadImage: download.downloadImage,
@@ -267,11 +278,100 @@ describe("replyToPrivateMessage", () => {
 
     await replyToPrivateMessage(
       { ...message, text: undefined, attachment: { kind: "file" } },
-      { store, model, send, llmCallLog, downloadImage },
+      { store, ...boundTo(model), send, llmCallLog, downloadImage },
     );
 
     expect(model.doGenerateCalls).toHaveLength(0);
     expect(sent).toEqual([{ chatId: "c1", text: "文件我暂时还读不了，挑重点用文字发我吧。" }]);
+  });
+});
+
+describe("chat model resolution", () => {
+  /** Resolves to each chat model in turn, like a Binding changed in the console between replies. */
+  function changingBinding(...chatModels: ChatModel[]) {
+    let next = 0;
+    return async () => {
+      const chatModel = chatModels[next++];
+      if (!chatModel) throw new Error("resolved more often than expected");
+      return chatModel;
+    };
+  }
+
+  it("uses the Binding current at each reply", async () => {
+    const { store } = memoryStore();
+    const { send, sent } = recordingSend();
+    const { llmCallLog, calls } = recordingLlmCallLog();
+    const before = new MockLanguageModelV4({
+      modelId: "model-before",
+      doGenerate: fakeModel("旧").doGenerate,
+    });
+    const after = new MockLanguageModelV4({
+      modelId: "model-after",
+      doGenerate: fakeModel("新").doGenerate,
+    });
+    const deps = {
+      store,
+      resolveChatModel: changingBinding(
+        { model: before, vision: false },
+        { model: after, vision: false },
+      ),
+      send,
+      llmCallLog,
+      downloadImage,
+    };
+
+    await replyToPrivateMessage(message, deps);
+    await replyToPrivateMessage({ ...message, id: "m2" }, deps);
+
+    expect(sent.map(({ text }) => text)).toEqual(["旧", "新"]);
+    expect(calls.map(({ model }) => model)).toEqual(["model-before", "model-after"]);
+  });
+
+  it("takes vision from the resolved chat model", async () => {
+    const { store } = memoryStore();
+    const { send, sent } = recordingSend();
+    const { llmCallLog } = recordingLlmCallLog();
+    const model = fakeModel("一只猫");
+    const image: IncomingMessage = {
+      ...message,
+      text: undefined,
+      attachment: { kind: "image", key: "img-1" },
+    };
+    const deps = {
+      store,
+      resolveChatModel: changingBinding({ model, vision: true }, { model, vision: false }),
+      send,
+      llmCallLog,
+      downloadImage,
+    };
+
+    await replyToPrivateMessage(image, deps);
+    await replyToPrivateMessage({ ...image, id: "m2" }, deps);
+
+    expect(model.doGenerateCalls).toHaveLength(1);
+    expect(sent.map(({ text }) => text)).toEqual(["一只猫", "图我现在还看不了，用文字说说？"]);
+  });
+
+  it("sends and records nothing when the chat model can't be resolved", async () => {
+    const { store, replies } = memoryStore();
+    const { send, sent } = recordingSend();
+    const { llmCallLog, calls } = recordingLlmCallLog();
+
+    await expect(
+      replyToPrivateMessage(message, {
+        store,
+        resolveChatModel: async () => {
+          throw new Error("chat has no Binding");
+        },
+        send,
+        llmCallLog,
+        downloadImage,
+      }),
+    ).rejects.toThrow("chat has no Binding");
+
+    expect(sent).toHaveLength(0);
+    expect(replies).toHaveLength(0);
+    expect(calls).toHaveLength(0);
   });
 });
 

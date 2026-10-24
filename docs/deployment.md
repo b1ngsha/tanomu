@@ -84,6 +84,8 @@ Variables (not sensitive, readable in logs):
 | `BUILD_PROXY`            | `http://127.0.0.1:7890`, the server's outbound proxy, used by build steps           |
 | `DEPLOY_USER`            | `deploy` (a variable, not a secret: a secret would mask every "deploy" in the logs) |
 
+The `CHAT_*` variables and secrets are only imported once, as Provider `Default` and the chat Binding, when the database has no chat Binding. After that, replies use the stored Binding and changing these values has no effect.
+
 Secrets:
 
 | Secret                                             | Value                                                                                                                                                                 |
