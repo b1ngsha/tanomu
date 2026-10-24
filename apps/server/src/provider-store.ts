@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import type { Config } from "./config.ts";
 import type { Db } from "./db/client.ts";
 import { capabilityBindings, providers } from "./db/schema.ts";
@@ -21,6 +21,8 @@ type ChatEnv = Partial<
  */
 export async function importChatBinding(db: Db, cipher: KeyCipher, env: ChatEnv): Promise<void> {
   await db.transaction(async (tx) => {
+    // Instances starting together wait here; each later one then sees the committed Binding.
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext('import_chat_binding'))`);
     const existing = await tx
       .select({ capability: capabilityBindings.capability })
       .from(capabilityBindings)

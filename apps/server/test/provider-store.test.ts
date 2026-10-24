@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createDb, runMigrations, type Db } from "../src/db/client.ts";
 import { capabilityBindings, providers } from "../src/db/schema.ts";
@@ -51,6 +52,20 @@ describe.skipIf(!url)("chat Binding import (Postgres)", () => {
 
     expect(await db.select().from(providers)).toHaveLength(1);
     expect(await db.select().from(capabilityBindings)).toMatchObject([{ model: "claude-test" }]);
+  });
+
+  it("imports once when several instances start at the same time", async () => {
+    // Each instance is its own process with its own connection, already open when it imports.
+    const instances = [createDb(url!), createDb(url!), createDb(url!)];
+    await Promise.all(instances.map((instance) => instance.execute(sql`select 1`)));
+    try {
+      await Promise.all(instances.map((instance) => importChatBinding(instance, cipher, env)));
+    } finally {
+      await Promise.all(instances.map((instance) => instance.$client.end()));
+    }
+
+    expect(await db.select().from(providers)).toHaveLength(1);
+    expect(await db.select().from(capabilityBindings)).toHaveLength(1);
   });
 
   it("refuses an incomplete env when there is no chat Binding", async () => {

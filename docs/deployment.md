@@ -102,7 +102,7 @@ Before using sign-in, add `http://localhost:3000/auth/feishu/callback` in the Fe
 
 GitHub secrets can't be read back. Keep a copy of `POSTGRES_PASSWORD` in a password manager: it only takes effect when the database volume is first created, and losing it locks you out of the database (changing it later also requires `ALTER USER` inside Postgres).
 
-Keep a copy of `MASTER_KEY` there too, and back it up separately from the database dumps. There is no key rotation: changing or losing it makes every stored Provider API key undecryptable, and each one has to be entered again in the admin console.
+Keep a copy of `MASTER_KEY` there too, and back it up separately from the database dumps. There is no key rotation: changing or losing it makes every stored Provider API key undecryptable, and each one has to be entered again in the admin console's Providers section (until that section ships, delete the `capability_bindings` and `providers` rows so the next start imports them again from the `CHAT_*` variables).
 
 Adding a new app variable means adding it to this environment **and** to the `app_vars` list and `env:` block of the deploy step. A variable missing from the environment fails the deploy before anything is written to the server.
 
