@@ -60,6 +60,8 @@ class FinalRecoveryTest(unittest.TestCase):
     def cli(self, args, **kwargs):
         self.cli_calls.append(args)
         if args[2:4] == ["--paginate", "--slurp"]:
+            if "/pulls/" in args[-1]:
+                return b"[[]]"
             return json.dumps([[], self.comments]).encode()
         if self.archive_error:
             raise self.archive_error
@@ -84,11 +86,26 @@ class FinalRecoveryTest(unittest.TestCase):
         current = self.root / "publish.json"
         marker = control.FINAL_MARKER.fullmatch(self.bodies[0].split("\n", 1)[0])
         current.write_text(json.dumps({"pr": 2, "head": HEAD, "eligible": True,
-                                      "posted": [[HEAD, marker[2], 1, len(self.bodies)]]}))
+                                      "posted": [[HEAD, marker[2], 1, len(self.bodies), marker[5]]]}))
         control.final_comments(self.output, self.output / "identity.json", current, self.root / "remaining")
         self.assertEqual([path.read_text() for path in sorted((self.root / "remaining").glob("*.md"))],
                          self.bodies[1:])
         self.assertIn(f"repos/{REPO}/actions/runs/100", self.api_calls)
+
+    def test_complete_summary_with_missing_inline_is_recovered(self):
+        report = {"verdict": "approve", "findings": [], "advisory": ["Standards: bug"],
+                  "inline": [{"axis": "Standards", "blocking": False, "finding": "bug",
+                              "path": "src/a.ts", "line": 1}]}
+        self.files["review.json"] = json.dumps(report)
+        (self.source / "review.json").write_text(self.files["review.json"])
+        output = self.root / "inline-source"
+        current = self.root / "current-inline.json"
+        current.write_text(json.dumps({"pr": 2, "head": HEAD, "eligible": True, "posted": []}))
+        control.final_comments(self.source, self.source / "identity.json", current, output)
+        self.comments = [{"user": BOT, "body": body.read_text()} for body in sorted(output.glob("*.md"))]
+        self.assertIn("Standards: bug", self.comments[0]["body"])
+        self.assertTrue(self.resume())
+        self.assertEqual(json.loads((self.output / "review.json").read_text()), report)
 
     def test_manual_dispatch_never_reuses_reports(self):
         self.assertFalse(self.resume("workflow_dispatch"))
@@ -97,11 +114,28 @@ class FinalRecoveryTest(unittest.TestCase):
                                  "workflow_dispatch", "unused", "unused"], capture_output=True, text=True, env={})
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "resumed=false\n", ""))
 
-    def test_ignores_forged_complete_malformed_and_wrong_head_markers(self):
+    def test_complete_legacy_report_can_be_reused_without_model_calls(self):
+        self.comments = [{"user": BOT, "body": body.replace(" inline=none -->", " -->", 1)}
+                         for body in self.bodies]
+        self.assertTrue(self.resume())
+        markers = []
+        for comment in self.comments:
+            match = control.FINAL_MARKER.fullmatch(comment["body"].split("\n", 1)[0])
+            markers.append([match[1], match[2], int(match[3]), int(match[4]), match[5]])
+        current = self.root / "legacy.json"
+        current.write_text(json.dumps({"pr": 2, "head": HEAD, "eligible": True, "posted": markers}))
+        control.final_comments(self.output, self.input / "identity.json", current, self.root / "upgrade")
+        self.assertEqual([path.name for path in (self.root / "upgrade").iterdir()], ["0001.md"])
+        receipt = (self.root / "upgrade/0001.md").read_text()
+        self.assertEqual(receipt, self.bodies[0])
+        match = control.FINAL_MARKER.fullmatch(receipt.split("\n", 1)[0])
+        markers.append([match[1], match[2], int(match[3]), int(match[4]), match[5]])
+        self.assertTrue(control.publication.complete(HEAD, markers, set()))
+
+    def test_ignores_forged_malformed_and_wrong_head_markers(self):
         for comments in (
             [{"user": {"login": "mallory", "type": "User"}, "body": self.bodies[0]}],
             [{"user": BOT, "body": "quoted " + self.bodies[0]}],
-            [{"user": BOT, "body": body} for body in self.bodies],
             [{"user": BOT, "body": self.bodies[0].replace(HEAD, OTHER)}],
             [{"user": BOT, "body": self.bodies[0].replace("/actions/runs/100", "/actions/runs/200")}],
             [{"user": BOT, "body": self.bodies[0].replace(f"part=1/{len(self.bodies)}", "part=9/2")}],

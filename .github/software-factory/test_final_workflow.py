@@ -152,7 +152,7 @@ class FinalRunnerStepTest(unittest.TestCase):
         self.assertGreater(len(bodies), 1)
         for part, body in enumerate(bodies, 1):
             self.assertRegex(body.split("\n", 1)[0], rf"<!-- tanomu-final-review head={HEAD} "
-                                                     rf"digest=[0-9a-f]{{16}} part={part}/{len(bodies)} -->")
+                                                     rf"digest=[0-9a-f]{{16}} part={part}/{len(bodies)} inline=(none|[0-9a-f]{{16}}) -->")
             self.assertLessEqual(len(body.encode()), 60_000)
         self.assertTrue(all(call[:3] == ["pr", "comment", "17"]
                             for call in self.calls("gh") if call[:1] == ["pr"]))
