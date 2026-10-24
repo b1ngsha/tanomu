@@ -41,6 +41,23 @@ def findings_text(result):
     return ("### Findings\n\n" + ("\n".join(findings) or "No findings.") + "\n").replace("@", "@" + chr(0x200b))
 
 
+def compact_summary(result, located):
+    """Keep full text only where no inline comment carries that occurrence."""
+    remaining = {key: list(result[key]) for key in ("findings", "advisory")}
+    for item in located:
+        entries = remaining["findings" if item["blocking"] else "advisory"]
+        text = f"{item['axis']}: {item['finding']}"
+        if text in entries:
+            entries.remove(text)
+    summary = f"{len(result['findings'])} blocking, {len(result['advisory'])} advisory.\n"
+    if located:
+        noun = "finding" if len(located) == 1 else "findings"
+        summary += f"\n{len(located)} {noun} in inline comments; see those comments for details.\n"
+    if any(remaining.values()):
+        summary += "\n" + findings_text(remaining).replace("### Findings", "### Other findings", 1)
+    elif not located:
+        summary += "\nNo findings.\n"
+    return summary
 
 
 def inline_markers(pages):
@@ -81,7 +98,7 @@ def plan(result, reviewed, current, repository, reviews=None):
                f"/actions/runs/{run}\n\n{spec} Advisory only: this does not "
                "block merging and nothing was changed.\n\n")
     posted = {tuple(marker[:4]) for marker in current["posted"]}
-    files = {}
+    files, located = {}, []
     inline = result.get("inline", [])
     require(isinstance(inline, list) and all(
         isinstance(item, dict) and set(item) == {"axis", "blocking", "finding", "path", "line"}
@@ -102,6 +119,7 @@ def plan(result, reviewed, current, repository, reviews=None):
                     f"{item['finding']}").replace("@", "@" + chr(0x200b))
             # Oversized findings stay in the losslessly split summary instead.
             if len(body.encode()) <= COMMENT_BYTES:
+                located.append(item)
                 comments.append({"path": item["path"], "line": item["line"], "side": "RIGHT", "body": body})
         if not comments:
             location = "none"
@@ -111,8 +129,14 @@ def plan(result, reviewed, current, repository, reviews=None):
                 "body": f"{marker}\n{len(comments)} inline findings from "
                         f"https://github.com/{repository}/actions/runs/{run}. "
                         "Other findings appear in the summary comment; nothing was changed."}, ensure_ascii=False)
+    # Freeze presentation in the review identity so old artifacts retain their original digest.
+    compact = reviewed.get("summary_format") == "compact"
+    if compact:
+        report = compact_summary(result, located)
+    # Bind the compact summary to full findings too; equal counts are not equal reports.
+    content = json.dumps(result, sort_keys=True, ensure_ascii=False) if compact else report
     # The preface names the run, so each run is a new set while a publisher rerun fills missing parts.
-    digest = hashlib.sha256((preface + report).encode()).hexdigest()[:16]
+    digest = hashlib.sha256((preface + content).encode()).hexdigest()[:16]
     chunks = split(report, COMMENT_BYTES - len(preface.encode()) - 200)
     legacy = any(len(marker) < 5 or marker[4] is None for marker in current["posted"]
                  if marker[0:2] == [head, digest])
