@@ -725,6 +725,50 @@ class ReviewTest(unittest.TestCase):
         self.assertEqual(control.review(empty, empty),
                          {"verdict": "approve", "findings": [], "advisory": []})
 
+    def message_events(self, messages):
+        path = self.directory / "messages.jsonl"
+        path.write_text("\n".join(json.dumps({"type": kind, "part": {
+            "messageID": message, **part}}) for message, kind, part in messages) + "\n")
+        return str(path)
+
+    def test_review_uses_final_message_after_progress_and_tools(self):
+        filename = self.message_events([
+            ("msg_progress", "step_start", {}),
+            ("msg_progress", "text", {"text": "I will read the diff."}),
+            ("msg_progress", "tool_use", {"tool": "read"}),
+            ("msg_progress", "step_finish", {"reason": "tool-calls"}),
+            ("msg_final", "step_start", {}),
+            ("msg_final", "text", {"text": '{"findings":'}),
+            ("msg_final", "text", {"text": '[{"blocking":true,"finding":"bug"}]}'}),
+        ])
+        self.assertEqual(control.review_axis(filename), [{"blocking": True, "finding": "bug"}])
+        self.assertNotIn("I will read", control.review_markdown(filename))
+        self.assertIn("I will read", control.reply(filename))
+
+    def test_review_never_falls_back_to_earlier_valid_json(self):
+        filename = self.message_events([
+            ("msg_earlier", "text", {"text": '{"findings":[]}'}),
+            ("msg_final", "step_start", {}),
+            ("msg_final", "text", {"text": "Still working."}),
+        ])
+        self.assertRejects("invalid-review", filename)
+
+    def test_review_rejects_mixed_or_reappearing_message_ids(self):
+        for middle in (None, "", "msg_other"):
+            with self.subTest(middle=middle):
+                self.assertRejects("invalid-events", self.message_events([
+                    ("msg_final", "text", {"text": '{"findings":'}),
+                    (middle, "step_start", {}),
+                    ("msg_final", "text", {"text": '[]}'}),
+                ]))
+
+    def test_review_does_not_discard_text_within_final_message(self):
+        for before, after in (("Progress.", ""), ("", "Done.")):
+            with self.subTest(before=before, after=after):
+                self.assertRejects("invalid-review", self.message_events([
+                    ("msg_final", "text", {"text": before + '{"findings":[]}' + after}),
+                ]))
+
     def test_advisory_findings_do_not_block(self):
         self.assertEqual(self.review(standards=[(False, "src/a.ts: possible Feature Envy")]), {
             "verdict": "approve", "findings": [],
