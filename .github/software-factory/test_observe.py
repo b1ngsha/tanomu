@@ -12,12 +12,12 @@ class ObservationTest(unittest.TestCase):
     def test_successful_delivery_keeps_independent_review_pending(self):
         record = observe.summarize_jobs([
             {"name": "handoff", "status": "completed", "conclusion": "success"},
-            {"name": "retro", "status": "in_progress", "conclusion": None},
+            {"name": "publish-reviews", "status": "in_progress", "conclusion": None},
         ], "implement")
         self.assertEqual(record["delivery"], "success")
         self.assertEqual(record["final_review"], "pending-separate-run")
-        self.assertEqual(record["retro"], "in_progress")
-        self.assertEqual(record["phase"], "retro")
+        self.assertEqual(record["review_comments"], "in_progress")
+        self.assertEqual(record["phase"], "publish-reviews")
 
     def test_candidate_names_and_reason_text_never_enter_metadata(self):
         record = observe.summarize_jobs([

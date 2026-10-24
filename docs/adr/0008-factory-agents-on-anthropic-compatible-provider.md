@@ -7,11 +7,11 @@ status: accepted
 The factory previously reconstructed review results from OpenCode's event stream
 and parsed them as strict JSON with no retry. Formatting noise from the free model
 could fail whole runs, and the adapters also rendered provider-specific session
-transcripts for retro. All Factory Agent roles now use one pinned Claude Code CLI:
+transcripts for retro. Automatic retro has since been removed; retained Run Evidence
+serves human diagnosis. All remaining Factory Agent roles use one pinned Claude Code CLI:
 implement produces the candidate patch, both round-review axes and final review
-consume native `structured_output`, and retro consumes the native result's Markdown
-text. A provider failure, timeout or invalid result fails the job without publishing
-a partial result; the job does not retry the whole role.
+consume native `structured_output`. A provider failure, timeout or invalid result
+fails the job without publishing a partial result; the job does not retry the whole role.
 
 The default deployment connects each model job directly to one Provider's official
 Anthropic-compatible endpoint. The `agent` GitHub environment defines
@@ -35,7 +35,7 @@ its own permissions, which conflicts with the separate publisher. ADR 0007's
 boundaries are unchanged: trusted main code, a read-only final-review model job,
 a publisher without the model secret, and stale-head handling. Every role uses
 `--bare --restricted`, isolated settings, an empty strict MCP configuration and
-explicit tools. Review and retro have only Read, Glob and Grep. Implement also has
+explicit tools. Review has only Read, Glob and Grep. Implement also has
 Edit, Write and Bash. Configuration canaries check planted project instructions,
 hooks and MCP servers; implement's canary also exercises its intended write/shell
 path in a disposable directory.
@@ -47,10 +47,9 @@ repeats patch validation before installing candidate dependencies or running
 checks. Native Claude sandboxing is a separate decision, not a substitute for this
 handoff.
 
-Implement, round review and retro keep native session JSONL unchanged as
-credential-scanned Run Evidence. Its internal schema is not an adapter contract;
-retro cites files and JSONL line numbers. Final review remains sessionless. The
-obsolete manual OpenCode smoke workflow is removed: Provider Preflight is an
+Implement and round review keep native session JSONL unchanged as
+credential-scanned Run Evidence. Its internal schema is not an adapter contract.
+Final review remains sessionless. The obsolete manual OpenCode smoke workflow is removed: Provider Preflight is an
 operational check, not a task-lifecycle stage. Round findings are published from
 `review.json`, eliminating the duplicate review-Markdown response.
 

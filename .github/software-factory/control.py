@@ -155,15 +155,6 @@ def prompt(mode, *args):
     metadata(number)
     if mode == "implement":
         return (ROOT / "prompts" / "implement.md").read_text()
-    if mode == "retro":
-        return "\n\n".join([
-            (ROOT / "prompts" / "retro.md").read_text(),
-            "# Skill: retro\n\n" + skill("retro"),
-            "# Skill: writing-for-agents (already loaded here; do not call the Skill tool)\n\n"
-            + skill("writing-for-agents"),
-            "# writing-for-agents: SKILL-MECHANICS.md\n\n"
-            + skill("writing-for-agents", "SKILL-MECHANICS.md"),
-        ])
     require(mode in ("review-standards", "review-spec"), "invalid-mode")
     return review_prompt(mode.removeprefix("review-"), ROUND_REVIEW)
 
@@ -491,12 +482,6 @@ def claude_findings(filename):
     return validate_findings(event["structured_output"])
 
 
-def claude_text(filename, output):
-    text = claude_result(filename).get("result")
-    require(isinstance(text, str) and text.strip(), "invalid-result-text")
-    Path(output).write_text(text)
-
-
 def claude_transcript(session_id, output):
     require(re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id),
             "invalid-session-id")
@@ -527,7 +512,7 @@ def claude_schema(mode="final"):
 
 
 def configure_claude(directory, mode="review"):
-    require(mode in ("implement", "review", "retro"), "invalid-mode")
+    require(mode in ("implement", "review"), "invalid-mode")
     base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
     model = os.environ.get("ANTHROPIC_MODEL", "")
     key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -619,32 +604,25 @@ def split(text, budget):
 
 
 def comments(directory, output):
-    """Publishable reports, split losslessly to fit GitHub's comment body limit."""
+    """Publishable round-review findings, split losslessly to fit GitHub's comment limit."""
     source, target = Path(directory), Path(output)
-    reports = [(f"Factory review — round {number}", source / f"feedback-{number}" / "review.json")
-               for number in range(1, 5)]
-    reports.append(("Factory retro — proposals only", source / "retro" / "retro.md"))
     target.mkdir(parents=True, exist_ok=True)
     index = 0
-    for title, path in reports:
+    for number in range(1, 5):
+        path = source / f"feedback-{number}" / "review.json"
         if not path.is_file():
             continue
         scan(path, public=True, limit=None)
-        text = path.read_text()
-        if path.name == "review.json":
-            review = json.loads(text)
-            require(isinstance(review, dict) and all(isinstance(review.get(key), list)
-                    and all(isinstance(item, str) for item in review[key])
-                    for key in ("findings", "advisory")), "invalid-review")
-            findings = [f"- **Blocking** — {item}" for item in review["findings"]]
-            findings += [f"- Advisory — {item}" for item in review["advisory"]]
-            text = "### Findings\n\n" + ("\n".join(findings) or "No findings.") + "\n"
-        text = text.replace("@", "@" + chr(0x200b))
-        preface = (f"## {title}\n\n"
+        review = json.loads(path.read_text())
+        require(isinstance(review, dict) and all(isinstance(review.get(key), list)
+                and all(isinstance(item, str) for item in review[key])
+                for key in ("findings", "advisory")), "invalid-review")
+        findings = [f"- **Blocking** — {item}" for item in review["findings"]]
+        findings += [f"- Advisory — {item}" for item in review["advisory"]]
+        text = ("### Findings\n\n" + ("\n".join(findings) or "No findings.") + "\n").replace("@", "@" + chr(0x200b))
+        preface = (f"## Factory review — round {number}\n\n"
                    f"Run: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
                    f"{os.environ['GITHUB_RUN_ID']}\n\n")
-        if path.name == "retro.md":
-            preface += "These suggestions have not been applied. Human review is required.\n\n"
         # Reserve space for the part counter.
         chunks = split(text, COMMENT_BYTES - len(preface.encode()) - 80)
         for part, chunk in enumerate(chunks, 1):
@@ -968,8 +946,6 @@ if __name__ == "__main__":
             claude_result(*args)
         elif command == "claude-findings":
             claude_findings(*args)
-        elif command == "claude-text":
-            claude_text(*args)
         elif command == "claude-transcript":
             claude_transcript(*args)
         elif command == "claude-result":
