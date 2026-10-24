@@ -23,6 +23,7 @@ const deps = {
   store: createConversationStore(db),
   llmCallLog: createLlmCallLog(db),
   model: createChatModel(config),
+  vision: config.CHAT_MODEL_VISION,
   send: feishu.send,
   downloadImage: feishu.downloadImage,
 };

@@ -80,6 +80,7 @@ Variables (not sensitive, readable in logs):
 | ------------------------ | ----------------------------------------------------------------------------------- |
 | `CHAT_PROVIDER_PROTOCOL` | `openai`, `anthropic`, or `google`                                                  |
 | `CHAT_MODEL`             | Chat model id                                                                       |
+| `CHAT_MODEL_VISION`      | `true` if the chat model accepts images, otherwise `false`                          |
 | `BUILD_PROXY`            | `http://127.0.0.1:7890`, the server's outbound proxy, used by build steps           |
 | `DEPLOY_USER`            | `deploy` (a variable, not a secret: a secret would mask every "deploy" in the logs) |
 

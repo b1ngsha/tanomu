@@ -10,6 +10,7 @@ const Env = z.object({
   CHAT_PROVIDER_BASE_URL: z.url(),
   CHAT_PROVIDER_API_KEY: z.string().min(1),
   CHAT_MODEL: z.string().min(1),
+  CHAT_MODEL_VISION: z.stringbool().default(false),
 });
 
 export type Config = z.infer<typeof Env>;

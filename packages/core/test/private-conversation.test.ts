@@ -100,12 +100,12 @@ function createTestBatcher(deps: ReplyDeps) {
   return { batcher, flushes };
 }
 
-function setupBatch(model = fakeModel("好的")) {
+function setupBatch(model = fakeModel("好的"), { vision = false } = {}) {
   const { store, replies } = memoryStore();
   const { send, sent } = recordingSend();
   const { llmCallLog, calls } = recordingLlmCallLog();
   const download = recordingDownload();
-  const deps = { store, model, send, llmCallLog, downloadImage: download.downloadImage };
+  const deps = { store, model, vision, send, llmCallLog, downloadImage: download.downloadImage };
   const { batcher, flushes } = createTestBatcher(deps);
   return { store, replies, sent, calls, downloads: download.downloads, model, batcher, flushes };
 }
@@ -237,6 +237,28 @@ describe("replyToPrivateMessage", () => {
     expect(sent[0]?.text).toContain("看不了");
   });
 
+  it("answers an image sent alone when the chat model has vision", async () => {
+    const { store } = memoryStore();
+    const { send, sent } = recordingSend();
+    const { llmCallLog } = recordingLlmCallLog();
+    const download = recordingDownload();
+
+    await replyToPrivateMessage(
+      { ...message, text: undefined, attachment: { kind: "image", key: "img-1" } },
+      {
+        store,
+        model: fakeModel("一只猫"),
+        vision: true,
+        send,
+        llmCallLog,
+        downloadImage: download.downloadImage,
+      },
+    );
+
+    expect(download.downloads).toEqual([{ messageId: "m1", imageKey: "img-1" }]);
+    expect(sent).toEqual([{ chatId: "c1", text: "一只猫" }]);
+  });
+
   it("declines a file without calling the model", async () => {
     const { store } = memoryStore();
     const { send, sent } = recordingSend();
@@ -319,6 +341,65 @@ describe("private message batching", () => {
     expect(model.doGenerateCalls).toHaveLength(0);
     expect(downloads).toHaveLength(0);
     expect(sent).toEqual([{ chatId: "c1", text: "图我现在还看不了，用文字说说？" }]);
+  });
+
+  it("sends images and text to a vision model in one call, in order", async () => {
+    const { store, sent, downloads, model, batcher, flushes } = setupBatch(fakeModel("一只猫"), {
+      vision: true,
+    });
+
+    await addRecorded(batcher, store, {
+      ...message,
+      id: "m1",
+      text: undefined,
+      attachment: { kind: "image", key: "img-1" },
+    });
+    await addRecorded(batcher, store, { ...message, id: "m2", text: "这是什么？" });
+    await vi.advanceTimersByTimeAsync(2_500);
+    await Promise.all(flushes);
+
+    expect(downloads).toEqual([{ messageId: "m1", imageKey: "img-1" }]);
+    expect(model.doGenerateCalls).toHaveLength(1);
+    expect(model.doGenerateCalls[0]?.prompt).toMatchObject([
+      {
+        role: "user",
+        content: [
+          {
+            type: "file",
+            mediaType: "image/png",
+            data: { type: "data", data: new Uint8Array([1, 2, 3]) },
+          },
+          { type: "text", text: "这是什么？" },
+        ],
+      },
+    ]);
+    expect(sent).toEqual([{ chatId: "c1", text: "一只猫" }]);
+  });
+
+  it("logs an image's media type and size, not its bytes", async () => {
+    const { store, calls, batcher, flushes } = setupBatch(fakeModel("一只猫"), { vision: true });
+
+    await addRecorded(batcher, store, { ...message, id: "m1", text: "看看这个" });
+    await addRecorded(batcher, store, {
+      ...message,
+      id: "m2",
+      text: undefined,
+      attachment: { kind: "image", key: "img-1" },
+    });
+    await vi.advanceTimersByTimeAsync(2_500);
+    await Promise.all(flushes);
+
+    expect(calls[0]?.request).toEqual({
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "看看这个" },
+            { type: "file", mediaType: "image/png", byteLength: 3 },
+          ],
+        },
+      ],
+    });
   });
 
   it("replies separately when messages are more than a window apart", async () => {
