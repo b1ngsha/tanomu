@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import artifacts  # noqa: E402
 import authorization  # noqa: E402
 import control  # noqa: E402
 
@@ -162,7 +163,7 @@ class ScopeTest(TaskDirectory):
         return path
 
     def scope(self):
-        control.scope("1", self.base)
+        artifacts.scope("1", self.base)
 
     def test_accepts_allowed_modification(self):
         self.write("src/a.ts", "one\nthree\n")
@@ -249,11 +250,11 @@ class ScopeTest(TaskDirectory):
         self.write("src/a.ts", "one\nthree\n")
         for base in ("--output=/tmp/x", "does-not-exist", "0" * 40):
             with self.subTest(base=base):
-                self.assertRejects("invalid-base", control.scope, "1", base)
+                self.assertRejects("invalid-base", artifacts.scope, "1", base)
 
     def test_accepts_symbolic_base(self):
         self.write("src/a.ts", "one\nthree\n")
-        control.scope("1", "main")
+        artifacts.scope("1", "main")
 
 
 def issue(**overrides):
@@ -604,21 +605,21 @@ class ScanTest(unittest.TestCase):
 
     def assertRejects(self, reason, content):
         with self.assertRaises(ValueError) as caught:
-            control.scan(self.artifact(content))
+            artifacts.scan(self.artifact(content))
         self.assertEqual(str(caught.exception), reason)
 
     def test_accepts_clean_artifact(self):
-        control.scan(self.artifact("diff --git a/x b/x\n+const task-assessment-for-merged-private = 1\n"
+        artifacts.scan(self.artifact("diff --git a/x b/x\n+const task-assessment-for-merged-private = 1\n"
                                    "+// abc api key handling\n"))
 
     def test_accepts_without_auth_file(self):
         with mock.patch.dict(os.environ):
             del os.environ["FACTORY_AUTH_FILE"]
             with self.assertRaisesRegex(ValueError, "^missing-auth-file$"):
-                control.scan(self.artifact("Zq9/\"opaque+cred"))
-            control.scan(self.artifact("Zq9/\"opaque+cred"), public=True)
+                artifacts.scan(self.artifact("Zq9/\"opaque+cred"))
+            artifacts.scan(self.artifact("Zq9/\"opaque+cred"), public=True)
             with self.assertRaisesRegex(ValueError, "^credential-pattern-in-artifact$"):
-                control.scan(self.artifact(SECRET), public=True)
+                artifacts.scan(self.artifact(SECRET), public=True)
 
     def test_rejects_exact_credential(self):
         self.assertRejects("credential-in-artifact", 'leak Zq9/"opaque+cred here')
@@ -628,7 +629,7 @@ class ScanTest(unittest.TestCase):
         self.assertRejects("credential-in-artifact", event)
 
     def test_ignores_short_values(self):
-        control.scan(self.artifact("abc api"))
+        artifacts.scan(self.artifact("abc api"))
 
     def test_rejects_credential_patterns(self):
         for content in ("ghp_" + "a" * 36, "token=gho_" + "B" * 20, "github_pat_" + "c_" * 15,
@@ -638,33 +639,33 @@ class ScanTest(unittest.TestCase):
                 self.assertRejects("credential-pattern-in-artifact", content)
 
     def test_rejects_oversized_artifact(self):
-        self.assertRejects("artifact-too-large", b"a" * (control.MAX_ARTIFACT_BYTES + 1))
+        self.assertRejects("artifact-too-large", b"a" * (artifacts.MAX_ARTIFACT_BYTES + 1))
 
     def test_accepts_artifact_at_size_limit(self):
-        control.scan(self.artifact(b"a" * control.MAX_ARTIFACT_BYTES))
+        artifacts.scan(self.artifact(b"a" * artifacts.MAX_ARTIFACT_BYTES))
 
     def test_unlimited_scan_accepts_any_size_but_still_finds_credentials(self):
-        large = "检查🙂 é\n" * (control.MAX_ARTIFACT_BYTES // 4)
-        self.assertGreater(len(large.encode()), control.MAX_ARTIFACT_BYTES)
-        control.scan(self.artifact(large), limit=None)
-        control.scan(self.artifact(large), public=True, limit=None)
+        large = "检查🙂 é\n" * (artifacts.MAX_ARTIFACT_BYTES // 4)
+        self.assertGreater(len(large.encode()), artifacts.MAX_ARTIFACT_BYTES)
+        artifacts.scan(self.artifact(large), limit=None)
+        artifacts.scan(self.artifact(large), public=True, limit=None)
         # A leak at the very end of a large artifact is still found.
         for leak, reason in ((SECRET, "credential-pattern-in-artifact"),
                              ('Zq9/"opaque+cred', "credential-in-artifact")):
             for public in (False, True):
                 with self.subTest(reason=reason, public=public), \
                         self.assertRaisesRegex(ValueError, f"^{reason}$"):
-                    control.scan(self.artifact(large + leak), public=public, limit=None)
+                    artifacts.scan(self.artifact(large + leak), public=public, limit=None)
         with mock.patch.dict(os.environ):
             del os.environ["FACTORY_AUTH_FILE"]
             with self.assertRaisesRegex(ValueError, "^missing-auth-file$"):
-                control.scan(self.artifact(large), limit=None)
+                artifacts.scan(self.artifact(large), limit=None)
 
     def test_cli_scan_output_is_private_and_unlimited(self):
         def run(content, env):
             return subprocess.run([sys.executable, "-I", str(CONTROL), "scan-output", self.artifact(content)],
                                   capture_output=True, text=True, env=env)
-        large = "ü" * control.MAX_ARTIFACT_BYTES
+        large = "ü" * artifacts.MAX_ARTIFACT_BYTES
         result = run(large, {**os.environ})
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         result = run(large + SECRET, {**os.environ})
@@ -949,7 +950,7 @@ class RunnerStepTest(unittest.TestCase):
             "reply.json": json.dumps({"type": "result", "subtype": "success", "is_error": False,
                                       "structured_output": {"findings": [finding]}})})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertGreater((self.directory / "temp/feedback/review.json").stat().st_size, control.MAX_ARTIFACT_BYTES)
+        self.assertGreater((self.directory / "temp/feedback/review.json").stat().st_size, artifacts.MAX_ARTIFACT_BYTES)
 
     def test_review_rejects_old_schema(self):
         result, _ = self.run_step("review", self.reply({"verdict": "approve", "findings": []}))
