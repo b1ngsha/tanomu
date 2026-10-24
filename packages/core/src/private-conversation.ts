@@ -46,11 +46,17 @@ export interface LlmCallLog {
   record(call: LlmCall): Promise<void>;
 }
 
+/** The model the chat Capability is bound to. */
+export interface ChatModel {
+  model: LanguageModel;
+  /** Whether `model` accepts images; images are declined when false. */
+  vision: boolean;
+}
+
 export interface ReplyDeps {
   store: ConversationStore;
-  model: LanguageModel;
-  /** Whether `model` accepts images; images are declined when false or unset. */
-  vision?: boolean;
+  /** Called once per reply, so a changed Binding applies to the next one; throws when chat has no usable Binding. */
+  resolveChatModel: () => Promise<ChatModel>;
   /** Sends text to the chat and returns the Feishu message id of what was sent. */
   send: (chatId: string, text: string) => Promise<string>;
   llmCallLog: LlmCallLog;
@@ -93,7 +99,7 @@ interface ChatRequest {
 
 /** Calls the model and records the call; recording failures are logged, never thrown. */
 async function generateRecorded(
-  { model, llmCallLog }: Pick<ReplyDeps, "model" | "llmCallLog">,
+  { model, llmCallLog }: Pick<ChatModel, "model"> & Pick<ReplyDeps, "llmCallLog">,
   call: Pick<LlmCall, "capability" | "conversationId">,
   { request, logged }: ChatRequest,
 ): Promise<string> {
@@ -180,18 +186,19 @@ export async function recordPrivateMessage(
 export async function replyToPrivateMessages(
   chatId: string,
   items: RecordedMessage[],
-  { store, send, ...deps }: ReplyDeps,
+  { store, send, resolveChatModel, llmCallLog, downloadImage }: ReplyDeps,
 ): Promise<void> {
   const conversationId = items[0]?.conversationId;
   if (conversationId === undefined) return;
 
+  const { model, vision } = await resolveChatModel();
   const messages = items.map(({ message }) => message);
   const text =
-    declineFor(messages, deps.vision ?? false) ??
+    declineFor(messages, vision) ??
     (await generateRecorded(
-      deps,
+      { model, llmCallLog },
       { capability: "chat", conversationId },
-      await chatRequest(messages, deps),
+      await chatRequest(messages, { downloadImage }),
     ));
 
   const feishuMessageId = await send(chatId, text);
