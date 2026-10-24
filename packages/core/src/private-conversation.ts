@@ -1,4 +1,4 @@
-import { generateText, type LanguageModel } from "ai";
+import { generateText, type FilePart, type LanguageModel, type TextPart } from "ai";
 
 /** A message a User sent to tanomu, already normalized away from Feishu's wire format. */
 export interface IncomingMessage {
@@ -49,6 +49,8 @@ export interface LlmCallLog {
 export interface ReplyDeps {
   store: ConversationStore;
   model: LanguageModel;
+  /** Whether `model` accepts images; images are declined when false or unset. */
+  vision?: boolean;
   /** Sends text to the chat and returns the Feishu message id of what was sent. */
   send: (chatId: string, text: string) => Promise<string>;
   llmCallLog: LlmCallLog;
@@ -63,10 +65,14 @@ const NON_TEXT_REPLY = "这个我暂时看不了，先发文字给我吧。";
 const FILE_REPLY = "文件我暂时还读不了，挑重点用文字发我吧。";
 const IMAGE_REPLY = "图我现在还看不了，用文字说说？";
 
+function hasImage(messages: IncomingMessage[]): boolean {
+  return messages.some((message) => message.attachment?.kind === "image");
+}
+
 /** The fixed reply for a batch the model can't take, or undefined when the model should answer. */
-function declineFor(messages: IncomingMessage[]): string | undefined {
+function declineFor(messages: IncomingMessage[], vision: boolean): string | undefined {
   if (messages.some((message) => message.attachment?.kind === "file")) return FILE_REPLY;
-  if (messages.some((message) => message.attachment?.kind === "image")) return IMAGE_REPLY;
+  if (hasImage(messages)) return vision ? undefined : IMAGE_REPLY;
   if (messages.every((message) => message.text === undefined)) return NON_TEXT_REPLY;
   return undefined;
 }
@@ -77,11 +83,19 @@ export interface RecordedMessage {
   conversationId: string;
 }
 
+/** What is sent to the model, and how it is logged: images as media type and size, not bytes. */
+interface ChatRequest {
+  request:
+    | { prompt: string }
+    | { messages: [{ role: "user"; content: Array<TextPart | FilePart> }] };
+  logged: unknown;
+}
+
 /** Calls the model and records the call; recording failures are logged, never thrown. */
 async function generateRecorded(
   { model, llmCallLog }: Pick<ReplyDeps, "model" | "llmCallLog">,
   call: Pick<LlmCall, "capability" | "conversationId">,
-  request: { prompt: string },
+  { request, logged }: ChatRequest,
 ): Promise<string> {
   const started = performance.now();
   async function record(
@@ -93,7 +107,7 @@ async function generateRecorded(
         ...outcome,
         provider: typeof model === "string" ? "gateway" : model.provider,
         model: typeof model === "string" ? model : model.modelId,
-        request,
+        request: logged,
         latencyMs: Math.round(performance.now() - started),
       });
     } catch (error) {
@@ -122,6 +136,37 @@ async function generateRecorded(
   return result.text;
 }
 
+/** A plain prompt for text-only batches; one multimodal user message, in batch order, otherwise. */
+async function chatRequest(
+  messages: IncomingMessage[],
+  { downloadImage }: Pick<ReplyDeps, "downloadImage">,
+): Promise<ChatRequest> {
+  if (!hasImage(messages)) {
+    const texts = messages
+      .map((message) => message.text)
+      .filter((text): text is string => text !== undefined);
+    const request = { prompt: texts.join("\n") };
+    return { request, logged: request };
+  }
+  const parts = await Promise.all(
+    messages.map(async ({ id, text, attachment }) => {
+      if (attachment?.kind === "image") {
+        const { data, mediaType } = await downloadImage(id, attachment.key);
+        const sent: FilePart = { type: "file", mediaType, data: { type: "data", data } };
+        return { sent, logged: { type: "file", mediaType, byteLength: data.byteLength } };
+      }
+      if (text === undefined) return undefined;
+      const sent: TextPart = { type: "text", text };
+      return { sent, logged: sent };
+    }),
+  );
+  const kept = parts.filter((part) => part !== undefined);
+  return {
+    request: { messages: [{ role: "user", content: kept.map((part) => part.sent) }] },
+    logged: { messages: [{ role: "user", content: kept.map((part) => part.logged) }] },
+  };
+}
+
 /** Records an incoming message, returning undefined when Feishu redelivers it. */
 export async function recordPrivateMessage(
   message: IncomingMessage,
@@ -141,15 +186,12 @@ export async function replyToPrivateMessages(
   if (conversationId === undefined) return;
 
   const messages = items.map(({ message }) => message);
-  const texts = messages
-    .map((message) => message.text)
-    .filter((text): text is string => text !== undefined);
   const text =
-    declineFor(messages) ??
+    declineFor(messages, deps.vision ?? false) ??
     (await generateRecorded(
       deps,
       { capability: "chat", conversationId },
-      { prompt: texts.join("\n") },
+      await chatRequest(messages, deps),
     ));
 
   const feishuMessageId = await send(chatId, text);
