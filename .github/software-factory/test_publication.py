@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from pathlib import Path
 import unittest
 
@@ -9,8 +10,57 @@ spec.loader.exec_module(p)
 
 class PublicationTest(unittest.TestCase):
 
+    def test_compact_summary_keeps_only_findings_without_inline_delivery(self):
+        identity = {"run": "1", "head": "a" * 40, "base": "b" * 40, "issues": [],
+                    "summary_format": "compact"}
+        large = "x" * 60_001
+        result = {"findings": ["Standards: inline bug", "Spec: general requirement"],
+                  "advisory": ["Standards: " + large], "inline": [
+                      {"axis": "Standards", "blocking": True, "finding": "inline bug",
+                       "path": "src/a.ts", "line": 1},
+                      {"axis": "Standards", "blocking": False, "finding": large,
+                       "path": "src/a.ts", "line": 2}]}
+        files = p.plan(result, identity, {"posted": []}, "owner/repo")
+        summary = "".join(body for name, body in sorted(files.items()) if name.endswith(".md"))
+        self.assertIn("2 blocking, 1 advisory", summary)
+        self.assertIn("1 finding in inline comments", summary)
+        self.assertNotIn("inline bug", summary)
+        self.assertIn("Spec: general requirement", summary)
+        chunks = "".join(body.split("\n\n", 4)[-1] for name, body in sorted(files.items())
+                         if name.endswith(".md"))
+        self.assertIn(large, chunks)
+        payload = json.loads(files["inline.json"])
+        self.assertIn("inline bug", payload["comments"][0]["body"])
+        self.assertNotIn("full report", payload["body"])
+        # Already-published inline findings stay omitted on a publisher rerun.
+        reviews = [[{"user": {"login": "github-actions[bot]", "type": "Bot"}, "body": payload["body"]}]]
+        rerun = p.plan(result, identity, {"posted": []}, "owner/repo", reviews)
+        self.assertNotIn("inline.json", rerun)
+        self.assertEqual({name: body for name, body in files.items() if name.endswith(".md")}, rerun)
 
+    def test_compact_summary_removes_only_matching_axis_severity_and_occurrence(self):
+        identity = {"run": "1", "head": "a" * 40, "base": "b" * 40, "issues": [],
+                    "summary_format": "compact"}
+        result = {"findings": ["Standards: duplicate", "Standards: duplicate", "Spec: duplicate"],
+                  "advisory": ["Standards: duplicate"], "inline": [
+                      {"axis": "Standards", "blocking": True, "finding": "duplicate",
+                       "path": "src/a.ts", "line": 1}]}
+        summary = p.plan(result, identity, {"posted": []}, "owner/repo")["0001.md"]
+        self.assertEqual(summary.count("**Blocking** — Standards: duplicate"), 1)
+        self.assertIn("**Blocking** — Spec: duplicate", summary)
+        self.assertIn("Advisory — Standards: duplicate", summary)
 
+    def test_compact_digest_binds_full_inline_findings_despite_equal_counts(self):
+        identity = {"run": "1", "head": "a" * 40, "base": "b" * 40, "issues": [],
+                    "summary_format": "compact"}
+        markers = []
+        for finding in ("first bug", "different bug"):
+            result = {"findings": ["Standards: " + finding], "advisory": [], "inline": [
+                {"axis": "Standards", "blocking": True, "finding": finding,
+                 "path": "src/a.ts", "line": 1}]}
+            files = p.plan(result, identity, {"posted": []}, "owner/repo")
+            markers.append(p.FINAL_MARKER.fullmatch(files["0001.md"].split("\n", 1)[0]))
+        self.assertNotEqual(markers[0][2], markers[1][2])
 
     def test_oversized_inline_findings_do_not_require_unpublishable_inline_review(self):
         head = "a" * 40
