@@ -17,7 +17,7 @@ CONTROL = Path(control.__file__).resolve()
 OWNER = "owner"
 REPO = f"{OWNER}/tanomu"
 BODY = "Merge private messages.\nBlocked by: #2\n"
-SECRET = "sk-test-0123456789abcdefghijklmnop"
+SECRET = "sk-" + "test-0123456789abcdefghijklmnop"
 
 
 class TaskDirectory(unittest.TestCase):
@@ -631,9 +631,22 @@ class ScanTest(unittest.TestCase):
     def test_rejects_credential_patterns(self):
         for content in ("ghp_" + "a" * 36, "token=gho_" + "B" * 20, "github_pat_" + "c_" * 15,
                         SECRET, "(sk-" + "d" * 20 + ")",
-                        "-----BEGIN OPENSSH PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----"):
+                        "-----BEGIN OPENSSH " + "PRIVATE KEY-----", "-----BEGIN " + "PRIVATE KEY-----"):
             with self.subTest(content=content[:12]):
                 self.assertRejects("credential-pattern-in-artifact", content)
+
+    def test_tracked_files_hold_no_credential_shaped_literals(self):
+        # Agents read the checkout, so a literal here would make their session scans reject.
+        root = CONTROL.parents[2]
+        listed = subprocess.run(["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True).stdout
+        hits = []
+        for name in filter(None, listed.split(b"\0")):
+            path = root / os.fsdecode(name)
+            if path.is_file() and not path.is_symlink():
+                hits += [f"{path.relative_to(root)}:{number}"
+                         for number, line in enumerate(path.read_bytes().splitlines(), 1)
+                         if control.CREDENTIAL_PATTERN.search(line)]
+        self.assertEqual(hits, [])
 
     def test_rejects_oversized_artifact(self):
         self.assertRejects("artifact-too-large", b"a" * (control.MAX_ARTIFACT_BYTES + 1))
@@ -789,7 +802,7 @@ class CommentsTest(unittest.TestCase):
             ("feedback-1/review.json", json.dumps({"findings": [], "advisory": [straddling]}), "credential-pattern-in-artifact"),
             ("feedback-4/review.json", json.dumps({"findings": [text * 3 + " " + SECRET], "advisory": []}), "credential-pattern-in-artifact"),
             ("retro/retro.md", text * 3 + "opaque-credential-value", "credential-in-artifact"),
-            ("retro/retro.md", "-----BEGIN PRIVATE KEY-----", "credential-pattern-in-artifact"),
+            ("retro/retro.md", "-----BEGIN " + "PRIVATE KEY-----", "credential-pattern-in-artifact"),
         ):
             with self.subTest(name=name, reason=reason):
                 shutil.rmtree(self.reports, ignore_errors=True)
