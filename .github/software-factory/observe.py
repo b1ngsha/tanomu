@@ -8,12 +8,12 @@ import subprocess
 import sys
 import time
 
-PATHS = {"implement": "software-factory-implement.yml", "final-review": "final-review.yml"}
-STATES = {"queued", "in_progress", "success", "failure", "cancelled", "skipped", "timed_out", "neutral", "action_required"}
-JOBS = {"gate", "gate-feedback", "claim", "handoff", "publish-reviews", "report",
-        "identify", "review", "publish"} | {f"round{n} / {stage}" for n in range(1, 5)
-                                                   for stage in ("implement", "verify", "review", "diagnostics")}
-SHA = re.compile(r"[0-9a-f]{40}")
+# -I excludes the script directory; import only from this trusted checkout.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from execution import FILES, JOBS, RESULTS, SHA, STATES as RUN_STATES, job_states, publication_findings
+
+PATHS = {"implement": FILES["implementation"], "final-review": FILES["final-review"]}
+STATES = (RUN_STATES - {"completed"}) | RESULTS
 
 
 def get(path):
@@ -51,12 +51,7 @@ def identity(run, repo):
 
 
 def summarize_jobs(jobs, kind):
-    safe = {}
-    for job in jobs:
-        name = job.get("name")
-        if name in JOBS:
-            state = job.get("conclusion") or job.get("status")
-            safe[name] = state if state in STATES else "unavailable"
+    safe = job_states(jobs, JOBS, "unavailable")
     active = [name for name, state in safe.items() if state == "in_progress"]
     return {"jobs": safe, "phase": active[-1] if active else "waiting-or-completed",
             "delivery": safe.get("handoff", "pending") if kind == "implement" else "separate-implementation-run",
@@ -111,25 +106,33 @@ def snapshot(api, repo, run_id):
                                         and job.get("conclusion") != "skipped" for job in jobs):
         return None
     status = run.get("conclusion") or run.get("status")
-    head = target.get("head", {}).get("sha") if kind == "final-review" else run.get("head_sha")
-    result = {"schema": 1, "repository": repo, "run_id": int(run_id), "run_attempt": attempt,
+    current_head = target.get("head", {}).get("sha") if kind == "final-review" else None
+    current_base = target.get("base", {}).get("sha") if kind == "final-review" else None
+    result = {"schema": 2, "repository": repo, "run_id": int(run_id), "run_attempt": attempt,
               "kind": kind, "issue": int(number) if kind == "implement" else None,
               "pr": int(number) if kind == "final-review" else None, "parent": parent,
               "branch": branch if re.fullmatch(r"[A-Za-z0-9/_.-]{1,200}", branch) else "unavailable",
-              "head": head if isinstance(head, str) and SHA.fullmatch(head) else None,
-              "base": target.get("base", {}).get("sha") if kind == "final-review" else None,
+              "current_head": current_head if isinstance(current_head, str) and SHA.fullmatch(current_head) else None,
+              "current_base": current_base if isinstance(current_base, str) and SHA.fullmatch(current_base) else None,
+              # Actions head_sha identifies workflow code, not the reviewed PR or merge base.
+              "reviewed_head": None, "reviewed_base": None,
               "state": status if status in STATES else "unavailable",
               "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
               "started_at": run.get("run_started_at"), "completed_at": run.get("updated_at") if run.get("status") == "completed" else None,
               "reason": "actions-metadata", "evidence": {"run": f"https://github.com/{repo}/actions/runs/{run_id}/attempts/{attempt}"},
               **summarize_jobs(jobs, kind)}
+    result["jobs_complete"] = len(jobs) < 300
+    result["findings"] = publication_findings(
+        kind, run.get("status"), run.get("conclusion"), result["jobs"], result["jobs_complete"])
     if kind == "implement":
         pulls = api(f"{prefix}/pulls?state=all&head={owner}:feat/{number}-implement&per_page=20")
         pulls = [pr for pr in pulls if pr.get("head", {}).get("repo", {}).get("full_name") == repo
                  and pr.get("base", {}).get("ref") == "main"]
         if pulls:
             result["pr"] = int(pulls[0]["number"])
-            result["head"] = pulls[0]["head"]["sha"]
+            for key in ("head", "base"):
+                sha = pulls[0].get(key, {}).get("sha")
+                result[f"current_{key}"] = sha if isinstance(sha, str) and SHA.fullmatch(sha) else None
     if parent:
         parent_id, parent_attempt = parent.split('.')
         result["evidence"]["parent"] = f"https://github.com/{repo}/actions/runs/{parent_id}/attempts/{parent_attempt}"
@@ -148,8 +151,11 @@ def snapshot(api, repo, run_id):
 def render(record):
     lines = [f"Factory {record['kind']}: **{record['state']}**; phase: {record['phase']}.",
              f"Execution: {record['run_id']}.{record['run_attempt']}; parent: {record['parent'] or 'none'}.",
+             f"Current PR head/base: {record['current_head'] or 'unknown'} / {record['current_base'] or 'unknown'}.",
+             f"Reviewed head/base: {record['reviewed_head'] or 'unknown'} / {record['reviewed_base'] or 'unknown'} (unavailable from Actions metadata).",
              f"Delivery: {record['delivery']}; independent final review: {record['final_review']}; review comments: {record['review_comments']}; CI: {record['ci']}."]
     lines.extend(f"{name}: {state}." for name, state in record["jobs"].items())
+    lines.append("Publication findings: " + (", ".join(record["findings"]) or "none observed") + ".")
     lines.extend([f"Next action: {record['next_action']}", "Evidence: " + " · ".join(record["evidence"].values()),
                   f"Artifact metadata: {record['evidence_state']}; expired recorded artifacts: {sum(item['expired'] for item in record['artifacts'])}.",
                   "Metadata only; missing evidence does not prove a stage never started. No retry, merge or deployment is performed."])
@@ -162,11 +168,15 @@ def publish(record):
     marker = f"<!-- factory-observation:{record['kind']}:{run_id} -->"
     body = marker + '\n' + render(record)
     comments = []
-    for page in range(1, 4):
+    page = 1
+    while True:
         items = get(f"repos/{repo}/issues/{target}/comments?per_page=100&page={page}")
+        if not isinstance(items, list):
+            raise ValueError("comments-unavailable")
         comments.extend(items)
         if len(items) < 100:
             break
+        page += 1
     existing = next((item for item in comments if item.get("user", {}).get("login") == "github-actions[bot]"
                      and item.get("user", {}).get("type") == "Bot"
                      and (item.get("body") or '').split('\n', 1)[0] == marker), None)
