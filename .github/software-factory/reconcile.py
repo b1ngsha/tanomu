@@ -9,7 +9,7 @@ import subprocess
 FILES = {"implementation": "software-factory-implement.yml", "final-review": "final-review.yml"}
 STATES = {"queued", "in_progress", "completed", "waiting", "pending", "requested"}
 RESULTS = {"success", "failure", "cancelled", "skipped", "timed_out", "neutral", "action_required", "stale"}
-ARTIFACTS = {"factory-input", "factory-claim", "final-input", "final-review", "session-final-review"}
+ARTIFACTS = {"factory-input", "factory-claim", "final-input", "final-review"}
 NUMBER = r"[1-9][0-9]{0,19}"
 ISSUE = re.compile(rf"Factory issue #({NUMBER}) · attempt ({NUMBER})")
 CHILD = re.compile(rf"Final PR #({NUMBER}) · parent ({NUMBER})\.({NUMBER})")

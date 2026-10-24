@@ -38,6 +38,20 @@ _Avoid_: channel, vendor, supplier
 The current choice of Provider and model for one Capability. A Capability has at most one Binding at a time.
 _Avoid_: assignment, route, mapping
 
+## Software Factory
+
+**Factory Agent**:
+A model-driven participant in the software factory that performs an implementation, review, or retrospective role without deployment authority.
+_Avoid_: bot, autonomous maintainer
+
+**Provider Preflight**:
+An operational check that a Provider works for a Factory Agent role. It is not a stage in the software factory task lifecycle.
+_Avoid_: smoke task, implementation round
+
+**Run Evidence**:
+The retained record of a Factory Agent run and its outcomes, used for retrospectives and human diagnosis. It does not authorize publication or delivery.
+_Avoid_: trusted transcript, approval record
+
 ## Blog Digest
 
 **Feed**:
