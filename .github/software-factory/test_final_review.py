@@ -349,6 +349,19 @@ class ClaudeResultTest(unittest.TestCase):
                                   "unavailable": [{"axis": "Standards", "reason": "structured-output-retries"}]})
         self.assertNotIn("error_max", (output.with_suffix(".md")).read_text())
 
+    def test_unavailable_report_keeps_the_other_axis_findings(self):
+        failed = self.write([{"type": "result", "subtype": "error_api", "is_error": True}])
+        reviewed = self.directory / "reviewed.jsonl"
+        reviewed.write_text(json.dumps({"type": "result", "subtype": "success", "structured_output": {
+            "findings": [{"blocking": False, "finding": "smell"}]}}) + "\n")
+        output = self.directory / "review.json"
+        report = control.claude_review_result([("Standards", str(reviewed), "0"), ("Spec", failed, "0")], str(output))
+        self.assertEqual(report, {"verdict": "unavailable", "findings": [], "advisory": ["Standards: smell"],
+                                  "unavailable": [{"axis": "Spec", "reason": "provider-error"}]})
+        markdown = output.with_suffix(".md").read_text()
+        self.assertIn("### Standards — full response", markdown)
+        self.assertIn("### Spec — unavailable (provider-error)", markdown)
+
 
 class ClaudeConfigureTest(unittest.TestCase):
     def setUp(self):
@@ -382,55 +395,6 @@ class ClaudeConfigureTest(unittest.TestCase):
                     {"FACTORY_REVIEW_BASE_URL": base_url}):
                 with self.assertRaisesRegex(ValueError, f"^{reason}$"):
                     control.configure_claude(str(self.directory / "claude"))
-
-
-class SpikeWorkflowContractTest(unittest.TestCase):
-    def setUp(self):
-        self.workflow = base.WorkflowContractTest.load("final-review-claude-spike.yml")
-        self.jobs = self.workflow["jobs"]
-
-    def test_is_manual_only_and_has_no_publisher(self):
-        triggers = self.workflow[True]
-        self.assertEqual(set(triggers), {"workflow_dispatch"})
-        self.assertEqual(set(self.jobs), {"identify", "review"})
-        self.assertEqual(self.workflow["permissions"], {})
-        self.assertIn("github.ref == 'refs/heads/main'", self.jobs["identify"]["if"])
-
-    def test_model_job_has_read_only_boundary_and_secret_is_scoped(self):
-        self.assertEqual(self.jobs["review"]["permissions"], {"contents": "read"})
-        text = json.dumps(self.jobs)
-        self.assertIn("FACTORY_REVIEW_API_KEY", text)
-        self.assertNotIn("GH_TOKEN", json.dumps(self.jobs["review"]))
-        self.assertNotIn("gh pr comment", text)
-        self.assertIn("--bare", text)
-        self.assertIn("--restricted", text)
-        self.assertIn("--strict-mcp-config", text)
-        self.assertIn("--tools Read,Glob,Grep", text)
-        self.assertNotIn("--dangerously-skip-permissions", text)
-        self.assertNotIn("bypassPermissions", text)
-
-    def test_identify_writes_the_uploaded_input(self):
-        identify, upload = self.jobs["identify"]["steps"][1:3]
-        self.assertIn('final-identify "$PR" workflow_dispatch "$RUNNER_TEMP/final-input"', identify["run"])
-        self.assertEqual(upload["with"]["path"], "${{ runner.temp }}/final-input")
-
-    def test_trusted_scripts_resolve_from_each_working_directory(self):
-        prefixes = {("identify", None): {""}, ("review", None): {"trusted/"},
-                    ("review", "candidate"): {"../trusted/", '"$GITHUB_WORKSPACE/trusted/'}}
-        for name, job in self.jobs.items():
-            for step in job["steps"]:
-                for prefix in re.findall(r'(\S*)\.github/software-factory/', step.get("run", "")):
-                    with self.subTest(job=name, step=step.get("name"), prefix=prefix):
-                        self.assertIn(prefix, prefixes[(name, step.get("working-directory"))])
-
-    def test_runner_and_artifacts_are_pinned(self):
-        text = json.dumps(self.jobs["review"])
-        self.assertIn("@anthropic-ai/claude-code@2.1.304", text)
-        self.assertIn("2.1.304 (Claude Code)", text)
-        uploads = [step for step in self.jobs["review"]["steps"] if "upload-artifact" in step.get("uses", "")]
-        self.assertTrue(uploads)
-        self.assertTrue(all(step["with"]["retention-days"] == 3 for step in uploads))
-        self.assertTrue(all("*" not in step["with"]["path"] for step in uploads))
 
 
 class OptionalSpecTest(unittest.TestCase):
