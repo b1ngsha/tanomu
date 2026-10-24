@@ -1104,6 +1104,24 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertNotIn("download-artifact", str(diagnostics))
         self.assertIn("inputs.base", str(diagnostics))
 
+    def test_round_callers_explicitly_pass_the_environment_secret(self):
+        trigger = self.round.get("on", self.round.get(True))
+        self.assertEqual(trigger["workflow_call"].get("secrets"), {
+            "AGENT_API_KEY": {"required": True},
+        })
+        for name in ("round1", "round2", "round3", "round4"):
+            with self.subTest(round=name):
+                self.assertEqual(self.implement["jobs"][name].get("secrets"), {
+                    "AGENT_API_KEY": "${{ secrets.AGENT_API_KEY }}",
+                })
+        for name, job in self.round["jobs"].items():
+            with self.subTest(job=name):
+                if name in ("implement", "review"):
+                    self.assertEqual(job["environment"], "agent")
+                else:
+                    self.assertNotIn("environment", job)
+                    self.assertNotIn("secrets", str(job))
+
     def test_repairable_outcomes_reach_every_later_round(self):
         jobs = self.implement["jobs"]
         rounds = sorted(name for name in jobs if name.startswith("round"))
