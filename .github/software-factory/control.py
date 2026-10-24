@@ -13,10 +13,25 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent
 MODEL = "opencode/deepseek-v4.1-flash-free"
+CLAUDE_CODE_VERSION = "2.1.304"
+CLAUDE_PROVIDER_HOSTS = {"api.deepseek.com", "api.moonshot.ai", "api.moonshot.cn"}
 MAX_ARTIFACT_BYTES = 512_000
 MAX_DIAGNOSTIC_BYTES = 12_000
 CHECKS = ("pnpm format", "pnpm format:check", "pnpm lint", "pnpm typecheck", "pnpm build:admin",
           "pnpm test")
+FINDINGS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["findings"],
+    "properties": {"findings": {"type": "array", "items": {
+        "type": "object", "additionalProperties": False,
+        "required": ["blocking", "finding"],
+        "properties": {"blocking": {"type": "boolean"}, "finding": {"type": "string", "pattern": r"\S"}},
+    }}},
+}
+CLAUDE_UNAVAILABLE = {"timeout", "runner-error", "invalid-claude-events", "no-result",
+                      "structured-output-retries", "max-turns", "no-structured-output", "provider-error",
+                      "invalid-review", "invalid-findings"}
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 # Credential-shaped tokens; the lookbehind keeps kebab-case text such as "task-..." from matching.
 CREDENTIAL_PATTERN = re.compile(
@@ -518,24 +533,36 @@ def diagnose(filename, command, log):
     Path(filename).write_text(json.dumps({"command": command, "output": ANSI.sub("", tail)}))
 
 
-def reply(filename):
+def reply(filename, *, final_message=False):
     parsed = events(filename)
+    require(all(isinstance(event.get("part", {}), dict) for event in parsed), "invalid-events")
     require(not any(event.get("type") == "step_finish"
                     and event.get("part", {}).get("reason") in ("length", "content-filter")
                     for event in parsed), "incomplete-output")
+    if final_message:
+        # v2.1.0 emits completed text parts, including progress in earlier messages.
+        # Select by protocol identity, never by searching for a parseable JSON substring.
+        messages = [event for event in parsed
+                    if event.get("type") in ("step_start", "step_finish", "text", "tool_use")]
+        ids = [event.get("part", {}).get("messageID") for event in messages]
+        if any(message is not None for message in ids):
+            require(all(isinstance(message, str) and message for message in ids), "invalid-events")
+            final = ids[-1]
+            require(all(message == final for message in ids[ids.index(final):]), "invalid-events")
+            parsed = [event for event in messages if event["part"]["messageID"] == final]
+    require(all(isinstance(event.get("part", {}).get("text"), str)
+                for event in parsed if event.get("type") == "text"), "invalid-events")
     return "".join(event.get("part", {}).get("text", "") for event in parsed
                    if event.get("type") == "text")
 
 
-def review_axis(filename):
-    def unique(pairs):
-        keys = [key for key, _ in pairs]
-        require(len(keys) == len(set(keys)), "invalid-review")
-        return dict(pairs)
-    try:
-        result = json.loads(reply(filename), object_pairs_hook=unique)
-    except json.JSONDecodeError:
-        raise ValueError("invalid-review") from None
+def unique_json(pairs, reason="invalid-json"):
+    keys = [key for key, _ in pairs]
+    require(len(keys) == len(set(keys)), reason)
+    return dict(pairs)
+
+
+def validate_findings(result):
     require(isinstance(result, dict) and set(result) == {"findings"}, "invalid-review")
     findings = result["findings"]
     require(isinstance(findings, list)
@@ -545,6 +572,116 @@ def review_axis(filename):
                     for item in findings),
             "invalid-findings")
     return findings
+
+
+def review_axis(filename):
+    try:
+        result = json.loads(reply(filename, final_message=True),
+                            object_pairs_hook=lambda pairs: unique_json(pairs, "invalid-review"))
+    except json.JSONDecodeError:
+        raise ValueError("invalid-review") from None
+    return validate_findings(result)
+
+
+def claude_events(filename):
+    try:
+        parsed = [json.loads(line, object_pairs_hook=lambda pairs: unique_json(pairs, "invalid-claude-events"))
+                  for line in Path(filename).read_text().splitlines()]
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        raise ValueError("invalid-claude-events") from None
+    require(parsed and all(isinstance(event, dict) for event in parsed), "invalid-claude-events")
+    return parsed
+
+
+def claude_result(filename):
+    parsed = claude_events(filename)
+    result = [event for event in parsed if event.get("type") == "result"]
+    require(len(result) == 1 and parsed[-1] is result[0], "no-result")
+    event = result[0]
+    subtype = event.get("subtype")
+    reasons = {"error_max_structured_output_retries": "structured-output-retries",
+               "error_max_turns": "max-turns"}
+    if subtype in reasons:
+        raise ValueError(reasons[subtype])
+    require(subtype == "success" and event.get("is_error") is not True, "provider-error")
+    require("structured_output" in event, "no-structured-output")
+    output = event["structured_output"]
+    findings = validate_findings(output)
+    return output, findings
+
+
+def claude_review_result(files, output):
+    reviewed, unavailable = [], []
+    for axis, filename, status in files:
+        try:
+            status = int(status)
+            require(0 <= status <= 255, "invalid-status")
+            if status:
+                raise ValueError("timeout" if status == 124 else "runner-error")
+            result, findings = claude_result(filename)
+            reviewed.append((axis, result, findings))
+        except (ValueError, OSError) as error:
+            reason = str(error) if str(error) in CLAUDE_UNAVAILABLE else "invalid-claude-events"
+            unavailable.append({"axis": axis, "reason": reason})
+    if unavailable:
+        report = {"verdict": "unavailable", "findings": [], "advisory": [], "unavailable": unavailable}
+        markdown = "\n".join(f"### {axis} — unavailable ({reason})" for axis, reason in
+                             ((item["axis"], item["reason"]) for item in unavailable)) + "\n"
+    else:
+        all_findings = [(axis, item) for axis, _, findings in reviewed for item in findings]
+        blocking = [f"{axis}: {item['finding']}" for axis, item in all_findings if item["blocking"]]
+        advisory = [f"{axis}: {item['finding']}" for axis, item in all_findings if not item["blocking"]]
+        report = {"verdict": "request_changes" if blocking else "approve", "findings": blocking,
+                  "advisory": advisory}
+        markdown = "\n".join(f"### {axis} — full response\n\n```json\n"
+                             f"{json.dumps(result, ensure_ascii=False, indent=2)}\n```\n"
+                             for axis, result, _ in reviewed)
+    Path(output).write_text(json.dumps(report, ensure_ascii=False))
+    Path(output).with_suffix(".md").write_text(markdown)
+    return report
+
+
+def claude_schema():
+    print(json.dumps(FINDINGS_SCHEMA, separators=(",", ":")))
+
+
+def configure_claude(directory):
+    base_url = os.environ.get("FACTORY_REVIEW_BASE_URL", "")
+    model = os.environ.get("FACTORY_REVIEW_MODEL", "")
+    key = os.environ.get("FACTORY_REVIEW_API_KEY", "")
+    from urllib.parse import urlparse
+    parsed = urlparse(base_url)
+    require(parsed.scheme == "https" and parsed.path == "/anthropic"
+            and parsed.hostname in CLAUDE_PROVIDER_HOSTS
+            and not parsed.username and not parsed.password and not parsed.query and not parsed.fragment,
+            "invalid-provider")
+    require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/@+\-\[\]]{0,127}", model), "invalid-model")
+    require(bool(key), "missing-provider-key")
+    output = Path(directory).resolve()
+    home, config = output / "home", output / "config"
+    home.mkdir(parents=True, exist_ok=True)
+    config.mkdir(parents=True, exist_ok=True)
+    auth = output / "auth.json"
+    auth.touch(mode=0o600)
+    auth.chmod(0o600)
+    auth.write_text(json.dumps({"key": key}))
+    settings = config / "settings.json"
+    settings.write_text(json.dumps({
+        "permissions": {"defaultMode": "dontAsk", "allow": ["Read", "Glob", "Grep"],
+                       "deny": ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
+                                "Task", "Agent", "Skill", "mcp__*", "Read(.env)", "Read(.env.*)",
+                                "Read(**/.env)", "Read(**/.env.*)", "Read(//proc/**)", "Read(//sys/**)",
+                                f"Read(//{auth})", f"Read(//{output}/**)"]},
+        "blockReadsOutsideWorkingDirectories": True,
+        "disableBypassPermissionsMode": "disable",
+        "disableAllHooks": True,
+        "enableAllProjectMcpServers": False,
+    }))
+    with open(os.environ["GITHUB_ENV"], "a") as env:
+        for name, value in {"HOME": home, "CLAUDE_CONFIG_DIR": config, "CLAUDE_SETTINGS": settings,
+                            "FACTORY_AUTH_FILE": auth}.items():
+            env.write(f"{name}={value}\n")
+    return {"base_url": base_url, "model": model, "auth": str(auth), "settings": str(settings)}
 
 
 def review(standards, spec=None):
@@ -607,7 +744,7 @@ def review_markdown(standards, spec=None):
     for axis, filename in (("Standards", standards), ("Spec", spec)):
         if not filename:
             continue
-        text = reply(filename)
+        text = reply(filename, final_message=True)
         # A longer fence keeps model-supplied backticks inside the verbatim report.
         fence = "`" * max(3, max((len(run) + 1 for run in re.findall(r"`+", text)), default=0))
         sections.append(f"### {axis} — full response\n\n{fence}json\n{text}\n{fence}\n")
@@ -964,6 +1101,16 @@ if __name__ == "__main__":
             retro(*args)
         elif command == "configure":
             configure(*args)
+        elif command == "configure-claude":
+            configure_claude(*args)
+        elif command == "claude-schema":
+            claude_schema()
+        elif command == "claude-result":
+            files = []
+            for item in args[:-1]:
+                axis, filename, status = item.split("=", 2)
+                files.append((axis, filename, status))
+            claude_review_result(files, args[-1])
         elif command == "prompt":
             print(prompt(*args), end="")
         elif command == "events":

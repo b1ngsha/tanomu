@@ -74,6 +74,18 @@ DeepSeek V4.1 Flash Free uses zero retention and does not train on submitted dat
 Recheck this policy before changing models. The pinned CLI uses its tested legacy
 `permission` configuration; migration to `permissions` needs separate verification.
 
+A separate, manual-only `final-review-claude-spike.yml` is available for testing a
+Claude Code CLI against a provider's official Anthropic-compatible endpoint. It does
+not publish comments and does not replace the automatic OpenCode final review. Set
+`FACTORY_REVIEW_BASE_URL` to `https://api.deepseek.com/anthropic` (or a verified
+Moonshot Anthropic endpoint), `FACTORY_REVIEW_MODEL` to the provider model, and
+configure the dedicated `FACTORY_REVIEW_API_KEY` secret with a provider-side spend
+limit. The workflow pins Claude Code, restricts the model job to read-only tools,
+disables candidate hooks and MCP, and uploads only scanned reports. DeepSeek's
+Anthropic compatibility documentation does not promise `output_config.format`, so
+structured-output success must be verified in repeated spike runs before this path
+can replace production review. Magpie is not required for this experiment.
+
 ## Implementation runbook
 
 The maintainer creates `agent:implement`, `implementing`, `ready-for-human` and
@@ -97,7 +109,14 @@ Standards (documented repository standards plus the smell baseline) and Spec (th
 captured issue body). Each axis returns
 `{"findings":[{"blocking":bool,"finding":str}]}`; `control.py review` validates both
 and writes `review.json` with the verdict, the blocking findings and the advisory
-ones, each labelled with its axis and never reranked. Only a blocking finding
+ones, each labelled with its axis and never reranked. For streams with message IDs,
+review parsing selects the final assistant message by `part.messageID` and joins
+only its text parts; earlier progress remains in the session transcript. Mixed IDs
+or a message ID reappearing after another message fail closed. Streams without IDs
+retain whole-stream validation. No JSON substring extraction or earlier-answer
+fallback is used. The pinned v2.1.0 CLI's `--format json` is an event transport,
+not schema-constrained model output; the final message must still satisfy the
+strict review schema. Only a blocking finding
 requests changes. Smells are always advisory. Each round also saves `review.md`
 with both axes' complete original JSON responses, preserving their order and all
 blocking and advisory findings. These full reports are published as comments after

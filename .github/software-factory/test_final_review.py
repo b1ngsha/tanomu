@@ -14,6 +14,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import control  # noqa: E402
+import test_control as base  # noqa: E402
 from test_control import CONTROL, REPO, SECRET, TaskDirectory, mixed_text  # noqa: E402
 
 HEAD, BASE, OTHER = "a" * 40, "b" * 40, "c" * 40
@@ -292,6 +293,130 @@ class FinalCommentsTest(unittest.TestCase):
         self.comments(head=OTHER)
         result = subprocess.run(args, capture_output=True, text=True)
         self.assertEqual((result.returncode, result.stdout), (0, "::notice::final-review-stale\n"))
+
+
+class ClaudeResultTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+
+    def write(self, events):
+        path = self.directory / "events.jsonl"
+        path.write_text("\n".join(json.dumps(event) for event in events) + "\n")
+        return str(path)
+
+    def assertReason(self, events, reason):
+        with self.assertRaisesRegex(ValueError, f"^{reason}$"):
+            control.claude_result(self.write(events))
+
+    def test_accepts_successful_structured_output(self):
+        output, findings = control.claude_result(self.write([
+            {"type": "system", "subtype": "init"},
+            {"type": "result", "subtype": "success", "is_error": False,
+             "structured_output": {"findings": [{"blocking": True, "finding": "bug"}]}},
+        ]))
+        self.assertEqual(output["findings"], findings)
+
+    def test_rejects_incomplete_or_unstructured_results(self):
+        base = {"type": "result", "subtype": "success", "is_error": False}
+        for event, reason in ((base, "no-structured-output"),
+                              ({**base, "structured_output": {"findings": []}}, "no-result")):
+            with self.subTest(reason=reason):
+                events = [event] if reason == "no-result" else [{"type": "system"}, event]
+                if reason == "no-result":
+                    events.append({"type": "assistant"})
+                self.assertReason(events, reason)
+
+    def test_rejects_provider_failure_and_structured_output_exhaustion(self):
+        for subtype, reason in (("error_max_structured_output_retries", "structured-output-retries"),
+                                ("error_max_turns", "max-turns"), ("error_api", "provider-error")):
+            with self.subTest(subtype=subtype):
+                self.assertReason([{"type": "result", "subtype": subtype, "is_error": True}], reason)
+
+    def test_rejects_duplicate_keys_and_invalid_findings(self):
+        path = self.directory / "duplicate.jsonl"
+        path.write_text('{"type":"result","subtype":"success","structured_output":{"findings":[],"findings":[]}}\n')
+        with self.assertRaisesRegex(ValueError, "^invalid-claude-events$"):
+            control.claude_result(str(path))
+        self.assertReason([{"type": "result", "subtype": "success",
+                            "structured_output": {"findings": [{"blocking": "yes", "finding": "x"}]}}],
+                          "invalid-findings")
+
+    def test_writes_unavailable_report_without_model_text(self):
+        failed = self.write([{"type": "result", "subtype": "error_max_structured_output_retries"}])
+        output = self.directory / "review.json"
+        report = control.claude_review_result([("Standards", failed, "0")], str(output))
+        self.assertEqual(report, {"verdict": "unavailable", "findings": [], "advisory": [],
+                                  "unavailable": [{"axis": "Standards", "reason": "structured-output-retries"}]})
+        self.assertNotIn("error_max", (output.with_suffix(".md")).read_text())
+
+
+class ClaudeConfigureTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.github_env = self.directory / "github-env"
+        self.enterContext(mock.patch.dict(os.environ, {
+            "FACTORY_REVIEW_BASE_URL": "https://api.deepseek.com/anthropic",
+            "FACTORY_REVIEW_MODEL": "deepseek-flash",
+            "FACTORY_REVIEW_API_KEY": SECRET,
+            "GITHUB_ENV": str(self.github_env),
+        }))
+
+    def test_writes_isolated_settings_and_only_paths_to_github_env(self):
+        control.configure_claude(str(self.directory / "claude"))
+        lines = self.github_env.read_text().splitlines()
+        self.assertIn("FACTORY_AUTH_FILE=", "\n".join(lines))
+        self.assertNotIn(SECRET, self.github_env.read_text())
+        auth = self.directory / "claude/auth.json"
+        self.assertEqual(auth.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(json.loads(auth.read_text()), {"key": SECRET})
+        settings = json.loads((self.directory / "claude/config/settings.json").read_text())
+        self.assertTrue(settings["blockReadsOutsideWorkingDirectories"])
+        self.assertEqual(settings["permissions"]["allow"], ["Read", "Glob", "Grep"])
+        self.assertTrue(any("Read(//" in item for item in settings["permissions"]["deny"]))
+
+    def test_rejects_unknown_or_unsafe_provider_endpoints(self):
+        for base_url, reason in (("http://api.deepseek.com/anthropic", "invalid-provider"),
+                                 ("https://example.test/anthropic", "invalid-provider"),
+                                 ("https://api.deepseek.com/anthropic?key=leak", "invalid-provider")):
+            with self.subTest(base_url=base_url), mock.patch.dict(os.environ,
+                    {"FACTORY_REVIEW_BASE_URL": base_url}):
+                with self.assertRaisesRegex(ValueError, f"^{reason}$"):
+                    control.configure_claude(str(self.directory / "claude"))
+
+
+class SpikeWorkflowContractTest(unittest.TestCase):
+    def setUp(self):
+        self.workflow = base.WorkflowContractTest.load("final-review-claude-spike.yml")
+        self.jobs = self.workflow["jobs"]
+
+    def test_is_manual_only_and_has_no_publisher(self):
+        triggers = self.workflow[True]
+        self.assertEqual(set(triggers), {"workflow_dispatch"})
+        self.assertEqual(set(self.jobs), {"identify", "review"})
+        self.assertEqual(self.workflow["permissions"], {})
+        self.assertIn("github.ref == 'refs/heads/main'", self.jobs["identify"]["if"])
+
+    def test_model_job_has_read_only_boundary_and_secret_is_scoped(self):
+        self.assertEqual(self.jobs["review"]["permissions"], {"contents": "read"})
+        text = json.dumps(self.jobs)
+        self.assertIn("FACTORY_REVIEW_API_KEY", text)
+        self.assertNotIn("GH_TOKEN", json.dumps(self.jobs["review"]))
+        self.assertNotIn("gh pr comment", text)
+        self.assertIn("--bare", text)
+        self.assertIn("--restricted", text)
+        self.assertIn("--strict-mcp-config", text)
+        self.assertIn("--tools Read,Glob,Grep", text)
+        self.assertNotIn("--dangerously-skip-permissions", text)
+        self.assertNotIn("bypassPermissions", text)
+
+    def test_runner_and_artifacts_are_pinned(self):
+        text = json.dumps(self.jobs["review"])
+        self.assertIn("@anthropic-ai/claude-code@2.1.304", text)
+        self.assertIn("2.1.304 (Claude Code)", text)
+        uploads = [step for step in self.jobs["review"]["steps"] if "upload-artifact" in step.get("uses", "")]
+        self.assertTrue(uploads)
+        self.assertTrue(all(step["with"]["retention-days"] == 3 for step in uploads))
+        self.assertTrue(all("*" not in step["with"]["path"] for step in uploads))
 
 
 class OptionalSpecTest(unittest.TestCase):
