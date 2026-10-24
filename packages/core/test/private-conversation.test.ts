@@ -56,6 +56,15 @@ function recordingSend() {
   return { send, sent };
 }
 
+function recordingDownload() {
+  const downloads: Array<{ messageId: string; imageKey: string }> = [];
+  async function downloadImage(messageId: string, imageKey: string) {
+    downloads.push({ messageId, imageKey });
+    return { data: new Uint8Array([1, 2, 3]), mediaType: "image/png" };
+  }
+  return { downloadImage, downloads };
+}
+
 function recordingLlmCallLog() {
   const calls: LlmCall[] = [];
   const llmCallLog: LlmCallLog = {
@@ -67,6 +76,8 @@ function recordingLlmCallLog() {
 }
 
 const message: IncomingMessage = { id: "m1", chatId: "c1", senderId: "u1", text: "在吗" };
+/** For tests that send no images. */
+const { downloadImage } = recordingDownload();
 
 function deferred() {
   let resolve!: () => void;
@@ -93,9 +104,10 @@ function setupBatch(model = fakeModel("好的")) {
   const { store, replies } = memoryStore();
   const { send, sent } = recordingSend();
   const { llmCallLog, calls } = recordingLlmCallLog();
-  const deps = { store, model, send, llmCallLog };
+  const download = recordingDownload();
+  const deps = { store, model, send, llmCallLog, downloadImage: download.downloadImage };
   const { batcher, flushes } = createTestBatcher(deps);
-  return { store, replies, sent, calls, model, batcher, flushes };
+  return { store, replies, sent, calls, downloads: download.downloads, model, batcher, flushes };
 }
 
 async function addRecorded(
@@ -115,7 +127,13 @@ describe("replyToPrivateMessage", () => {
 
     const { llmCallLog } = recordingLlmCallLog();
 
-    await replyToPrivateMessage(message, { store, model: fakeModel("在，说吧"), send, llmCallLog });
+    await replyToPrivateMessage(message, {
+      store,
+      model: fakeModel("在，说吧"),
+      send,
+      llmCallLog,
+      downloadImage,
+    });
 
     expect(sent).toEqual([{ chatId: "c1", text: "在，说吧" }]);
     expect(replies).toEqual([
@@ -127,7 +145,7 @@ describe("replyToPrivateMessage", () => {
     const { store } = memoryStore();
     const { send, sent } = recordingSend();
     const { llmCallLog } = recordingLlmCallLog();
-    const deps = { store, model: fakeModel("在"), send, llmCallLog };
+    const deps = { store, model: fakeModel("在"), send, llmCallLog, downloadImage };
 
     await replyToPrivateMessage(message, deps);
     await replyToPrivateMessage(message, deps);
@@ -140,7 +158,13 @@ describe("replyToPrivateMessage", () => {
     const { send } = recordingSend();
     const { llmCallLog, calls } = recordingLlmCallLog();
 
-    await replyToPrivateMessage(message, { store, model: fakeModel("在，说吧"), send, llmCallLog });
+    await replyToPrivateMessage(message, {
+      store,
+      model: fakeModel("在，说吧"),
+      send,
+      llmCallLog,
+      downloadImage,
+    });
 
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({
@@ -168,7 +192,7 @@ describe("replyToPrivateMessage", () => {
     });
 
     await expect(
-      replyToPrivateMessage(message, { store, model, send, llmCallLog }),
+      replyToPrivateMessage(message, { store, model, send, llmCallLog, downloadImage }),
     ).rejects.toThrow("provider down");
 
     expect(sent).toHaveLength(0);
@@ -186,7 +210,13 @@ describe("replyToPrivateMessage", () => {
       },
     };
 
-    await replyToPrivateMessage(message, { store, model: fakeModel("在"), send, llmCallLog });
+    await replyToPrivateMessage(message, {
+      store,
+      model: fakeModel("在"),
+      send,
+      llmCallLog,
+      downloadImage,
+    });
 
     expect(sent).toEqual([{ chatId: "c1", text: "在" }]);
   });
@@ -199,12 +229,27 @@ describe("replyToPrivateMessage", () => {
 
     await replyToPrivateMessage(
       { ...message, text: undefined },
-      { store, model, send, llmCallLog },
+      { store, model, send, llmCallLog, downloadImage },
     );
 
     expect(model.doGenerateCalls).toHaveLength(0);
     expect(calls).toHaveLength(0);
     expect(sent[0]?.text).toContain("看不了");
+  });
+
+  it("declines a file without calling the model", async () => {
+    const { store } = memoryStore();
+    const { send, sent } = recordingSend();
+    const model = fakeModel("unused");
+    const { llmCallLog } = recordingLlmCallLog();
+
+    await replyToPrivateMessage(
+      { ...message, text: undefined, attachment: { kind: "file" } },
+      { store, model, send, llmCallLog, downloadImage },
+    );
+
+    expect(model.doGenerateCalls).toHaveLength(0);
+    expect(sent).toEqual([{ chatId: "c1", text: "文件我暂时还读不了，挑重点用文字发我吧。" }]);
   });
 });
 
@@ -256,6 +301,24 @@ describe("private message batching", () => {
     expect(model.doGenerateCalls).toHaveLength(0);
     expect(sent[0]?.text).toContain("看不了");
     expect(replies).toHaveLength(1);
+  });
+
+  it("declines an image when the chat model has no vision, even with text", async () => {
+    const { store, sent, downloads, model, batcher, flushes } = setupBatch(fakeModel("unused"));
+
+    await addRecorded(batcher, store, {
+      ...message,
+      id: "m1",
+      text: undefined,
+      attachment: { kind: "image", key: "img-1" },
+    });
+    await addRecorded(batcher, store, { ...message, id: "m2", text: "这是什么？" });
+    await vi.advanceTimersByTimeAsync(2_500);
+    await Promise.all(flushes);
+
+    expect(model.doGenerateCalls).toHaveLength(0);
+    expect(downloads).toHaveLength(0);
+    expect(sent).toEqual([{ chatId: "c1", text: "图我现在还看不了，用文字说说？" }]);
   });
 
   it("replies separately when messages are more than a window apart", async () => {
