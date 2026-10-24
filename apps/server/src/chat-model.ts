@@ -1,13 +1,17 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createOpenAI } from "@ai-sdk/openai";
+import type { ChatModel } from "@tanomu/core";
 import type { LanguageModel } from "ai";
-import type { Config } from "./config.ts";
+import { eq } from "drizzle-orm";
+import type { Db } from "./db/client.ts";
+import { capabilityBindings, providers } from "./db/schema.ts";
+import type { KeyCipher } from "./key-cipher.ts";
 
 type ProviderOptions = { baseURL: string; apiKey: string };
 
 const byProtocol: Record<
-  Config["CHAT_PROVIDER_PROTOCOL"],
+  (typeof providers.$inferSelect)["protocol"],
   (options: ProviderOptions, model: string) => LanguageModel
 > = {
   // Relays implement Chat Completions far more often than the Responses API.
@@ -16,9 +20,26 @@ const byProtocol: Record<
   google: (options, model) => createGoogleGenerativeAI(options)(model),
 };
 
-export function createChatModel(config: Config): LanguageModel {
-  return byProtocol[config.CHAT_PROVIDER_PROTOCOL](
-    { baseURL: config.CHAT_PROVIDER_BASE_URL, apiKey: config.CHAT_PROVIDER_API_KEY },
-    config.CHAT_MODEL,
-  );
+/** Reads the chat Binding on every call, so a change applies to the next reply without a restart. */
+export function createChatModelResolver(db: Db, cipher: KeyCipher): () => Promise<ChatModel> {
+  return async function resolveChatModel() {
+    const [binding] = await db
+      .select({
+        protocol: providers.protocol,
+        baseUrl: providers.baseUrl,
+        apiKey: providers.apiKey,
+        model: capabilityBindings.model,
+        vision: capabilityBindings.vision,
+      })
+      .from(capabilityBindings)
+      .innerJoin(providers, eq(capabilityBindings.providerId, providers.id))
+      .where(eq(capabilityBindings.capability, "chat"));
+    if (!binding) throw new Error("chat has no Binding; bind it in the admin console");
+
+    const model = byProtocol[binding.protocol](
+      { baseURL: binding.baseUrl, apiKey: cipher.decrypt(binding.apiKey) },
+      binding.model,
+    );
+    return { model, vision: binding.vision };
+  };
 }

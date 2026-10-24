@@ -7,6 +7,7 @@ export {
   recordPrivateMessage,
   replyToPrivateMessage,
   replyToPrivateMessages,
+  type ChatModel,
   type ConversationStore,
   type IncomingMessage,
   type LlmCall,
