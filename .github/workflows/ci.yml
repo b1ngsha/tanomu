@@ -46,10 +46,13 @@ jobs:
         with:
           fetch-depth: 0
       - name: Check PR size (max 600 changed lines, see AGENTS.md)
+        shell: bash
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          changed=$(git diff --numstat "$BASE"...HEAD -- . ':(exclude)pnpm-lock.yaml' ':(exclude)apps/server/drizzle/meta/**' \
+          # Use event SHAs: the synthetic merge commit can include newer base-branch changes.
+          changed=$(git diff --numstat "$BASE"..."$PR_HEAD" -- . ':(exclude)pnpm-lock.yaml' ':(exclude)apps/server/drizzle/meta/**' \
             | awk '{ total += $1 + $2 } END { print total + 0 }')
           echo "Changed lines, excluding generated files: $changed"
           if [ "$changed" -gt 600 ]; then
