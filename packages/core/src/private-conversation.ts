@@ -9,6 +9,8 @@ export interface IncomingMessage {
   senderId: string;
   /** Undefined when the message isn't plain text (image, file, sticker…). */
   text: string | undefined;
+  /** What the message carries besides text; `file` covers files and media tanomu can't read. */
+  attachment?: { kind: "image"; key: string } | { kind: "file" };
 }
 
 export interface ConversationStore {
@@ -50,9 +52,24 @@ export interface ReplyDeps {
   /** Sends text to the chat and returns the Feishu message id of what was sent. */
   send: (chatId: string, text: string) => Promise<string>;
   llmCallLog: LlmCallLog;
+  /** Downloads an image a User sent, by its Feishu message id and image key. */
+  downloadImage: (
+    messageId: string,
+    imageKey: string,
+  ) => Promise<{ data: Uint8Array; mediaType: string }>;
 }
 
 const NON_TEXT_REPLY = "这个我暂时看不了，先发文字给我吧。";
+const FILE_REPLY = "文件我暂时还读不了，挑重点用文字发我吧。";
+const IMAGE_REPLY = "图我现在还看不了，用文字说说？";
+
+/** The fixed reply for a batch the model can't take, or undefined when the model should answer. */
+function declineFor(messages: IncomingMessage[]): string | undefined {
+  if (messages.some((message) => message.attachment?.kind === "file")) return FILE_REPLY;
+  if (messages.some((message) => message.attachment?.kind === "image")) return IMAGE_REPLY;
+  if (messages.every((message) => message.text === undefined)) return NON_TEXT_REPLY;
+  return undefined;
+}
 
 /** An incoming message together with the Private Conversation it was recorded in. */
 export interface RecordedMessage {
@@ -123,17 +140,17 @@ export async function replyToPrivateMessages(
   const conversationId = items[0]?.conversationId;
   if (conversationId === undefined) return;
 
-  const texts = items
-    .map(({ message }) => message.text)
+  const messages = items.map(({ message }) => message);
+  const texts = messages
+    .map((message) => message.text)
     .filter((text): text is string => text !== undefined);
   const text =
-    texts.length === 0
-      ? NON_TEXT_REPLY
-      : await generateRecorded(
-          deps,
-          { capability: "chat", conversationId },
-          { prompt: texts.join("\n") },
-        );
+    declineFor(messages) ??
+    (await generateRecorded(
+      deps,
+      { capability: "chat", conversationId },
+      { prompt: texts.join("\n") },
+    ));
 
   const feishuMessageId = await send(chatId, text);
   await store.recordReply(conversationId, { text, feishuMessageId });

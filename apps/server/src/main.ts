@@ -24,6 +24,7 @@ const deps = {
   llmCallLog: createLlmCallLog(db),
   model: createChatModel(config),
   send: feishu.send,
+  downloadImage: feishu.downloadImage,
 };
 
 const batcher = createMessageBatcher<RecordedMessage>({

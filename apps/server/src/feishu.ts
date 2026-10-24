@@ -1,9 +1,10 @@
 import * as lark from "@larksuiteoapi/node-sdk";
-import type { IncomingMessage } from "@tanomu/core";
+import type { IncomingMessage, ReplyDeps } from "@tanomu/core";
 import type { Config } from "./config.ts";
 
 export interface Feishu {
   send: (chatId: string, text: string) => Promise<string>;
+  downloadImage: ReplyDeps["downloadImage"];
   /** Connects over the long connection and calls `onPrivateMessage` for each User message in a DM. */
   listen: (onPrivateMessage: (message: IncomingMessage) => Promise<void>) => Promise<void>;
 }
@@ -23,6 +24,18 @@ export function createFeishu(config: Config): Feishu {
       return id;
     },
 
+    async downloadImage(messageId, imageKey) {
+      const res = await client.im.v1.messageResource.get({
+        params: { type: "image" },
+        path: { message_id: messageId, file_key: imageKey },
+      });
+      const contentType: unknown = res.headers?.["content-type"];
+      return {
+        data: Buffer.concat(await res.getReadableStream().toArray()),
+        mediaType: typeof contentType === "string" ? contentType : "image",
+      };
+    },
+
     async listen(onPrivateMessage) {
       const dispatcher = new lark.EventDispatcher({}).register({
         "im.message.receive_v1": (event) => {
@@ -33,7 +46,7 @@ export function createFeishu(config: Config): Feishu {
             id: message.message_id,
             chatId: message.chat_id,
             senderId: sender.sender_id?.open_id ?? "",
-            text: message.message_type === "text" ? parseText(message.content) : undefined,
+            ...parseContent(message.message_type, message.content),
           }).catch((error: unknown) => console.error("failed to handle message", error));
         },
       });
@@ -42,10 +55,19 @@ export function createFeishu(config: Config): Feishu {
   };
 }
 
-function parseText(content: string): string | undefined {
-  const parsed: unknown = JSON.parse(content);
-  if (typeof parsed === "object" && parsed !== null && "text" in parsed) {
-    return typeof parsed.text === "string" ? parsed.text : undefined;
+function parseContent(type: string, content: string): Pick<IncomingMessage, "text" | "attachment"> {
+  if (type === "text") return { text: stringField(content, "text") };
+  if (type === "file" || type === "media") return { text: undefined, attachment: { kind: "file" } };
+  if (type === "image") {
+    const key = stringField(content, "image_key");
+    if (key !== undefined) return { text: undefined, attachment: { kind: "image", key } };
   }
-  return undefined;
+  return { text: undefined };
+}
+
+function stringField(content: string, field: string): string | undefined {
+  const parsed: unknown = JSON.parse(content);
+  const value: unknown =
+    typeof parsed === "object" && parsed !== null ? Reflect.get(parsed, field) : undefined;
+  return typeof value === "string" ? value : undefined;
 }
