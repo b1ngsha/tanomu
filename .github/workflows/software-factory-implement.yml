@@ -109,7 +109,7 @@ jobs:
           path: ${{ runner.temp }}/claim.json
           retention-days: 3
           if-no-files-found: error
-  # Check failures and review findings share one budget: the first attempt plus three repairs.
+  # Check failures and review findings share one budget: the first attempt plus two repairs.
   round1:
     needs: claim
     uses: ./.github/workflows/software-factory-round.yml
@@ -145,20 +145,8 @@ jobs:
       issue: ${{ github.event.issue.number || inputs.issue_number }}
       round: 3
       base: ${{ github.sha }}
-  round4:
-    needs: round3
-    if: needs.round3.outputs.outcome == 'checks_failed' || needs.round3.outputs.outcome == 'request_changes'
-    uses: ./.github/workflows/software-factory-round.yml
-    secrets:
-      AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
-    permissions:
-      contents: read
-    with:
-      issue: ${{ github.event.issue.number || inputs.issue_number }}
-      round: 4
-      base: ${{ github.sha }}
   handoff:
-    needs: [round1, round2, round3, round4]
+    needs: [round1, round2, round3]
     # Rounds stop at the first approval, so at most one round approves and none may have failed.
     if: >-
       always() && !cancelled() && contains(needs.*.outputs.outcome, 'approve') &&
@@ -189,10 +177,9 @@ jobs:
           ROUND1: ${{ needs.round1.outputs.outcome }}
           ROUND2: ${{ needs.round2.outputs.outcome }}
           ROUND3: ${{ needs.round3.outputs.outcome }}
-          ROUND4: ${{ needs.round4.outputs.outcome }}
         run: |
           set -euo pipefail
-          for round in 1 2 3 4; do
+          for round in 1 2 3; do
             outcome="ROUND$round"
             if [ "${!outcome}" = approve ]; then printf 'round=%s\n' "$round" >> "$GITHUB_OUTPUT"; fi
           done
@@ -260,7 +247,7 @@ jobs:
           [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo '::warning::invalid-pr-number'; exit 1; }
           gh workflow run final-review.yml --ref main -f pr="$PR" -f parent="$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT"
   publish-reviews:
-    needs: [claim, round1, round2, round3, round4, handoff]
+    needs: [claim, round1, round2, round3, handoff]
     if: always() && !cancelled() && needs.claim.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -299,7 +286,7 @@ jobs:
             fi
           done
   report:
-    needs: [gate, claim, round1, round2, round3, round4, handoff]
+    needs: [gate, claim, round1, round2, round3, handoff]
     if: always() && needs.gate.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
