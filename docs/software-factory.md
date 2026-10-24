@@ -68,23 +68,22 @@ prompts explicitly require supported judgement calls to be included. A provider 
 reason of `length` or `content-filter` fails with `incomplete-output`, rather than
 accepting a partial review or retro as complete.
 
-The only accepted model is `opencode/deepseek-v4.1-flash-free`; no paid fallback is
-configured. OpenCode's [provider policy](https://opencode.ai/docs/zen/) states that
+Implement, round review and retro accept only `opencode/deepseek-v4.1-flash-free`;
+no paid fallback is configured. OpenCode's [provider policy](https://opencode.ai/docs/zen/) states that
 DeepSeek V4.1 Flash Free uses zero retention and does not train on submitted data.
 Recheck this policy before changing models. The pinned CLI uses its tested legacy
 `permission` configuration; migration to `permissions` needs separate verification.
 
-A separate, manual-only `final-review-claude-spike.yml` is available for testing a
-Claude Code CLI against a provider's official Anthropic-compatible endpoint. It does
-not publish comments and does not replace the automatic OpenCode final review. Set
-`FACTORY_REVIEW_BASE_URL` to `https://api.deepseek.com/anthropic` (or a verified
-Moonshot Anthropic endpoint), `FACTORY_REVIEW_MODEL` to the provider model, and
-configure the dedicated `FACTORY_REVIEW_API_KEY` secret with a provider-side spend
-limit. The workflow pins Claude Code, restricts the model job to read-only tools,
-disables candidate hooks and MCP, and uploads only scanned reports. DeepSeek's
-Anthropic compatibility documentation does not promise `output_config.format`, so
-structured-output success must be verified in repeated spike runs before this path
-can replace production review. Magpie is not required for this experiment.
+Final PR review instead runs a pinned Claude Code CLI against a provider's official
+Anthropic-compatible endpoint, with paid usage on a dedicated key. Its configuration
+lives in the `factory-review` environment, which has no required reviewers and
+accepts deployments from `main` only: the variables `FACTORY_REVIEW_BASE_URL`
+(`https://api.deepseek.com/anthropic`, or a verified Moonshot endpoint) and
+`FACTORY_REVIEW_MODEL`, and the secret `FACTORY_REVIEW_API_KEY`, which should carry
+a provider-side spend limit. Every model alias Claude Code uses is set to that one
+model, so no hidden request goes to another model. DeepSeek `deepseek-flash` passed
+the read-only tool loop, the structured findings schema and the canary in a manual
+run against PR #62.
 
 ## Implementation runbook
 
@@ -240,12 +239,19 @@ not start another review.
 Workflow code, prompts and `control.py` come from main. The candidate is checked
 out at its exact head SHA only for inspection; no candidate code is executed.
 Symlinks remain in the diff but are removed from the inspection tree so they
-cannot redirect reads outside it. OpenCode project configuration and Claude
-compatibility loading are disabled; repository standards are read as data. The review uses the merge-base-to-head diff,
+cannot redirect reads outside it. Claude Code runs with `--bare`, an isolated
+`HOME` and settings, an empty strict MCP config, hooks disabled and only Read, Glob
+and Grep. Before the review, a canary with a planted `CLAUDE.md`, hook and MCP
+server must return a clean result without running either; repository standards
+are read as data. The review uses the merge-base-to-head diff,
 so later unrelated main commits are excluded. Standards always runs. Spec uses
 this repository's issues referenced by
 `Closes`, `Fixes`, `Resolves` or `Refs #N` in the PR body; their captured bodies supply this review's specification.
-Without a linked issue, Spec is skipped and the report explains why.
+Without a linked issue, Spec is skipped and the report explains why. Each axis runs
+in a fresh session under a 600-second budget and returns schema-validated structured
+output, which `control.py` validates again. An axis that times out, errors or
+returns no valid result is reported as unavailable with a fixed reason; the other
+axis's findings are kept, and the publisher posts the report and then fails.
 
 The model job has no GitHub write token. A separate publisher with no model secret
 posts blocking and advisory findings and the complete responses as new comments,

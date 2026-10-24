@@ -623,19 +623,24 @@ def claude_review_result(files, output):
         except (ValueError, OSError) as error:
             reason = str(error) if str(error) in CLAUDE_UNAVAILABLE else "invalid-claude-events"
             unavailable.append({"axis": axis, "reason": reason})
+    # A failed axis does not discard the other axis's findings, but the report as a whole is unavailable.
+    blocking, advisory = [], []
+    for axis, _, findings in reviewed:
+        for item in findings:
+            (blocking if item["blocking"] else advisory).append(f"{axis}: {item['finding']}")
     if unavailable:
-        report = {"verdict": "unavailable", "findings": [], "advisory": [], "unavailable": unavailable}
-        markdown = "\n".join(f"### {axis} — unavailable ({reason})" for axis, reason in
-                             ((item["axis"], item["reason"]) for item in unavailable)) + "\n"
+        verdict = "unavailable"
+    elif blocking:
+        verdict = "request_changes"
     else:
-        all_findings = [(axis, item) for axis, _, findings in reviewed for item in findings]
-        blocking = [f"{axis}: {item['finding']}" for axis, item in all_findings if item["blocking"]]
-        advisory = [f"{axis}: {item['finding']}" for axis, item in all_findings if not item["blocking"]]
-        report = {"verdict": "request_changes" if blocking else "approve", "findings": blocking,
-                  "advisory": advisory}
-        markdown = "\n".join(f"### {axis} — full response\n\n```json\n"
-                             f"{json.dumps(result, ensure_ascii=False, indent=2)}\n```\n"
-                             for axis, result, _ in reviewed)
+        verdict = "approve"
+    report = {"verdict": verdict, "findings": blocking, "advisory": advisory}
+    if unavailable:
+        report["unavailable"] = unavailable
+    markdown = "\n".join([f"### {axis} — full response\n\n```json\n"
+                          f"{json.dumps(result, ensure_ascii=False, indent=2)}\n```\n"
+                          for axis, result, _ in reviewed]
+                         + [f"### {item['axis']} — unavailable ({item['reason']})\n" for item in unavailable])
     Path(output).write_text(json.dumps(report, ensure_ascii=False))
     Path(output).with_suffix(".md").write_text(markdown)
     return report
@@ -896,7 +901,8 @@ def final_comments(directory, identity, current, output):
     for name in ("review.json", "review.md"):
         scan(source / name, public=True, limit=None)
     result = json.loads((source / "review.json").read_text())
-    findings = ([f"- **Blocking** — {item}" for item in result["findings"]]
+    findings = ([f"- **Unavailable** — {item['axis']}: {item['reason']}" for item in result.get("unavailable", [])]
+                + [f"- **Blocking** — {item}" for item in result["findings"]]
                 + [f"- Advisory — {item}" for item in result["advisory"]])
     report = ("### Findings\n\n" + ("\n".join(findings) or "No findings.") + "\n\n"
               + (source / "review.md").read_text()).replace("@", "@" + chr(0x200b))

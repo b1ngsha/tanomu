@@ -1232,7 +1232,7 @@ class RunnerStepTest(unittest.TestCase):
             "publish": ("software-factory-implement.yml", "retro-publish")}
 
     def run_step(self, job, opencode="exit 0", gh="exit 0", select="opencode run", env=None, files=None,
-                 setup=None):
+                 setup=None, claude="exit 0"):
         workflow, name = self.jobs[job]
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.directory = directory
@@ -1243,10 +1243,11 @@ class RunnerStepTest(unittest.TestCase):
         (directory / "workspace").mkdir()
         bin_dir = directory / "bin"
         bin_dir.mkdir()
-        # Every call is logged in order, NUL-separated, so tests can count sessions and calls.
-        log = 'printf "%s\\0" "$@" > "$CALLS/$(printf %03d $(($(ls "$CALLS" | wc -l))))"\n'
-        (bin_dir / "opencode").write_text(f"#!/bin/bash\n{log}{opencode}\n")
-        (bin_dir / "gh").write_text(f"#!/bin/bash\n{log}{gh}\n")
+        # Every call is logged in order, NUL-separated after the program name, so tests can count
+        # sessions and calls.
+        log = 'printf "%s\\0" "${0##*/}" "$@" > "$CALLS/$(printf %03d $(($(ls "$CALLS" | wc -l))))"\n'
+        for program, script in (("opencode", opencode), ("gh", gh), ("claude", claude)):
+            (bin_dir / program).write_text(f"#!/bin/bash\n{log}{script}\n")
         for stub in bin_dir.iterdir():
             stub.chmod(0o755)
         (directory / "calls").mkdir()
@@ -1274,7 +1275,7 @@ class RunnerStepTest(unittest.TestCase):
 
     def calls(self, program):
         calls = [path.read_text().split("\0")[:-1] for path in sorted((self.directory / "calls").iterdir())]
-        return [call for call in calls if (call[:1] == ["run"]) == (program == "opencode")]
+        return [call[1:] for call in calls if call[0] == program]
 
     def stub_events(self, *events):
         return "\n".join(f"echo '{json.dumps(event)}'" for event in events)

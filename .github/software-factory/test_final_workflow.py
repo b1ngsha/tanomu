@@ -20,7 +20,7 @@ def git(cwd, *args):
 
 
 class FinalRunnerStepTest(unittest.TestCase):
-    """Runs real supervised final review steps against stub `opencode` and `gh`."""
+    """Runs real supervised final review steps against stub `claude` and `gh`."""
 
     jobs = {"identify": ("final-review.yml", "identify"),
             "review": ("final-review.yml", "review"), "publish": ("final-review.yml", "publish"),
@@ -28,43 +28,59 @@ class FinalRunnerStepTest(unittest.TestCase):
     run_step, calls, uploaded = base.RunnerStepTest.run_step, base.RunnerStepTest.calls, base.RunnerStepTest.uploaded
     stub_events, reply = base.RunnerStepTest.stub_events, base.RunnerStepTest.reply
 
-    def review(self, opencode, spec="true"):
-        env = {"HEAD": HEAD, "BASE": BASE, "SPEC": spec}
+    def review(self, claude, spec="true"):
+        env = {"HEAD": HEAD, "BASE": BASE, "SPEC": spec, "ANTHROPIC_MODEL": "deepseek-flash",
+               "CLAUDE_SETTINGS": "settings.json"}
         files = {"temp/final-input/identity.json": '{"run":"42"}',
                  "candidate/.factory-input/identity.json": '{"run":"forged"}'}
-        return self.run_step("review", opencode, env=env, files=files, setup=lambda directory: env.update(
-            REVIEW_OUTPUT=str(directory / "temp/final-review/review.json")))
+        return self.run_step("review", claude=claude, select="Review the pull request", env=env, files=files,
+                             setup=lambda directory: env.update(
+                                 REVIEW_OUTPUT=str(directory / "temp/final-review/review.json")))
+
+    def result(self, **event):
+        return self.stub_events({"type": "system", "subtype": "init"}, {"type": "result", **event})
 
     def temp(self, name):
         return self.directory / "temp" / name
 
-    def test_reviews_each_axis_in_a_fresh_session_and_ignores_the_verdict(self):
-        reply = self.reply({"findings": [{"blocking": True, "finding": "src/a.ts: breaks AGENTS.md"}]})
+    def test_reviews_each_axis_in_a_fresh_session_with_the_schema(self):
+        claude = self.result(subtype="success", is_error=False, structured_output={
+            "findings": [{"blocking": True, "finding": "src/a.ts: breaks AGENTS.md"}]})
+        schema = json.dumps(control.FINDINGS_SCHEMA, separators=(",", ":"))
         for spec, axes in (("true", ["standards", "spec"]), ("false", ["standards"])):
             with self.subTest(spec=spec):
-                result, summary = self.review(reply, spec)
+                result, summary = self.review(claude, spec)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                sessions = self.calls("opencode")
+                sessions = self.calls("claude")
                 self.assertEqual(len(sessions), len(axes))
-                self.assertEqual(summary.count("### OpenCode run"), len(axes))
                 for axis, session in zip(axes, sessions):
-                    self.assertIn("--standalone", session)
+                    for flag in ("--bare", "--restricted", "--no-session-persistence", "--strict-mcp-config"):
+                        self.assertIn(flag, session)
+                    for flag, value in (("--json-schema", schema), ("--tools", "Read,Glob,Grep"),
+                                        ("--model", "deepseek-flash"), ("--permission-mode", "dontAsk"),
+                                        ("--mcp-config", '{"mcpServers":{}}'), ("--settings", "settings.json")):
+                        self.assertEqual(session[session.index(flag) + 1], value)
                     self.assertEqual(session[-1], control.prompt(f"final-{axis}", BASE, HEAD).rstrip("\n"))
                     self.assertIn("final.patch", session[-1])
                 review = json.loads(self.temp("final-review/review.json").read_text())
-                self.assertEqual((review["verdict"], len(review["findings"])), ("request_changes", len(axes)))
+                self.assertEqual(review, {"verdict": "request_changes", "advisory": [], "findings": [
+                    f"{axis.title()}: src/a.ts: breaks AGENTS.md" for axis in axes]})
                 self.assertTrue(self.temp("final-review/review.md").is_file())
                 self.assertEqual(json.loads(self.temp("final-review/identity.json").read_text()), {"run": "42"})
 
-    def test_timeout_and_failure_exits_are_preserved_without_leaking(self):
-        for opencode, status in ((f"echo {SECRET} >&2\nexec sleep 20", 124), ("exit 3", 3)):
-            with self.subTest(status=status):
-                result, _ = self.review(opencode)
-                self.assertEqual(result.returncode, status)
-                self.assertIn(f"::error::opencode-exit-{status}", result.stdout)
+    def test_failed_axes_are_reported_unavailable_without_leaking(self):
+        for claude, reason in ((f"echo {SECRET} >&2\nexec sleep 20", "timeout"), ("exit 3", "runner-error"),
+                               (self.result(subtype="error_max_structured_output_retries", is_error=True),
+                                "structured-output-retries")):
+            with self.subTest(reason=reason):
+                result, _ = self.review(claude)
+                self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertNotIn(SECRET, result.stdout + result.stderr)
-                # The failed axis stops the run before the next one spends its budget.
-                self.assertEqual(len(self.calls("opencode")), 1)
+                # Each axis still runs, so one failure does not hide the other's findings.
+                self.assertEqual(len(self.calls("claude")), 2)
+                review = json.loads(self.temp("final-review/review.json").read_text())
+                self.assertEqual((review["verdict"], review["unavailable"]), ("unavailable", [
+                    {"axis": "Standards", "reason": reason}, {"axis": "Spec", "reason": reason}]))
 
     def test_sessions_are_always_recorded_and_scanned(self):
         for spec, axes in (("true", ["standards", "spec"]), ("false", ["standards"])):
@@ -128,11 +144,12 @@ class FinalRunnerStepTest(unittest.TestCase):
                 self.assertFalse((self.directory / "temp/final.patch").exists())
                 self.assertFalse((self.directory / "temp/identity.json").exists())
 
-    def publish(self, head=HEAD, comments=(), report="Looks fine. @maintainer\n"):
+    def publish(self, head=HEAD, comments=(), report="Looks fine. @maintainer\n",
+                review=(("verdict", "approve"), ("findings", []), ("advisory", []))):
         files = {"pull.json": json.dumps({**PULL, "head": {**PULL["head"], "sha": head}}),
                  "comments.json": json.dumps([list(comments)]),
                  "temp/input/identity.json": json.dumps({"pr": 17, "head": HEAD, "base": BASE, "issues": [], "run": "42"}),
-                 "temp/review/review.json": json.dumps({"verdict": "approve", "findings": [], "advisory": []}),
+                 "temp/review/review.json": json.dumps(dict(review)),
                  "temp/review/review.md": report}
         result, _ = self.run_step("publish", gh=GH, select="control.py final-head", files=files, env={
             "PR": "17", "GITHUB_REF": "refs/heads/main", "GH_REPO": REPO, "FACTORY_AUTH_FILE": ""})
@@ -156,6 +173,14 @@ class FinalRunnerStepTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(rest, bodies[1:])
 
+    def test_publisher_posts_an_unavailable_review_then_fails(self):
+        result, bodies = self.publish(review=(("verdict", "unavailable"), ("findings", []), ("advisory", []), (
+            "unavailable", [{"axis": "Spec", "reason": "timeout"}])))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("::error::final-review-unavailable", result.stdout)
+        [body] = bodies
+        self.assertIn("- **Unavailable** — Spec: timeout", body)
+
     def test_publisher_skips_a_moved_head(self):
         result, bodies = self.publish(head="c" * 40)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -169,7 +194,7 @@ class FinalRunnerStepTest(unittest.TestCase):
             files={"temp/final-input/identity.json": '{"run":"123"}'})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.directory / "output").read_text(), "resumed=false\n")
-        self.assertEqual(self.calls("opencode"), [])
+        self.assertEqual(self.calls("claude"), [])
 
     def test_handoff_starts_the_review_only_for_a_pr_number(self):
         for pr, started in (("17", True), ("", False), ("0", False), ("17\nx", False), ("1;id", False)):
@@ -216,12 +241,17 @@ class FinalWorkflowContractTest(unittest.TestCase):
         self.assertEqual([name for name in text if "secrets." in text[name]], ["review"])
         self.assertNotIn("GH_TOKEN", text["review"])
         self.assertNotIn("github.token", text["review"])
-        self.assertNotIn("opencode", text["publish"].lower())
+        self.assertEqual([name for name in text if "vars." in text[name]], ["review"])
+        self.assertNotIn("FACTORY_REVIEW", text["publish"])
+        # The provider key lives in an environment without reviewers that only main can deploy to.
+        self.assertEqual({name: job.get("environment") for name, job in self.jobs.items()},
+                         {"identify": None, "review": "factory-review", "publish": None})
 
     def test_candidate_is_data_only(self):
         review = self.jobs["review"]
-        # --standalone alone still loads and executes workspace plugins and config.
-        self.assertEqual(review["env"], {"OPENCODE_CONFIG_PROJECT_DISABLE": "1", "OPENCODE_DISABLE_CLAUDE_CODE": "1"})
+        self.assertEqual(review["env"], {
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1", "DISABLE_AUTO_UPDATE": "1",
+            "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1"})
         steps = review["steps"]
         uses = {re.sub(r"@.*", "", step["uses"]) for step in steps if "uses" in step}
         self.assertEqual(uses, {"actions/checkout", "actions/download-artifact", "actions/upload-artifact"})
@@ -229,7 +259,7 @@ class FinalWorkflowContractTest(unittest.TestCase):
             run, path = step.get("run", ""), step.get("with", {}).get("path", "")
             with self.subTest(step=step.get("name", step.get("uses"))):
                 self.assertNotRegex(run, r"(?<![\w.])(pnpm|npx|node|make|git|bash|sh|source)\b|(?<![\w.])\./\w")
-                self.assertEqual(re.findall(r"python3 (?!-I (\.\./)?trusted/)", run), [])
+                self.assertEqual(re.findall(r'python3 (?!-I (\.\./|"\$GITHUB_WORKSPACE/)?trusted/)', run), [])
                 if "download-artifact" in step.get("uses", ""):
                     self.assertFalse(path.startswith("candidate"), path)
         stage = next(step["run"] for step in steps if "control.py pr-diff" in step.get("run", ""))
@@ -248,12 +278,32 @@ class FinalWorkflowContractTest(unittest.TestCase):
                 for action in re.findall(r"uses: (\S+)", path.read_text()):
                     self.assertRegex(action, r"^[\w-]+/[\w-]+@[0-9a-f]{40}$|^\./")
         run = json.dumps(self.jobs["review"])
-        self.assertIn("@opencode/cli@2.1.0 --no-audit --no-fund && opencode --version | grep -Fx 'opencode v2.1.0'",
-                      run)
-        model = next(step for step in self.jobs["review"]["steps"] if "opencode run" in step.get("run", ""))
-        self.assertEqual(model["env"]["MODEL"], control.MODEL)
-        self.assertEqual(re.findall(r' (\d+) -- \\\s+opencode run', model["run"]), ["600"])
-        self.assertIn('configure \\"$RUNNER_TEMP/model\\" review', run)
+        self.assertIn(f"@anthropic-ai/claude-code@{control.CLAUDE_CODE_VERSION} --no-audit --no-fund && "
+                      f"claude --version | grep -Fx '{control.CLAUDE_CODE_VERSION} (Claude Code)'", run)
+        self.assertIn('configure-claude \\"$RUNNER_TEMP/claude\\"', run)
+        for forbidden in ("--dangerously-skip-permissions", "bypassPermissions", "@latest"):
+            self.assertNotIn(forbidden, run)
+        steps = {step.get("name"): step for step in self.jobs["review"]["steps"]}
+        canary, review = steps["Verify candidate configuration is inert"], steps["Review the pull request"]
+        self.assertEqual(re.findall(r' (\d+) -- \\\s+claude -p', canary["run"]), ["120"])
+        self.assertEqual(re.findall(r' (\d+) -- \\\s+claude -p', review["run"]), ["600"])
+        # The canary proves the exact invocation the review uses, with the same model routing.
+        invocation = re.compile(r'claude -p .*?--settings "\$CLAUDE_SETTINGS"', re.DOTALL)
+        [canary_call], [review_call] = (invocation.findall(re.sub(r"\s+", " ", step["run"])) for step in (canary, review))
+        self.assertEqual(canary_call, review_call)
+        self.assertEqual({key: value for key, value in review["env"].items() if "MODEL" in key or "ANTHROPIC" in key},
+                         canary["env"])
+        model = "${{ vars.FACTORY_REVIEW_MODEL }}"
+        self.assertTrue(all(value == model for key, value in canary["env"].items() if "MODEL" in key))
+
+    def test_trusted_scripts_resolve_from_each_working_directory(self):
+        prefixes = {("identify", None): {""}, ("publish", None): {""}, ("review", None): {"trusted/"},
+                    ("review", "candidate"): {"../trusted/", '"$GITHUB_WORKSPACE/trusted/'}}
+        for name, job in self.jobs.items():
+            for step in job["steps"]:
+                for prefix in re.findall(r'(\S*)\.github/software-factory/', step.get("run", "")):
+                    with self.subTest(job=name, step=step.get("name"), prefix=prefix):
+                        self.assertIn(prefix, prefixes[(name, step.get("working-directory"))])
 
     def test_artifacts_are_explicit_and_expire_after_three_days(self):
         all_uploads = [step for job in self.jobs.values() for step in job["steps"]
