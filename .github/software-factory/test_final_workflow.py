@@ -30,15 +30,16 @@ class FinalRunnerStepTest(unittest.TestCase):
 
     def review(self, claude, spec="true"):
         env = {"HEAD": HEAD, "BASE": BASE, "SPEC": spec, "ANTHROPIC_MODEL": "deepseek-flash",
-               "CLAUDE_SETTINGS": "settings.json"}
+               "CLAUDE_SETTINGS": "settings.json", "FINAL_PATCH": ".factory-input/final.patch"}
         files = {"temp/final-input/identity.json": '{"run":"42"}',
-                 "candidate/.factory-input/identity.json": '{"run":"forged"}'}
+                 "candidate/.factory-input/identity.json": '{"run":"forged"}',
+                 "candidate/.factory-input/final.patch": "+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+one\n+two\n"}
         return self.run_step("review", claude=claude, select="Review the pull request", env=env, files=files,
                              setup=lambda directory: env.update(
                                  REVIEW_OUTPUT=str(directory / "temp/final-review/review.json")))
 
     def result(self, **event):
-        return self.stub_events({"type": "system", "subtype": "init"}, {"type": "result", **event})
+        return "echo '" + json.dumps({"type": "result", "subtype": "success", "is_error": False, **event}) + "'"
 
     def temp(self, name):
         return self.directory / "temp" / name
@@ -63,40 +64,29 @@ class FinalRunnerStepTest(unittest.TestCase):
                     self.assertEqual(session[-1], control.prompt(f"final-{axis}", BASE, HEAD).rstrip("\n"))
                     self.assertIn("final.patch", session[-1])
                 review = json.loads(self.temp("final-review/review.json").read_text())
-                self.assertEqual(review, {"verdict": "request_changes", "advisory": [], "findings": [
+                self.assertEqual(review, {"verdict": "request_changes", "advisory": [], "inline": [], "findings": [
                     f"{axis.title()}: src/a.ts: breaks AGENTS.md" for axis in axes]})
-                self.assertTrue(self.temp("final-review/review.md").is_file())
                 self.assertEqual(json.loads(self.temp("final-review/identity.json").read_text()), {"run": "42"})
 
-    def test_failed_axes_are_reported_unavailable_without_leaking(self):
-        for claude, reason in ((f"echo {SECRET} >&2\nexec sleep 20", "timeout"), ("exit 3", "runner-error"),
-                               (self.result(subtype="error_max_structured_output_retries", is_error=True),
-                                "structured-output-retries")):
-            with self.subTest(reason=reason):
+    def test_failed_axes_fail_without_leaking_or_publishing(self):
+        for claude, status, calls in ((f"echo {SECRET} >&2\nexec sleep 20", 124, 1), ("exit 3", 3, 1),
+                                      (self.result(subtype="error_max_structured_output_retries", is_error=True), 1, 2)):
+            with self.subTest(status=status):
                 result, _ = self.review(claude)
-                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.returncode, status, result.stderr)
                 self.assertNotIn(SECRET, result.stdout + result.stderr)
-                # Each axis still runs, so one failure does not hide the other's findings.
-                self.assertEqual(len(self.calls("claude")), 2)
-                review = json.loads(self.temp("final-review/review.json").read_text())
-                self.assertEqual((review["verdict"], review["unavailable"]), ("unavailable", [
-                    {"axis": "Standards", "reason": reason}, {"axis": "Spec", "reason": reason}]))
+                self.assertEqual(len(self.calls("claude")), calls)
+                self.assertFalse(self.temp("final-review/review.json").exists())
 
-    def test_sessions_are_always_recorded_and_scanned(self):
-        for spec, axes in (("true", ["standards", "spec"]), ("false", ["standards"])):
-            with self.subTest(spec=spec):
-                files = {"temp/final-standards-summary.txt": "opencode-summary {}\n", "temp/session/leak.txt": SECRET}
-                result, _ = self.run_step("review", select="control.py transcript", env={"SPEC": spec}, files=files)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                # Only the scanned transcripts and summary, never the planted leak.
-                self.assertEqual(sorted(self.uploaded("review")), sorted(
-                    [f"final-{axis}.md" for axis in axes] + ["final-standards-summary.txt"]))
-                leak = json.dumps({"type": "text", "part": {"text": SECRET}}) + "\n"
-                result, _ = self.run_step("review", select="control.py transcript", env={"SPEC": spec},
-                                          files={"temp/final-standards.jsonl": leak})
-                self.assertEqual(result.returncode, 1)
-                self.assertIn("::error::credential-in-artifact", result.stderr)
-                self.assertNotIn(SECRET, result.stdout + result.stderr)
+    def test_review_records_only_commentable_locations(self):
+        claude = self.result(subtype="success", is_error=False, structured_output={"findings": [
+            {"blocking": True, "finding": "bug", "path": "src/a.ts", "line": 2},
+            {"blocking": False, "finding": "not in the diff", "path": "src/a.ts", "line": 99}]})
+        result, _ = self.review(claude)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        review = json.loads(self.temp("final-review/review.json").read_text())
+        self.assertEqual(review["inline"], [{"axis": axis, "blocking": True, "finding": "bug",
+                                             "path": "src/a.ts", "line": 2} for axis in ("Standards", "Spec")])
 
     def stage(self, plant=lambda candidate: None):
         env = {}
@@ -144,42 +134,44 @@ class FinalRunnerStepTest(unittest.TestCase):
                 self.assertFalse((self.directory / "temp/final.patch").exists())
                 self.assertFalse((self.directory / "temp/identity.json").exists())
 
-    def publish(self, head=HEAD, comments=(), report="Looks fine. @maintainer\n",
-                review=(("verdict", "approve"), ("findings", []), ("advisory", []))):
+    def publish(self, head=HEAD, comments=(), review=(("verdict", "approve"), ("findings", []), ("advisory", []))):
         files = {"pull.json": json.dumps({**PULL, "head": {**PULL["head"], "sha": head}}),
                  "comments.json": json.dumps([list(comments)]),
                  "temp/input/identity.json": json.dumps({"pr": 17, "head": HEAD, "base": BASE, "issues": [], "run": "42"}),
-                 "temp/review/review.json": json.dumps(dict(review)),
-                 "temp/review/review.md": report}
+                 "temp/review/review.json": json.dumps(dict(review))}
         result, _ = self.run_step("publish", gh=GH, select="control.py final-head", files=files, env={
             "PR": "17", "GITHUB_REF": "refs/heads/main", "GH_REPO": REPO, "FACTORY_AUTH_FILE": ""})
         bodies = self.directory / "bodies"
         return result, [path.read_text() for path in sorted(bodies.iterdir())] if bodies.exists() else []
 
     def test_publisher_posts_every_part_in_order(self):
-        report = base.mixed_text(80_000)
-        result, bodies = self.publish(report=report)
+        finding = base.mixed_text(80_000)
+        review = (("verdict", "approve"), ("findings", []), ("advisory", [finding]))
+        result, bodies = self.publish(review=review)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertGreater(len(bodies), 1)
         for part, body in enumerate(bodies, 1):
             self.assertRegex(body.split("\n", 1)[0], rf"<!-- tanomu-final-review head={HEAD} "
                                                      rf"digest=[0-9a-f]{{16}} part={part}/{len(bodies)} -->")
             self.assertLessEqual(len(body.encode()), 60_000)
-        self.assertTrue(all(call[:3] == ["pr", "comment", "17"] for call in self.calls("gh")[2:]))
-        self.assertIn(report.replace("@", "@​")[-500:], "".join(bodies))
-        # A rerun after a partial post fills in only the missing parts.
+        self.assertTrue(all(call[:3] == ["pr", "comment", "17"]
+                            for call in self.calls("gh") if call[:1] == ["pr"]))
+        self.assertIn(finding.replace("@", "@​")[-500:], "".join(bodies))
         posted = [{"body": bodies[0], "user": {"login": "github-actions[bot]", "type": "Bot"}}]
-        result, rest = self.publish(comments=posted, report=report)
+        result, rest = self.publish(comments=posted, review=review)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(rest, bodies[1:])
 
-    def test_publisher_posts_an_unavailable_review_then_fails(self):
-        result, bodies = self.publish(review=(("verdict", "unavailable"), ("findings", []), ("advisory", []), (
-            "unavailable", [{"axis": "Spec", "reason": "timeout"}])))
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("::error::final-review-unavailable", result.stdout)
-        [body] = bodies
-        self.assertIn("- **Unavailable** — Spec: timeout", body)
+    def test_publisher_submits_the_inline_review_after_the_summary(self):
+        result, bodies = self.publish(review=(("verdict", "request_changes"), ("findings", ["Standards: bug"]),
+            ("advisory", []), ("inline", [{"axis": "Standards", "blocking": True, "finding": "bug",
+                                          "path": "src/a.ts", "line": 2}])))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls("gh")
+        post = next(call for call in calls if call[:3] == ["api", "--method", "POST"])
+        self.assertEqual(post[3], f"repos/{REPO}/pulls/17/reviews")
+        self.assertEqual(post[4:6], ["--input", str(self.directory / "temp/comments/inline.json")])
+        self.assertLess(calls.index(next(call for call in calls if call[:2] == ["pr", "comment"])), calls.index(post))
 
     def test_publisher_skips_a_moved_head(self):
         result, bodies = self.publish(head="c" * 40)
@@ -245,11 +237,19 @@ class FinalWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("FACTORY_REVIEW", text["publish"])
         # The provider key lives in an environment without reviewers that only main can deploy to.
         self.assertEqual({name: job.get("environment") for name, job in self.jobs.items()},
-                         {"identify": None, "review": "factory-review", "publish": None})
+                         {"identify": None, "review": "agent", "publish": None})
 
     def test_candidate_is_data_only(self):
         review = self.jobs["review"]
         self.assertEqual(review["env"], {
+            "ANTHROPIC_BASE_URL": "${{ vars.AGENT_BASE_URL }}",
+            "ANTHROPIC_API_KEY": "${{ secrets.AGENT_API_KEY }}",
+            "ANTHROPIC_AUTH_TOKEN": "${{ secrets.AGENT_API_KEY }}",
+            "ANTHROPIC_MODEL": "${{ vars.AGENT_MODEL }}",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "${{ vars.AGENT_MODEL }}",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "${{ vars.AGENT_MODEL }}",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${{ vars.AGENT_MODEL }}",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "${{ vars.AGENT_MODEL }}",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1", "DISABLE_AUTO_UPDATE": "1",
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1"})
         steps = review["steps"]
@@ -291,10 +291,9 @@ class FinalWorkflowContractTest(unittest.TestCase):
         invocation = re.compile(r'claude -p .*?--settings "\$CLAUDE_SETTINGS"', re.DOTALL)
         [canary_call], [review_call] = (invocation.findall(re.sub(r"\s+", " ", step["run"])) for step in (canary, review))
         self.assertEqual(canary_call, review_call)
-        self.assertEqual({key: value for key, value in review["env"].items() if "MODEL" in key or "ANTHROPIC" in key},
-                         canary["env"])
-        model = "${{ vars.FACTORY_REVIEW_MODEL }}"
-        self.assertTrue(all(value == model for key, value in canary["env"].items() if "MODEL" in key))
+        self.assertEqual(canary.get("env", {}), {})  # Both steps inherit the same job-level routing.
+        model = "${{ vars.AGENT_MODEL }}"
+        self.assertTrue(all(value == model for key, value in review["env"].items() if "MODEL" in key))
 
     def test_trusted_scripts_resolve_from_each_working_directory(self):
         prefixes = {("identify", None): {""}, ("publish", None): {""}, ("review", None): {"trusted/"},
@@ -309,15 +308,14 @@ class FinalWorkflowContractTest(unittest.TestCase):
         all_uploads = [step for job in self.jobs.values() for step in job["steps"]
                        if "upload-artifact" in step.get("uses", "")]
         uploads = {step["with"]["name"]: step for step in all_uploads}
-        self.assertEqual(set(uploads), {"final-input", "final-review", "session-final-review"})
+        self.assertEqual(set(uploads), {"final-input", "final-review"})
         for step in all_uploads:
             name = step["with"]["name"]
             with self.subTest(artifact=name):
                 self.assertEqual(step["with"]["retention-days"], 3)
                 self.assertNotIn("*", step["with"]["path"])
-        self.assertEqual(uploads["session-final-review"]["if"], "always() && steps.session.outcome == 'success'")
-        record = next(step for step in self.jobs["review"]["steps"] if step.get("id") == "session")
-        self.assertEqual((record["if"], record["continue-on-error"]), ("always()", True))
+        self.assertEqual(set(uploads["final-review"]["with"]["path"].splitlines()), {
+            "${{ runner.temp }}/final-review/review.json", "${{ runner.temp }}/final-review/identity.json"})
 
     def test_recovery_is_selected_before_upload_and_bypasses_the_model(self):
         identify = self.jobs["identify"]
@@ -356,6 +354,16 @@ class FinalWorkflowContractTest(unittest.TestCase):
                     expression = re.sub(r"!(?!=)", "not ", expression)
                     gates.append(eval(expression.replace("&&", "and").replace("||", "or"), {"__builtins__": {}}))
                 self.assertEqual(tuple(gates), expected)
+
+    def test_inline_comments_are_validated_against_the_diff_and_deduped(self):
+        run = next(step["run"] for step in self.jobs["publish"]["steps"] if "gh pr comment" in step.get("run", ""))
+        order = ["control.py final-head", 'gh api --paginate --slurp "repos/$GH_REPO/pulls/$PR/reviews',
+                 "control.py final-comments", "gh pr comment", 'gh api --method POST "repos/$GH_REPO/pulls/$PR/reviews"']
+        self.assertEqual(sorted(order, key=run.index), order)
+        self.assertIn('"$RUNNER_TEMP/reviews.json"', run)
+        review = next(step for step in self.jobs["review"]["steps"] if step.get("name") == "Review the pull request")
+        self.assertEqual(review["env"]["FINAL_PATCH"], ".factory-input/final.patch")
+        self.assertNotIn("GH_TOKEN", json.dumps(self.jobs["review"]))
 
     def test_publisher_rechecks_the_head_before_posting(self):
         run = next(step["run"] for step in self.jobs["publish"]["steps"] if "gh pr comment" in step.get("run", ""))

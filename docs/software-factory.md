@@ -10,21 +10,13 @@ This repository is public, but the software factory treats repository text as un
 - The implementation workflow verifies the label actor, issue author, issue state and explicit `Blocked by #N` dependencies, then captures the issue body automatically for that run. It writes untrusted text to a file rather than interpolating it into a shell command.
 - The agent never receives production secrets, the `production` environment, a GitHub App token, or deployment access.
 
-## Phased rollout
+## Provider Preflight
 
-The first phase is a manually dispatched, read-only smoke workflow. It uses a disposable, redacted fixture in the runner's temporary directory and writes only the Actions step summary as a repository-visible result. It checks out only trusted orchestration helpers outside the model fixture; it does not read an issue, write an issue or pull request, create a branch, call Feishu, or contact the production server.
+The initial manual smoke established Provider connectivity. Its disposable workflow
+has been retired; Provider Preflight is an operational check, not a lifecycle stage.
+Role-specific canaries and trusted workflow checks cover subsequent migrations.
 
-The smoke must be confirmed by the maintainer before a later pull request adds implementation, review, or rework workflows. Those workflows use patch artifacts, independent review context, and human approval before merge.
-
-## Smoke gates
-
-The smoke stops rather than guessing when any of these are unknown: authentication, CI use authorization, data retention policy, or whether the run could incur paid usage. It requires a manually configured, isolated `OPENCODE_AUTH_JSON` secret and an explicit model ID; it never uses the production model key and never enables extra paid usage automatically.
-
-The smoke is bounded by a ten-minute job timeout and runs one smoke at a time. It reports only non-sensitive status, duration, and model identifier in the Actions summary. It must fail on a non-zero command, timeout, missing credential, fixture mutation, or credential-shaped output. The first real smoke does not upload raw model output.
-
-The OpenCode config denies all tools by default and allows only read-only file inspection (`read`, `glob`, and `grep`). Public session sharing is disabled by configuration. The CLI version is pinned; `@latest` is not allowed.
-
-## Later task lifecycle
+## Task lifecycle
 
 The implementation lifecycle is:
 
@@ -76,10 +68,10 @@ Recheck this policy before changing models. The pinned CLI uses its tested legac
 
 Final PR review instead runs a pinned Claude Code CLI against a provider's official
 Anthropic-compatible endpoint, with paid usage on a dedicated key. Its configuration
-lives in the `factory-review` environment, which has no required reviewers and
-accepts deployments from `main` only: the variables `FACTORY_REVIEW_BASE_URL`
+lives in the `agent` environment, which has no required reviewers and
+accepts deployments from `main` only: the variables `AGENT_BASE_URL`
 (`https://api.deepseek.com/anthropic`, or a verified Moonshot endpoint) and
-`FACTORY_REVIEW_MODEL`, and the secret `FACTORY_REVIEW_API_KEY`, which should carry
+`AGENT_MODEL`, and the secret `AGENT_API_KEY`, which should carry
 a provider-side spend limit. Every model alias Claude Code uses is set to that one
 model, so no hidden request goes to another model. DeepSeek `deepseek-flash` passed
 the read-only tool loop, the structured findings schema and the canary in a manual
@@ -249,13 +241,13 @@ this repository's issues referenced by
 `Closes`, `Fixes`, `Resolves` or `Refs #N` in the PR body; their captured bodies supply this review's specification.
 Without a linked issue, Spec is skipped and the report explains why. Each axis runs
 in a fresh session under a 600-second budget and returns schema-validated structured
-output, which `control.py` validates again. An axis that times out, errors or
-returns no valid result is reported as unavailable with a fixed reason; the other
-axis's findings are kept, and the publisher posts the report and then fails.
+output. `control.py` reads the native single-result JSON envelope and validates its
+`structured_output` again. Native result files stay on the runner and are not uploaded. A timeout, provider error or
+invalid result fails the job without publishing a partial review.
 
 The model job has no GitHub write token. A separate publisher with no model secret
-posts blocking and advisory findings and the complete responses as new comments,
-never editing previous reports. It neutralizes mentions, scans credentials and
+posts the structured blocking and advisory findings as new comments, never editing
+previous reports. It neutralizes mentions, scans credentials and
 splits losslessly at 60,000 UTF-8 bytes. Invisible first-line markers identify the
 head, report digest and part number. Only markers authored by `github-actions[bot]`
 count for deduplication: automatic entry skips a complete report for that head.
@@ -266,11 +258,20 @@ Rerunning the publisher also fills missing parts from its existing report. A mov
 head makes the report stale and prevents publication. Manual dispatch always
 requests a fresh review.
 
-This review is advisory: it submits no GitHub Review, changes no labels or PR
-state, starts no repair, and is not a required merge check. The maintainer still
-inspects CI and decides Ready for review and merge. Factory retro neither waits
-for nor reads it; its scanned sessions stay in the separate review run's artifacts
-for three days. See [ADR 0007](adr/0007-final-review-via-pull-request-target.md).
+Findings may carry a repository-relative path and a new-file line number. Only
+locations that exist in the reviewed diff are kept; the rest stay in the summary
+text. After posting the summary, the publisher submits all located findings as one
+PR review with inline comments (`COMMENT`, never an approval or a change request),
+so a rejected location fails the step rather than posting half of them. A marker
+in that review's body deduplicates identical findings on reruns and during
+recovery; only `github-actions[bot]` markers count. Findings too large for one
+comment remain in the losslessly split summary.
+
+This review is advisory: its PR review uses `COMMENT`, not an approval or change
+request. It changes no labels or PR state, starts no repair, and is not a required
+merge check. The maintainer still inspects CI and decides Ready for review and
+merge. Factory retro neither waits for nor reads it. Only the structured report and
+its identity are retained for three days. See [ADR 0007](adr/0007-final-review-via-pull-request-target.md).
 The automatic trigger can be validated live only after the workflow reaches main.
 
 ## Execution observation and recovery

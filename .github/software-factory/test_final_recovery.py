@@ -26,8 +26,8 @@ class FinalRecoveryTest(unittest.TestCase):
         os.environ.pop("FACTORY_AUTH_FILE", None)
         self.identity = {"pr": 2, "head": HEAD, "base": BASE, "issues": [1], "run": "100"}
         self.files = {"identity.json": json.dumps(self.identity),
-                      "review.json": json.dumps({"verdict": "approve", "findings": [], "advisory": []}),
-                      "review.md": "Unicode é検 " * 20_000}
+                      "review.json": json.dumps({"verdict": "approve", "findings": [],
+                                                 "advisory": ["Standards: " + "Unicode é検 " * 20_000]})}
         self.current = {**self.identity, "base": OTHER, "issues": [], "run": "200"}
         (self.input / "identity.json").write_text(json.dumps(self.current))
         for name, value in self.files.items():
@@ -51,6 +51,8 @@ class FinalRecoveryTest(unittest.TestCase):
             return self.record
         if path.endswith("/actions/workflows/final-review.yml"):
             return {"id": 9}
+        if path.endswith("/reviews?per_page=100"):
+            return []
         if path.endswith("/artifacts?name=final-review&per_page=100"):
             return {"artifacts": [self.artifact]}
         raise AssertionError(path)
@@ -136,12 +138,12 @@ class FinalRecoveryTest(unittest.TestCase):
                 self.assertFalse(self.resume())
                 self.assertFalse(self.output.exists())
         self.extra = []
-        info = zipfile.ZipInfo("review.md")
+        info = zipfile.ZipInfo("review.json")
         info.external_attr = 0o120777 << 16
-        text = self.files.pop("review.md")
+        text = self.files.pop("review.json")
         self.extra = [(info, "../escaped")]
         self.assertFalse(self.resume())
-        self.files["review.md"] = text
+        self.files["review.json"] = text
 
     def test_wrong_identity_and_changed_content_fail_digest_validation(self):
         for field, value in (("pr", 3), ("head", OTHER), ("base", OTHER), ("run", "101"), ("issues", [3])):
@@ -150,7 +152,7 @@ class FinalRecoveryTest(unittest.TestCase):
                 self.assertFalse(self.resume())
                 self.assertEqual(json.loads((self.input / "identity.json").read_text()), self.current)
         self.files["identity.json"] = json.dumps(self.identity)
-        self.files["review.md"] += "changed"
+        self.files["review.json"] = json.dumps({"verdict": "approve", "findings": [], "advisory": ["changed"]})
         self.assertFalse(self.resume())
 
     def test_credentials_anywhere_in_artifact_reject_reuse(self):
