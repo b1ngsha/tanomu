@@ -2,9 +2,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -16,23 +18,26 @@ spec.loader.exec_module(runner)
 
 class InvocationTest(unittest.TestCase):
     def test_shared_flags_and_explicit_persistence(self):
+        supervisor = runner.trusted_module("supervisor")
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             env = {"CLAUDE_CONFIG_DIR": str(root / "config"), "CLAUDE_TRANSCRIPT": "stale",
                    "CLAUDE_SETTINGS": "settings.json", "ANTHROPIC_MODEL": "configured-model"}
             for persisted in (False, True):
                 with self.subTest(persisted=persisted), patch.dict(os.environ, env, clear=True), \
-                        patch.object(runner.subprocess, "run") as run:
-                    run.return_value.returncode = 0
+                        patch.object(runner, "trusted_module", return_value=supervisor), \
+                        patch.object(supervisor, "main") as run:
+                    transcripts = []
+                    run.side_effect = lambda _: transcripts.append(os.environ.get("CLAUDE_TRANSCRIPT")) or 0
                     status = runner.invoke("review-standards", "private prompt", 600, root / "result.json",
                                            root / "summary", schema="schema",
                                            session_file=root / "session" if persisted else None)
                     self.assertEqual(status, 0)
                     args = run.call_args.args[0]
-                    self.assertEqual(args[:3], [sys.executable, "-I", str(RUNNER.with_name("supervisor.py"))])
-                    self.assertEqual(args[3:8], [str(root / "result.json"), str(root / "summary"),
-                                                "review-standards", "600", "--"])
-                    command = args[8:]
+                    self.assertEqual(args[:5], [str(root / "result.json"), str(root / "summary"),
+                                               "review-standards", "600", "--"])
+                    self.assertEqual(os.environ["CLAUDE_TRANSCRIPT"], "stale")
+                    command = args[5:]
                     self.assertEqual(command[:4], ["claude", "-p", "--bare", "--restricted"])
                     for flag, value in (("--json-schema", "schema"), ("--output-format", "json"),
                                         ("--tools", "Read,Glob,Grep"), ("--permission-mode", "dontAsk"),
@@ -45,13 +50,12 @@ class InvocationTest(unittest.TestCase):
                     if persisted:
                         session = (root / "session").read_text()
                         self.assertEqual(command[command.index("--session-id") + 1], session)
-                        self.assertEqual(run.call_args.kwargs["env"]["CLAUDE_TRANSCRIPT"],
-                                         str(root / "config/projects/factory" / f"{session}.jsonl"))
+                        self.assertEqual(transcripts, [str(root / "config/projects/factory" / f"{session}.jsonl")])
                         self.assertNotIn("--no-session-persistence", command)
                     else:
                         self.assertIn("--no-session-persistence", command)
                         self.assertNotIn("--session-id", command)
-                        self.assertNotIn("CLAUDE_TRANSCRIPT", run.call_args.kwargs["env"])
+                        self.assertEqual(transcripts, [None])
 
     def test_role_cli_preserves_paths_schema_and_sessions(self):
         control = runner.trusted_module("control")
@@ -91,9 +95,74 @@ class InvocationTest(unittest.TestCase):
             self.assertEqual(output.call_args.args, ("::error::unexpected-claude-version",))
 
     def test_supervisor_launch_errors_are_bounded_statuses(self):
-        with patch.dict(os.environ, {"CLAUDE_SETTINGS": "settings", "ANTHROPIC_MODEL": "model"}), \
-                patch.object(runner.subprocess, "run", side_effect=OSError("private details")):
+        supervisor = runner.trusted_module("supervisor")
+        with patch.dict(os.environ, {"CLAUDE_SETTINGS": "settings", "ANTHROPIC_MODEL": "model",
+                                    "CLAUDE_TRANSCRIPT": "stale"}), \
+                patch.object(runner, "trusted_module", return_value=supervisor), \
+                patch.object(supervisor, "main", side_effect=OSError("private details")):
             self.assertEqual(runner.invoke("final-spec", "prompt", 1, "result", "summary"), 127)
+            self.assertEqual(os.environ["CLAUDE_TRANSCRIPT"], "stale")
+
+    def test_wrapper_cancellation_waits_for_supervisor_cleanup(self):
+        for cancel, group in ((signal.SIGINT, True), (signal.SIGTERM, False)):
+            with self.subTest(cancel=cancel), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                child_pid, terminating = root / "child.pid", root / "terminating"
+                binary = root / "claude"
+                binary.write_text(f"#!{sys.executable} -I\n"
+                                  "import os, signal, time\nfrom pathlib import Path\n"
+                                  f"signal.signal(signal.SIGTERM, lambda *_: Path({str(terminating)!r}).touch())\n"
+                                  f"Path({str(child_pid)!r}).write_text(str(os.getpid()))\n"
+                                  "time.sleep(60)\n")
+                binary.chmod(0o755)
+                env = {**os.environ, "PATH": f"{root}:{os.environ['PATH']}",
+                       "RUNNER_TEMP": str(root), "CLAUDE_CONFIG_DIR": str(root / "config"),
+                       "CLAUDE_SETTINGS": "settings.json", "ANTHROPIC_MODEL": "stub",
+                       "GITHUB_STEP_SUMMARY": str(root / "github-summary")}
+                process = subprocess.Popen([sys.executable, "-I", str(RUNNER), "implement", "45", "--", "prompt"],
+                                           env=env, cwd=root, start_new_session=True,
+                                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                child = None
+                try:
+                    deadline = time.monotonic() + 5
+                    while not child_pid.exists() and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(child_pid.exists())
+                    child = int(child_pid.read_text())
+                    if group:
+                        os.killpg(process.pid, cancel)
+                    else:
+                        process.send_signal(cancel)
+                    # Another cancellation during the full production grace period must not abort cleanup.
+                    deadline = time.monotonic() + 3
+                    while not terminating.exists() and process.poll() is None and time.monotonic() < deadline:
+                        time.sleep(.01)
+                    self.assertTrue(terminating.exists(), "supervisor did not begin child cleanup")
+                    self.assertIsNone(process.poll(), "wrapper exited before cleanup completed")
+                    process.send_signal(cancel)
+                    stdout, stderr = process.communicate(timeout=20)
+                    state_query = subprocess.run(["ps", "-o", "stat=", "-p", str(child)],
+                                                 capture_output=True, text=True)
+                    self.assertIn(state_query.returncode, (0, 1), state_query.stderr)
+                    state = state_query.stdout.strip()
+                    self.assertTrue(not state or state.startswith("Z"), state)
+                    self.assertEqual(process.returncode, 128 + cancel, stderr)
+                    summary = (root / "implementation-summary.txt").read_text()
+                    self.assertEqual(json.loads(summary.removeprefix("agent-summary "))["exit_status"], 128 + cancel)
+                    self.assertIn(summary.strip(), stdout)
+                    self.assertIn("### Factory Agent run", (root / "github-summary").read_text())
+                    self.assertEqual(stderr, "")
+                finally:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    if child is not None:
+                        try:
+                            os.killpg(child, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                    process.communicate(timeout=5)
 
     def test_isolated_subprocess_from_external_candidate_cwd(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -126,7 +195,19 @@ class InvocationTest(unittest.TestCase):
             env.pop("GITHUB_STEP_SUMMARY", None)
             for mode, context in (("round", ["6"]), ("final", ["b" * 40, "a" * 40, "true"])):
                 with self.subTest(mode=mode):
-                    result = subprocess.run([sys.executable, "-I", str(script), mode, "2", "--", *context],
+                    entry = """import importlib.util, os, signal, sys
+spec = importlib.util.spec_from_file_location('agent_runner', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+handler = lambda *_: None
+for sig in (signal.SIGINT, signal.SIGTERM):
+    signal.signal(sig, handler)
+status = module.main(sys.argv[2:])
+assert all(signal.getsignal(sig) is handler for sig in (signal.SIGINT, signal.SIGTERM))
+assert os.environ['CLAUDE_TRANSCRIPT'] == 'stale'
+sys.exit(status)
+"""
+                    result = subprocess.run([sys.executable, "-I", "-c", entry, str(script), mode, "2", "--", *context],
                                             env=env, cwd=root, capture_output=True, text=True, timeout=10)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertNotIn("CANDIDATE_MODULE_LOADED", result.stdout + result.stderr)

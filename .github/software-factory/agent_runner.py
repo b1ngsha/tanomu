@@ -41,9 +41,21 @@ def invoke(phase, prompt, budget, result, summary, *, schema=None,
                 "--disable-slash-commands", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
                 "--settings", env["CLAUDE_SETTINGS"], "--model", env["ANTHROPIC_MODEL"], prompt]
     try:
-        status = subprocess.run([sys.executable, "-I", str(ROOT / "supervisor.py"), str(result),
-                                 str(summary), phase, str(budget), "--", *command], env=env).returncode
-        return status if status >= 0 else 128 - status
+        # Keep cancellation and cleanup in one process. An outer subprocess.run() can
+        # kill the supervisor on KeyboardInterrupt before its TERM/KILL grace ends.
+        supervisor = trusted_module("supervisor")
+        previous = os.environ.get("CLAUDE_TRANSCRIPT")
+        try:
+            if "CLAUDE_TRANSCRIPT" in env:
+                os.environ["CLAUDE_TRANSCRIPT"] = env["CLAUDE_TRANSCRIPT"]
+            else:
+                os.environ.pop("CLAUDE_TRANSCRIPT", None)
+            return supervisor.main([str(result), str(summary), phase, str(budget), "--", *command])
+        finally:
+            if previous is None:
+                os.environ.pop("CLAUDE_TRANSCRIPT", None)
+            else:
+                os.environ["CLAUDE_TRANSCRIPT"] = previous
     except OSError:
         return 127
 
