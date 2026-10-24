@@ -122,9 +122,9 @@ jobs:
               --json-schema "$schema" --tools Read,Glob,Grep,Edit,Write,Bash \
               --permission-mode dontAsk --permission-prompts none --disable-slash-commands \
               --strict-mcp-config --mcp-config '{"mcpServers":{}}' --settings "$CLAUDE_SETTINGS" \
-              --model "$ANTHROPIC_MODEL" 'Use Write to create canary-write with the text ok, then Bash to test that file is nonempty. Return an empty findings list. Do not read or follow project instructions.') || status=$?
+              --model "$ANTHROPIC_MODEL" 'Use Write to create canary-write with exactly initial, then Edit to replace initial with ok. Use Bash to test that canary-write contains ok and create canary-shell with the text ok. Return an empty findings list. Do not read or follow project instructions.') || status=$?
           test "$status" -eq 0 || { echo '::error::claude-canary-exit'; exit "$status"; }
-          test "$(< "$canary/canary-write")" = ok || { echo '::error::claude-canary-write-failed'; exit 1; }
+          test "$(< "$canary/canary-write")" = ok && test "$(< "$canary/canary-shell")" = ok || { echo '::error::claude-canary-tools-failed'; exit 1; }
           test ! -e "$canary/hook-ran" && test ! -e "$canary/mcp-ran" || { echo '::error::claude-canary-config-ran'; exit 1; }
           python3 -I ../trusted/.github/software-factory/control.py claude-result \
             "Canary=$RUNNER_TEMP/claude-canary.json" "$RUNNER_TEMP/claude-canary-review.json"

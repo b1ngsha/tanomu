@@ -10,12 +10,6 @@ This repository is public, but the software factory treats repository text as un
 - The implementation workflow verifies the label actor, issue author, issue state and explicit `Blocked by #N` dependencies, then captures the issue body automatically for that run. It writes untrusted text to a file rather than interpolating it into a shell command.
 - The agent never receives production secrets, the `production` environment, a GitHub App token, or deployment access.
 
-## Provider Preflight
-
-The initial manual smoke established Provider connectivity. Its disposable workflow
-has been retired; Provider Preflight is an operational check, not a lifecycle stage.
-Role-specific canaries and trusted workflow checks cover subsequent migrations.
-
 ## Task lifecycle
 
 The implementation lifecycle is:
@@ -56,26 +50,12 @@ commit and update both pins; `control.py` rejects a `code-review` skill whose br
 or standards section it can no longer find. The prompt builder removes only the
 briefs' upstream "Under 400 words." instruction; vendored files stay unchanged.
 Review and retro have no response word, character or finding-count cap, and their
-prompts explicitly require supported judgement calls to be included. A provider finish
-reason of `length` or `content-filter` fails with `incomplete-output`, rather than
-accepting a partial review or retro as complete.
+prompts explicitly require supported judgement calls to be included. Reviews require
+a successful native result with schema-validated `structured_output`; retro requires
+a successful native result with nonempty Markdown text. Neither accepts a partial
+result or retries the whole role automatically.
 
-Implement, round review and retro accept only `opencode/deepseek-v4.1-flash-free`;
-no paid fallback is configured. OpenCode's [provider policy](https://opencode.ai/docs/zen/) states that
-DeepSeek V4.1 Flash Free uses zero retention and does not train on submitted data.
-Recheck this policy before changing models. The pinned CLI uses its tested legacy
-`permission` configuration; migration to `permissions` needs separate verification.
-
-Final PR review instead runs a pinned Claude Code CLI against a provider's official
-Anthropic-compatible endpoint, with paid usage on a dedicated key. Its configuration
-lives in the `agent` environment, which has no required reviewers and
-accepts deployments from `main` only: the variables `AGENT_BASE_URL`
-(`https://api.deepseek.com/anthropic`, or a verified Moonshot endpoint) and
-`AGENT_MODEL`, and the secret `AGENT_API_KEY`, which should carry
-a provider-side spend limit. Every model alias Claude Code uses is set to that one
-model, so no hidden request goes to another model. DeepSeek `deepseek-flash` passed
-the read-only tool loop, the structured findings schema and the canary in a manual
-run against PR #62.
+All Factory Agents use the same pinned Claude Code CLI and one dedicated paid Provider configuration. Implement and both round-review jobs declare `environment: agent` directly because reusable-workflow callers cannot set a called job's environment; final review and retro do the same. The `agent` environment has no required reviewers, accepts deployments from `main` only, and defines `AGENT_BASE_URL` (initially `https://api.deepseek.com/anthropic`), `AGENT_MODEL` (initially `deepseek-flash`), and the secret `AGENT_API_KEY`. Keep this key separate from production chat credentials and give it a provider-side spend limit. Every model alias Claude Code uses is set to the selected model, so no hidden request goes to another model. DeepSeek `deepseek-flash` passed the final-review read-only tool loop, structured findings schema and configuration canary in a manual run against PR #62; the other roles still require live validation after their workflows reach `main`.
 
 ## Implementation runbook
 
@@ -83,7 +63,7 @@ The maintainer creates `agent:implement`, `implementing`, `ready-for-human` and
 `needs-human`, enables Actions to create PRs, and configures main protection and
 production approval. Review the issue body, then add `agent:implement` while
 `ready-for-agent` is present. The label
-event starts **Software factory implement** on `main` with the free model above.
+event starts **Software factory implement** on `main` with the configured Factory Agent.
 Manual dispatch remains available for re-running with the same validation. There is
 no dry-run mode.
 
@@ -95,25 +75,18 @@ installs candidate dependencies, applies `pnpm format`, rechecks the patch and
 uploads the formatted patch before running lint, typecheck, admin build and database tests. A failing check produces
 `checks.json` (the command and a bounded, ANSI-stripped output tail) for the next
 round. Passing checks lead to a read-only review along the two `code-review` axes,
-each in its own fresh OpenCode session so neither sees the other's conversation:
+each in its own fresh Claude Code session so neither sees the other's conversation:
 Standards (documented repository standards plus the smell baseline) and Spec (the
-captured issue body). Each axis returns
-`{"findings":[{"blocking":bool,"finding":str}]}`; `control.py review` validates both
-and writes `review.json` with the verdict, the blocking findings and the advisory
-ones, each labelled with its axis and never reranked. For streams with message IDs,
-review parsing selects the final assistant message by `part.messageID` and joins
-only its text parts; earlier progress remains in the session transcript. Mixed IDs
-or a message ID reappearing after another message fail closed. Streams without IDs
-retain whole-stream validation. No JSON substring extraction or earlier-answer
-fallback is used. The pinned v2.1.0 CLI's `--format json` is an event transport,
-not schema-constrained model output; the final message must still satisfy the
-strict review schema. Only a blocking finding
-requests changes. Smells are always advisory. Each round also saves `review.md`
-with both axes' complete original JSON responses, preserving their order and all
-blocking and advisory findings. These full reports are published as comments after
-handoff, including earlier rounds that requested changes. Both kinds of repair share one budget of four
-rounds. Repair is not a blind retry: every round is checked again, and only the
-patch that passed checks and review is published.
+captured issue body). Each axis returns native `structured_output` matching
+`{"findings":[{"blocking":bool,"finding":str}]}`. `control.py claude-result` validates
+both native result envelopes again and writes `review.json` with the verdict, the
+blocking findings and the advisory ones, each labelled with its axis and never
+reranked. Only a blocking finding requests changes. Smells are always advisory.
+All findings from every completed round are rendered from `review.json` and published
+as comments after handoff, including earlier rounds that requested changes; no
+second review-Markdown response is generated. Both kinds of repair share one budget
+of four rounds. Repair is not a blind retry: every round is checked again, and only
+the patch that passed checks and review is published.
 
 Authorization, patch-validation, credential-scan, implementer-error and infrastructure failures
 are not repairable and stop the run, as does a repair round that leaves the patch
@@ -128,8 +101,9 @@ real Feishu acceptance. The factory never claims real Feishu acceptance passed.
 
 Patch, structured feedback, session transcript and retro artifacts expire after
 three days. Exact credential values and common credential patterns are checked
-before upload. Raw event files, stderr and auth files are never uploaded; complete event
-lines appear only inside the scanned transcript. Workspace
+before upload. Native JSON result envelopes, stderr and auth files stay on the runner;
+native Claude Code JSONL sessions are copied unchanged, scanned and uploaded as opaque
+Run Evidence. Workspace
 paths are pinned with `PWD`; implementation can edit repository files, with credential paths denied and `.env.example` allowed. External directories, subagents and the Skill tool remain denied.
 Implementation may use shell for dependency installation, migration generation and checks; review and retro have no shell or network tools.
 
@@ -148,34 +122,31 @@ read-only: they may only read, glob, grep and list inside their workspace, with 
 and `auth.json` reads denied.
 
 The shared trusted `supervisor.py` owns process-group deadlines and cleanup for implementation,
-review, retro, final review and smoke. Every 60 seconds it writes an allowlisted heartbeat
-with phase/axis, elapsed time, event/tool counts and last observed event age. The age is
-based on local file activity when event counts advance, not a provider diagnosis. Closed or
-full log pipes may drop telemetry without blocking cleanup. Normal/nonzero exits retain their
-status; deadlines return 124, signals return 128 + signal. Descendants receive TERM and,
-after at most 15 seconds, KILL, even if the leader already exited. Hard runner termination
-can still prevent cleanup or terminal reporting. Heartbeats stay in Actions logs; GitHub
-comments change only when orchestration phases/outcomes change.
+review, retro and final review. Every 60 seconds it writes an allowlisted heartbeat
+with phase/axis, elapsed time, native result/transcript byte counts and last observed
+file-activity age. File activity is only a liveness observation, not a provider diagnosis.
+Closed or full log pipes may drop telemetry without blocking cleanup. Normal/nonzero
+exits retain their status; deadlines return 124, signals return 128 + signal. Descendants
+receive TERM and, after at most 15 seconds, KILL, even if the leader already exited.
+Hard runner termination can still prevent cleanup or terminal reporting. Heartbeats
+stay in Actions logs; GitHub comments change only when orchestration phases/outcomes change.
 
 The implementation run has a 1500-second limit; each review axis and the retro run
-have 600 seconds each (smoke has 420 seconds within its ten-minute job). All have a 15-second
-kill grace period. After success, timeout (exit 124) or any other nonzero exit, a trusted
-`opencode-summary` line is written to the step log and job summary. It has the exit
-status, elapsed seconds, event and tool-call counts by status, step finish reasons,
-token totals and seconds until the last event. The original exit status is then
-propagated, and nothing is retried. Only allowlisted names and numbers are printed.
-Text, tool inputs and outputs, error messages, paths and stderr are never printed.
-The summary shows what the run did, not why it stopped. For example, a tool error count
-cannot tell a permission denial from another failure, and a gap after the last event
-only means no further JSON was received.
+have 600 seconds each. All have a 15-second kill grace period. After success, timeout
+(exit 124) or any other nonzero exit, a trusted `agent-summary` line is written to the
+step log and job summary. It has only the exit status, elapsed seconds and result/
+transcript byte counts. The original exit status is then propagated, and nothing is
+retried. Model text, tool inputs and outputs, error messages, paths and stderr are
+never printed. The summary shows process activity, not why the run stopped.
 
-Every session, including a failed or timed-out one, is also rendered by
-`control.py transcript` into a readable record for retro: events in order with
-seconds since the first timestamped event. Each readable entry includes the complete original JSON line, including unknown
-metadata. Fields and the whole record are retained in full, without truncation. The safe CLI summary is also scanned and
-saved beside the transcript, so retro can see timeout status and elapsed time. A step that always runs scans the
-transcript with `scan-session` (the same credential checks, without a size cap) and only then uploads it as a `session-*` artifact kept for three days, naming only
-the scanned files. A transcript that fails the scan is not uploaded.
+Implement, round review and retro retain their native session JSONL unchanged as Run
+Evidence. Claude Code's internal event schema is not a parsing contract; retro cites
+the JSONL file and line number instead of reconstructing OpenCode-style events. A step
+that always runs copies each explicitly named session, scans it with `scan-session`
+(the same credential checks, without a size cap), and only then uploads it as a
+`session-*` artifact kept for three days. Final review uses `--no-session-persistence`
+and retains only its structured report and identity. A transcript that is missing or
+fails the scan is not uploaded; session recording is best effort after a failed run.
 
 After every claimed run that was not cancelled, whether or not it reached a PR, a
 retro job runs the vendored `retro` skill on the whole run in a fresh read-only
@@ -183,7 +154,7 @@ session. It downloads the task, the `session-*`, `feedback-*` and `checked-*`
 artifacts (one download per pattern, each allowed to be missing) and a record of each
 job's outcome. It only proposes; it cannot edit, run shell, or write to GitHub. Its
 reply is validated, scanned and uploaded as the `retro` artifact. A separate
-`retro-publish` job, which holds no model secret, rescans all full review reports and
+`retro-publish` job, which holds no model secret, rescans all structured review reports and
 the retro, neutralizes `@` mentions and posts them on the open draft PR for the
 task's branch, or on the issue when there is no PR. Review reports are still published
 if retro fails. Retro is labelled "proposals only". Each report is split losslessly
@@ -242,7 +213,7 @@ this repository's issues referenced by
 Without a linked issue, Spec is skipped and the report explains why. Each axis runs
 in a fresh session under a 600-second budget and returns schema-validated structured
 output. `control.py` reads the native single-result JSON envelope and validates its
-`structured_output` again. Native result files stay on the runner and are not uploaded. A timeout, provider error or
+`structured_output` again. The result file stays on the runner and is not uploaded. A timeout, provider error or
 invalid result fails the job without publishing a partial review.
 
 The model job has no GitHub write token. A separate publisher with no model secret
