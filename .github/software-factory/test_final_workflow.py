@@ -39,7 +39,7 @@ class FinalRunnerStepTest(unittest.TestCase):
                                  REVIEW_OUTPUT=str(directory / "temp/final-review/review.json")))
 
     def result(self, **event):
-        return self.stub_events({"type": "system", "subtype": "init"}, {"type": "result", **event})
+        return "echo '" + json.dumps({"type": "result", "subtype": "success", "is_error": False, **event}) + "'"
 
     def temp(self, name):
         return self.directory / "temp" / name
@@ -237,11 +237,19 @@ class FinalWorkflowContractTest(unittest.TestCase):
         self.assertNotIn("FACTORY_REVIEW", text["publish"])
         # The provider key lives in an environment without reviewers that only main can deploy to.
         self.assertEqual({name: job.get("environment") for name, job in self.jobs.items()},
-                         {"identify": None, "review": "factory-review", "publish": None})
+                         {"identify": None, "review": "agent", "publish": None})
 
     def test_candidate_is_data_only(self):
         review = self.jobs["review"]
         self.assertEqual(review["env"], {
+            "ANTHROPIC_BASE_URL": "${{ vars.AGENT_BASE_URL }}",
+            "ANTHROPIC_API_KEY": "${{ secrets.AGENT_API_KEY }}",
+            "ANTHROPIC_AUTH_TOKEN": "${{ secrets.AGENT_API_KEY }}",
+            "ANTHROPIC_MODEL": "${{ vars.AGENT_MODEL }}",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "${{ vars.AGENT_MODEL }}",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "${{ vars.AGENT_MODEL }}",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "${{ vars.AGENT_MODEL }}",
+            "CLAUDE_CODE_SUBAGENT_MODEL": "${{ vars.AGENT_MODEL }}",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_AUTOUPDATER": "1", "DISABLE_AUTO_UPDATE": "1",
             "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL": "1"})
         steps = review["steps"]
@@ -283,10 +291,9 @@ class FinalWorkflowContractTest(unittest.TestCase):
         invocation = re.compile(r'claude -p .*?--settings "\$CLAUDE_SETTINGS"', re.DOTALL)
         [canary_call], [review_call] = (invocation.findall(re.sub(r"\s+", " ", step["run"])) for step in (canary, review))
         self.assertEqual(canary_call, review_call)
-        self.assertEqual({key: value for key, value in review["env"].items() if "MODEL" in key or "ANTHROPIC" in key},
-                         canary["env"])
-        model = "${{ vars.FACTORY_REVIEW_MODEL }}"
-        self.assertTrue(all(value == model for key, value in canary["env"].items() if "MODEL" in key))
+        self.assertEqual(canary.get("env", {}), {})  # Both steps inherit the same job-level routing.
+        model = "${{ vars.AGENT_MODEL }}"
+        self.assertTrue(all(value == model for key, value in review["env"].items() if "MODEL" in key))
 
     def test_trusted_scripts_resolve_from_each_working_directory(self):
         prefixes = {("identify", None): {""}, ("publish", None): {""}, ("review", None): {"trusted/"},

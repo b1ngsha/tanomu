@@ -590,26 +590,45 @@ def review_axis(filename):
 
 
 def claude_result(filename):
-    """Read the terminal result; intermediate stream events are only liveness telemetry."""
-    lines = [line for line in Path(filename).read_text().splitlines() if line.strip()]
-    require(lines, "no-result")
+    """Validate Claude Code's native single-result envelope."""
     try:
-        event = json.loads(lines[-1], object_pairs_hook=lambda pairs: unique_json(pairs, "invalid-claude-events"))
+        event = json.loads(Path(filename).read_text(),
+                           object_pairs_hook=lambda pairs: unique_json(pairs, "invalid-claude-result"))
     except (json.JSONDecodeError, RecursionError, ValueError):
-        raise ValueError("invalid-claude-events") from None
+        raise ValueError("invalid-claude-result") from None
     require(isinstance(event, dict) and event.get("type") == "result", "no-result")
     subtype = event.get("subtype")
     reasons = {"error_max_structured_output_retries": "structured-output-retries",
                "error_max_turns": "max-turns"}
     if subtype in reasons:
         raise ValueError(reasons[subtype])
-    require(subtype == "success" and event.get("is_error") is not True, "provider-error")
+    require(subtype == "success" and event.get("is_error") is False, "provider-error")
+    return event
+
+
+
+def claude_findings(filename):
+    event = claude_result(filename)
     require("structured_output" in event, "no-structured-output")
     return validate_findings(event["structured_output"])
 
 
+def claude_text(filename, output):
+    text = claude_result(filename).get("result")
+    require(isinstance(text, str) and text.strip(), "invalid-result-text")
+    Path(output).write_text(text)
+
+
+def claude_transcript(session_id, output):
+    require(re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id),
+            "invalid-session-id")
+    source = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "factory" / f"{session_id}.jsonl"
+    require(source.is_file() and not source.is_symlink(), "missing-transcript")
+    shutil.copyfile(source, output)
+
+
 def claude_review_result(files, output):
-    reviewed = [(axis, claude_result(filename)) for axis, filename in files]
+    reviewed = [(axis, claude_findings(filename)) for axis, filename in files]
     blocking, advisory = [], []
     for axis, findings in reviewed:
         for item in findings:
@@ -622,14 +641,20 @@ def claude_review_result(files, output):
     return report
 
 
-def claude_schema():
-    print(json.dumps(FINDINGS_SCHEMA, separators=(",", ":")))
+
+def claude_schema(mode="final"):
+    schema = json.loads(json.dumps(FINDINGS_SCHEMA))
+    if mode == "round":
+        schema["properties"]["findings"]["items"]["required"] = ["blocking", "finding"]
+    print(json.dumps(schema, separators=(",", ":")))
 
 
-def configure_claude(directory):
-    base_url = os.environ.get("FACTORY_REVIEW_BASE_URL", "")
-    model = os.environ.get("FACTORY_REVIEW_MODEL", "")
-    key = os.environ.get("FACTORY_REVIEW_API_KEY", "")
+
+def configure_claude(directory, mode="review"):
+    require(mode in ("implement", "review", "retro"), "invalid-mode")
+    base_url = os.environ.get("ANTHROPIC_BASE_URL", "")
+    model = os.environ.get("ANTHROPIC_MODEL", "")
+    key = os.environ.get("ANTHROPIC_API_KEY", "")
     from urllib.parse import urlparse
     parsed = urlparse(base_url)
     require(parsed.scheme == "https" and parsed.path == "/anthropic"
@@ -647,22 +672,27 @@ def configure_claude(directory):
     auth.chmod(0o600)
     auth.write_text(json.dumps({"key": key}))
     settings = config / "settings.json"
+    allowed = ["Read", "Glob", "Grep"]
+    denied = ["NotebookEdit", "WebFetch", "WebSearch", "Task", "Agent", "Skill", "mcp__*",
+              "Read(.env)", "Read(.env.*)", "Read(**/.env)", "Read(**/.env.*)", "Read(//proc/**)",
+              "Read(//sys/**)", f"Read(//{auth})", f"Read(//{output}/**)"]
+    if mode == "implement":
+        allowed += ["Edit", "Write", "Bash"]
+    else:
+        denied += ["Bash", "Edit", "Write"]
     settings.write_text(json.dumps({
-        "permissions": {"defaultMode": "dontAsk", "allow": ["Read", "Glob", "Grep"],
-                       "deny": ["Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch",
-                                "Task", "Agent", "Skill", "mcp__*", "Read(.env)", "Read(.env.*)",
-                                "Read(**/.env)", "Read(**/.env.*)", "Read(//proc/**)", "Read(//sys/**)",
-                                f"Read(//{auth})", f"Read(//{output}/**)"]},
-        "blockReadsOutsideWorkingDirectories": True,
+        "permissions": {"defaultMode": "dontAsk", "allow": allowed, "deny": denied,
+                        "blockReadsOutsideWorkingDirectories": True},
         "disableBypassPermissionsMode": "disable",
         "disableAllHooks": True,
         "enableAllProjectMcpServers": False,
     }))
     with open(os.environ["GITHUB_ENV"], "a") as env:
         for name, value in {"HOME": home, "CLAUDE_CONFIG_DIR": config, "CLAUDE_SETTINGS": settings,
-                            "FACTORY_AUTH_FILE": auth}.items():
+                            "CLAUDE_CODE_PROJECT_DIR_NAME": "factory", "FACTORY_AUTH_FILE": auth}.items():
             env.write(f"{name}={value}\n")
     return {"base_url": base_url, "model": model, "auth": str(auth), "settings": str(settings)}
+
 
 
 def patch_lines(patch):
@@ -1157,7 +1187,15 @@ if __name__ == "__main__":
         elif command == "configure-claude":
             configure_claude(*args)
         elif command == "claude-schema":
-            claude_schema()
+            claude_schema(*args)
+        elif command == "claude-run":
+            claude_result(*args)
+        elif command == "claude-findings":
+            claude_findings(*args)
+        elif command == "claude-text":
+            claude_text(*args)
+        elif command == "claude-transcript":
+            claude_transcript(*args)
         elif command == "claude-result":
             files = []
             for item in args[:-1]:

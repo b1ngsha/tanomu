@@ -79,11 +79,19 @@ jobs:
     if: needs.identify.outputs.skip != 'true' && needs.identify.outputs.resumed != 'true'
     runs-on: ubuntu-latest
     # Holds only the provider key and model; no reviewers, deployable from main only.
-    environment: factory-review
+    environment: agent
     timeout-minutes: 25
     permissions:
       contents: read
     env:
+      ANTHROPIC_BASE_URL: ${{ vars.AGENT_BASE_URL }}
+      ANTHROPIC_API_KEY: ${{ secrets.AGENT_API_KEY }}
+      ANTHROPIC_AUTH_TOKEN: ${{ secrets.AGENT_API_KEY }}
+      ANTHROPIC_MODEL: ${{ vars.AGENT_MODEL }}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.AGENT_MODEL }}
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.AGENT_MODEL }}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.AGENT_MODEL }}
+      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.AGENT_MODEL }}
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
       DISABLE_AUTOUPDATER: "1"
       DISABLE_AUTO_UPDATE: "1"
@@ -121,22 +129,9 @@ jobs:
       - name: Install pinned runner
         run: npm install --global @anthropic-ai/claude-code@2.1.304 --no-audit --no-fund && claude --version | grep -Fx '2.1.304 (Claude Code)'
       - name: Configure fresh read-only runner
-        env:
-          FACTORY_REVIEW_API_KEY: ${{ secrets.FACTORY_REVIEW_API_KEY }}
-          FACTORY_REVIEW_BASE_URL: ${{ vars.FACTORY_REVIEW_BASE_URL }}
-          FACTORY_REVIEW_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
-        run: python3 -I trusted/.github/software-factory/control.py configure-claude "$RUNNER_TEMP/claude"
+        run: python3 -I trusted/.github/software-factory/control.py configure-claude "$RUNNER_TEMP/claude" review
       - name: Verify candidate configuration is inert
         working-directory: candidate
-        env:
-          ANTHROPIC_BASE_URL: ${{ vars.FACTORY_REVIEW_BASE_URL }}
-          ANTHROPIC_API_KEY: ${{ secrets.FACTORY_REVIEW_API_KEY }}
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.FACTORY_REVIEW_API_KEY }}
-          ANTHROPIC_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
-          ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
-          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
-          ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
-          CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
         run: |
           set -euo pipefail
           schema=$(python3 -I ../trusted/.github/software-factory/control.py claude-schema)
@@ -148,8 +143,8 @@ jobs:
           printf '%s\n' '{"mcpServers":{"canary":{"command":"touch","args":["'"$canary"'/mcp-ran"]}}}' > "$canary/.mcp.json"
           status=0
           (cd "$canary" && python3 -I "$GITHUB_WORKSPACE/trusted/.github/software-factory/supervisor.py" \
-            "$RUNNER_TEMP/claude-canary.jsonl" "$RUNNER_TEMP/claude-canary-summary.txt" final-standards 120 -- \
-            claude -p --bare --restricted --no-session-persistence --output-format stream-json --verbose \
+            "$RUNNER_TEMP/claude-canary.json" "$RUNNER_TEMP/claude-canary-summary.txt" final-standards 120 -- \
+            claude -p --bare --restricted --no-session-persistence --output-format json \
             --json-schema "$schema" --model "$ANTHROPIC_MODEL" --tools Read,Glob,Grep \
             --permission-mode dontAsk --permission-prompts none --disable-slash-commands \
             --strict-mcp-config --mcp-config '{"mcpServers":{}}' --settings "$CLAUDE_SETTINGS" \
@@ -158,21 +153,13 @@ jobs:
           test ! -e "$canary/hook-ran" || { echo '::error::claude-canary-hook-ran'; exit 1; }
           test ! -e "$canary/mcp-ran" || { echo '::error::claude-canary-mcp-ran'; exit 1; }
           python3 -I ../trusted/.github/software-factory/control.py claude-result \
-            "Canary=$RUNNER_TEMP/claude-canary.jsonl" "$RUNNER_TEMP/claude-canary-review.json"
+            "Canary=$RUNNER_TEMP/claude-canary.json" "$RUNNER_TEMP/claude-canary-review.json"
           python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/claude-canary-review.json"
           ! grep -Fq CANARY_INSTRUCTION "$RUNNER_TEMP/claude-canary-review.json"
           grep -Fq '"verdict": "approve"' "$RUNNER_TEMP/claude-canary-review.json" || { echo '::error::claude-canary-invalid'; exit 1; }
       - name: Review the pull request
         working-directory: candidate
         env:
-          ANTHROPIC_BASE_URL: ${{ vars.FACTORY_REVIEW_BASE_URL }}
-          ANTHROPIC_API_KEY: ${{ secrets.FACTORY_REVIEW_API_KEY }}
-          ANTHROPIC_AUTH_TOKEN: ${{ secrets.FACTORY_REVIEW_API_KEY }}
-          ANTHROPIC_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
-          ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
-          ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
-          ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
-          CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.FACTORY_REVIEW_MODEL }}
           HEAD: ${{ needs.identify.outputs.head }}
           BASE: ${{ needs.identify.outputs.base }}
           SPEC: ${{ needs.identify.outputs.spec }}
@@ -190,8 +177,8 @@ jobs:
             prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt "final-$axis" "$BASE" "$HEAD")
             status=0
             python3 -I ../trusted/.github/software-factory/supervisor.py \
-              "$RUNNER_TEMP/final-$axis.jsonl" "$RUNNER_TEMP/final-$axis-summary.txt" "final-$axis" 600 -- \
-              claude -p --bare --restricted --no-session-persistence --output-format stream-json --verbose \
+              "$RUNNER_TEMP/final-$axis.json" "$RUNNER_TEMP/final-$axis-summary.txt" "final-$axis" 600 -- \
+              claude -p --bare --restricted --no-session-persistence --output-format json \
               --json-schema "$schema" --model "$ANTHROPIC_MODEL" --tools Read,Glob,Grep \
               --permission-mode dontAsk --permission-prompts none --disable-slash-commands \
               --strict-mcp-config --mcp-config '{"mcpServers":{}}' --settings "$CLAUDE_SETTINGS" \
@@ -200,7 +187,7 @@ jobs:
               echo "::error::claude-exit-$status"
               exit "$status"
             fi
-            files+=("${axis^}=$RUNNER_TEMP/final-$axis.jsonl")
+            files+=("${axis^}=$RUNNER_TEMP/final-$axis.json")
           done
           python3 -I ../trusted/.github/software-factory/control.py claude-result "${files[@]}" "$REVIEW_OUTPUT"
           python3 -I ../trusted/.github/software-factory/control.py scan-output "$REVIEW_OUTPUT"
