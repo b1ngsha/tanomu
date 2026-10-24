@@ -13,6 +13,32 @@ def require(condition, reason):
 COMMENT_BYTES = 60_000
 
 
+def pr_body(number, round_number, repository, run, template):
+    """Fill the pinned PR skill template from trusted orchestration facts only."""
+    templates = re.findall(r"```markdown\n(.*?)```", template, re.DOTALL)
+    require(len(templates) == 1, "invalid-pr-template")
+    body = templates[0]
+    values = {
+        "<diagram, diff-sketch, or tree>": (
+            f"```text\nIssue #{number}\n  -> checked patch (round {round_number})\n"
+            "  -> independent Standards + Spec review\n  -> draft PR\n```\n\n"
+            f"Refs #{number}."),
+        "<screenshot/output/failing test run>": "implementation produced a candidate patch.",
+        "<screenshot/output/passing test run>": (
+            "format, lint, typecheck, admin build, database tests, patch scope checks and independent "
+            f"review passed in round {round_number}.\n\n"
+            f"Run: https://github.com/{repository}/actions/runs/{run}"),
+        "<one-way or two-way>": "requires human assessment",
+        "<one-word description>": "unassessed",
+    }
+    for placeholder, value in values.items():
+        require(body.count(placeholder) == 1, "invalid-pr-template")
+        body = body.replace(placeholder, value)
+    optional = "Human must mark Ready for review to trigger ordinary CI, inspect the diff, perform acceptance and decide whether to merge. Acceptance has not been performed."
+    body = body.replace("<optional: description>", optional)
+    body = body.replace("<optional: potential ramifications of merge>", "Follow the acceptance criteria in the frozen issue specification.")
+    require("<" not in body, "invalid-pr-template")
+    return body.rstrip() + "\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"
 
 
 def split(text, budget):

@@ -9,6 +9,22 @@ spec.loader.exec_module(p)
 
 
 class PublicationTest(unittest.TestCase):
+    def test_pr_body_uses_only_trusted_facts_in_the_pinned_template(self):
+        template = (Path(__file__).with_name("skills") / "pr/SKILL.md").read_text()
+        body = p.pr_body("17", "3", "owner/tanomu", "123", template)
+        self.assertLess(body.index("## Summary"), body.index("## Evidence"))
+        self.assertLess(body.index("## Evidence"), body.index("## Merge Danger"))
+        self.assertIn("Issue #17\n  -> checked patch (round 3)", body)
+        self.assertIn("Refs #17.", body)
+        self.assertIn("**Door:** requires human assessment", body)
+        self.assertIn("**Blast Radius:** unassessed", body)
+        self.assertIn("format, lint, typecheck, admin build, database tests", body)
+        self.assertIn("Acceptance has not been performed.", body)
+        self.assertTrue(body.endswith("🤖 Generated with [Claude Code](https://claude.com/claude-code)\n"))
+        for invalid in ("## Summary", template.replace("<one-way or two-way>", "<unexpected>")):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "invalid-pr-template"):
+                    p.pr_body("17", "2", "owner/tanomu", "123", invalid)
 
     def test_compact_summary_keeps_only_findings_without_inline_delivery(self):
         identity = {"run": "1", "head": "a" * 40, "base": "b" * 40, "issues": [],
