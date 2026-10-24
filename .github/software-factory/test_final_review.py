@@ -74,8 +74,8 @@ class FinalIdentifyTest(TaskDirectory):
                 mock.patch.object(control.subprocess, "check_output", return_value=pages):
             return function("2", event, str(self.output))
 
-    def comment(self, part, total, digest="d" * 16, head=HEAD, user=BOT, prefix=""):
-        marker = f"<!-- tanomu-final-review head={head} digest={digest} part={part}/{total} -->"
+    def comment(self, part, total, digest="d" * 16, head=HEAD, user=BOT, prefix="", inline="none"):
+        marker = f"<!-- tanomu-final-review head={head} digest={digest} part={part}/{total} inline={inline} -->"
         self.comments.append({"user": user, "body": f"{prefix}{marker}\nbody"})
 
     def test_writes_linked_issues_with_trusted_review_requirements(self):
@@ -127,12 +127,26 @@ class FinalIdentifyTest(TaskDirectory):
         self.assertEqual(self.identify()["skip"], "true")
         self.assertEqual(self.identify("workflow_dispatch")["skip"], "false")
 
+    def test_complete_summary_waits_for_its_inline_review(self):
+        location = "e" * 16
+        self.comment(1, 1, inline=location)
+        self.assertEqual(self.identify()["skip"], "false")
+        with mock.patch.object(control, "posted_inline", return_value={(HEAD, location)}):
+            self.assertEqual(self.identify()["skip"], "true")
+        with mock.patch.object(control, "posted_inline", return_value=set()):
+            self.assertEqual(self.identify()["skip"], "false")
+
+    def test_legacy_summary_is_recovered_before_assuming_completion(self):
+        self.comments = [{"user": BOT, "body":
+            f"<!-- tanomu-final-review head={HEAD} digest={'d' * 16} part=1/1 -->"}]
+        self.assertEqual(self.identify()["skip"], "false")
+
     def test_final_head_records_bot_markers_only(self):
         self.comment(1, 2)
         self.comment(2, 2, user={"login": "github-actions[bot]", "type": "User"})
         self.identify(function=lambda number, _, directory: control.final_head(number, directory))
         self.assertEqual(json.loads(self.output.read_text()),
-                         {"pr": 2, "head": HEAD, "eligible": True, "posted": [[HEAD, "d" * 16, 1, 2]]})
+                         {"pr": 2, "head": HEAD, "eligible": True, "posted": [[HEAD, "d" * 16, 1, 2, "none"]]})
         # A PR closed or retargeted after its review is recorded, not rejected.
         self.pull.update(state="closed")
         self.pull["base"]["ref"] = "next"
@@ -235,7 +249,7 @@ class FinalCommentsTest(unittest.TestCase):
             preface, counter, chunk = re.fullmatch(r"(.*?)(Part \d+/\d+)\n\n(.*)", rest, re.DOTALL).groups()
             self.assertEqual(counter, f"Part {match[3]}/{match[4]}")
             self.assertIn(f"{REPO}/actions/runs/123", preface)
-            parsed.append(([match[1], match[2], int(match[3]), int(match[4])], preface, chunk))
+            parsed.append(([match[1], match[2], int(match[3]), int(match[4]), match[5]], preface, chunk))
         return parsed
 
     def test_publishes_the_structured_findings_once(self):
@@ -255,7 +269,7 @@ class FinalCommentsTest(unittest.TestCase):
         self.write({"verdict": "approve", "findings": [], "advisory": [finding]})
         parts = self.parts(self.comments())
         self.assertGreater(len(parts), 3)
-        self.assertEqual([marker[2:] for marker, _, _ in parts], [[i, len(parts)] for i in range(1, len(parts) + 1)])
+        self.assertEqual([marker[2:4] for marker, _, _ in parts], [[i, len(parts)] for i in range(1, len(parts) + 1)])
         self.assertEqual("".join(chunk for _, _, chunk in parts),
                          "### Findings\n\n- Advisory — " + finding.replace("@", "@​") + "\n")
         missing = self.parts(self.comments([marker for marker, _, _ in parts if marker[2] not in (2, 3)]))
