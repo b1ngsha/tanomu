@@ -330,12 +330,12 @@ class InlineFindingsTest(unittest.TestCase):
 """)
 
     def review(self, findings):
-        events = self.directory / "events.jsonl"
-        events.write_text(json.dumps({"type": "result", "subtype": "success",
-                                      "structured_output": {"findings": findings}}) + "\n")
+        result = self.directory / "result.json"
+        result.write_text(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                                      "structured_output": {"findings": findings}}))
         output = self.directory / "review.json"
         with mock.patch.dict(os.environ, {"FINAL_PATCH": str(self.patch)}):
-            return control.claude_review_result([("Standards", str(events))], str(output))
+            return control.claude_review_result([("Standards", str(result))], str(output))
 
     def test_keeps_only_locations_that_exist_in_the_diff(self):
         report = self.review([
@@ -362,45 +362,63 @@ class ClaudeResultTest(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
-    def write(self, events):
-        path = self.directory / "events.jsonl"
-        path.write_text("\n".join(json.dumps(event) for event in events) + "\n")
+    def write(self, event):
+        path = self.directory / "result.json"
+        path.write_text(json.dumps(event))
         return str(path)
 
-    def assertReason(self, events, reason):
-        with self.assertRaisesRegex(ValueError, f"^{reason}$"):
-            control.claude_result(self.write(events))
-
-    def test_reads_only_the_terminal_structured_result(self):
-        findings = control.claude_result(self.write([
-            {"type": "system", "subtype": "init"}, "not json telemetry",
-            {"type": "result", "subtype": "success", "is_error": False,
-             "structured_output": {"findings": [{"blocking": True, "finding": "bug"}]}},
-        ]))
-        self.assertEqual(findings, [{"blocking": True, "finding": "bug"}])
+    def test_reads_native_structured_and_text_results(self):
+        filename = self.write({"type": "result", "subtype": "success", "is_error": False,
+                               "structured_output": {"findings": [{"blocking": True, "finding": "bug"}]},
+                               "result": "Done."})
+        self.assertEqual(control.claude_findings(filename), [{"blocking": True, "finding": "bug"}])
+        output = self.directory / "retro.md"
+        control.claude_text(filename, output)
+        self.assertEqual(output.read_text(), "Done.")
 
     def test_rejects_incomplete_or_unstructured_results(self):
         base = {"type": "result", "subtype": "success", "is_error": False}
-        for events, reason in (([base], "no-structured-output"),
-                               ([{**base, "structured_output": {"findings": []}}, {"type": "assistant"}], "no-result"),
-                               ([], "no-result")):
-            with self.subTest(reason=reason):
-                self.assertReason(events, reason)
+        for event, reason in ((base, "no-structured-output"), ({"type": "assistant"}, "no-result")):
+            with self.subTest(reason=reason), self.assertRaisesRegex(ValueError, f"^{reason}$"):
+                control.claude_findings(self.write(event))
+        (self.directory / "empty.json").write_text("")
+        with self.assertRaisesRegex(ValueError, "^invalid-claude-result$"):
+            control.claude_result(self.directory / "empty.json")
 
     def test_rejects_provider_failure_and_structured_output_exhaustion(self):
         for subtype, reason in (("error_max_structured_output_retries", "structured-output-retries"),
                                 ("error_max_turns", "max-turns"), ("error_api", "provider-error")):
-            with self.subTest(subtype=subtype):
-                self.assertReason([{"type": "result", "subtype": subtype, "is_error": True}], reason)
+            with self.subTest(subtype=subtype), self.assertRaisesRegex(ValueError, f"^{reason}$"):
+                control.claude_result(self.write({"type": "result", "subtype": subtype, "is_error": True}))
 
-    def test_rejects_duplicate_keys_and_invalid_findings(self):
-        path = self.directory / "duplicate.jsonl"
-        path.write_text('{"type":"result","subtype":"success","structured_output":{"findings":[],"findings":[]}}\n')
-        with self.assertRaisesRegex(ValueError, "^invalid-claude-events$"):
-            control.claude_result(str(path))
-        self.assertReason([{"type": "result", "subtype": "success",
-                            "structured_output": {"findings": [{"blocking": "yes", "finding": "x"}]}}],
-                          "invalid-findings")
+    def test_rejects_duplicate_keys_invalid_findings_and_empty_text(self):
+        path = self.directory / "duplicate.json"
+        path.write_text('{"type":"result","subtype":"success","structured_output":{"findings":[],"findings":[]}}')
+        with self.assertRaisesRegex(ValueError, "^invalid-claude-result$"):
+            control.claude_result(path)
+        with self.assertRaisesRegex(ValueError, "^invalid-findings$"):
+            control.claude_findings(self.write({"type": "result", "subtype": "success", "is_error": False,
+                "structured_output": {"findings": [{"blocking": "yes", "finding": "x"}]}}))
+        with self.assertRaisesRegex(ValueError, "^invalid-result-text$"):
+            control.claude_text(self.write({"type": "result", "subtype": "success", "is_error": False,
+                                            "result": " \n"}), self.directory / "retro.md")
+
+    def test_copies_only_a_named_native_transcript(self):
+        session = "123e4567-e89b-42d3-a456-426614174000"
+        source = self.directory / "config/projects/factory" / f"{session}.jsonl"
+        source.parent.mkdir(parents=True)
+        source.write_text('{"native":true}\n')
+        output = self.directory / "evidence.jsonl"
+        with mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.directory / "config")}):
+            control.claude_transcript(session, output)
+            self.assertEqual(output.read_text(), source.read_text())
+            with self.assertRaisesRegex(ValueError, "^invalid-session-id$"):
+                control.claude_transcript("../auth", output)
+            source.unlink()
+            with self.assertRaisesRegex(ValueError, "^missing-transcript$"):
+                control.claude_transcript(session, output)
+
+
 
 
 class ClaudeConfigureTest(unittest.TestCase):
@@ -408,9 +426,9 @@ class ClaudeConfigureTest(unittest.TestCase):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.github_env = self.directory / "github-env"
         self.enterContext(mock.patch.dict(os.environ, {
-            "FACTORY_REVIEW_BASE_URL": "https://api.deepseek.com/anthropic",
-            "FACTORY_REVIEW_MODEL": "deepseek-flash",
-            "FACTORY_REVIEW_API_KEY": SECRET,
+            "ANTHROPIC_BASE_URL": "https://api.deepseek.com/anthropic",
+            "ANTHROPIC_MODEL": "deepseek-flash",
+            "ANTHROPIC_API_KEY": SECRET,
             "GITHUB_ENV": str(self.github_env),
         }))
 
@@ -423,7 +441,7 @@ class ClaudeConfigureTest(unittest.TestCase):
         self.assertEqual(auth.stat().st_mode & 0o777, 0o600)
         self.assertEqual(json.loads(auth.read_text()), {"key": SECRET})
         settings = json.loads((self.directory / "claude/config/settings.json").read_text())
-        self.assertTrue(settings["blockReadsOutsideWorkingDirectories"])
+        self.assertTrue(settings["permissions"]["blockReadsOutsideWorkingDirectories"])
         self.assertEqual(settings["permissions"]["allow"], ["Read", "Glob", "Grep"])
         self.assertTrue(any("Read(//" in item for item in settings["permissions"]["deny"]))
 
@@ -432,7 +450,7 @@ class ClaudeConfigureTest(unittest.TestCase):
                                  ("https://example.test/anthropic", "invalid-provider"),
                                  ("https://api.deepseek.com/anthropic?key=leak", "invalid-provider")):
             with self.subTest(base_url=base_url), mock.patch.dict(os.environ,
-                    {"FACTORY_REVIEW_BASE_URL": base_url}):
+                    {"ANTHROPIC_BASE_URL": base_url}):
                 with self.assertRaisesRegex(ValueError, f"^{reason}$"):
                     control.configure_claude(str(self.directory / "claude"))
 
@@ -440,15 +458,17 @@ class ClaudeConfigureTest(unittest.TestCase):
 class OptionalSpecTest(unittest.TestCase):
     def test_review_without_spec_axis(self):
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        events = directory / "standards.jsonl"
-        events.write_text(json.dumps({"type": "text", "part": {"text": '{"findings":[{"blocking":true,'
-                                                                       '"finding":"x"}]}'}}) + "\n")
+        result = directory / "standards.json"
+        result.write_text(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+            "structured_output": {"findings": [{"blocking": True, "finding": "x"}]}}))
         output = directory / "review.json"
-        result = subprocess.run([sys.executable, "-I", str(CONTROL), "review", str(events)],
-                                capture_output=True, text=True, env={**os.environ, "REVIEW_OUTPUT": str(output)})
-        self.assertEqual((result.returncode, result.stdout), (0, "request_changes\n"), result.stderr)
-        self.assertEqual(json.loads(output.read_text())["findings"], ["Standards: x"])
-        self.assertNotIn("Spec", (directory / "review.md").read_text())
+        completed = subprocess.run([sys.executable, "-I", str(CONTROL), "claude-result",
+                                    f"Standards={result}", str(output)], capture_output=True, text=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(json.loads(output.read_text()),
+                         {"verdict": "request_changes", "findings": ["Standards: x"], "advisory": []})
+        self.assertFalse((directory / "review.md").exists())
+
 
 
 if __name__ == "__main__":
