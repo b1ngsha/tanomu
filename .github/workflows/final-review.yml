@@ -178,6 +178,8 @@ jobs:
           BASE: ${{ needs.identify.outputs.base }}
           SPEC: ${{ needs.identify.outputs.spec }}
           REVIEW_OUTPUT: ${{ runner.temp }}/final-review/review.json
+          # Locations are accepted only where this diff can actually anchor a comment.
+          FINAL_PATCH: .factory-input/final.patch
         run: |
           set -euo pipefail
           mkdir "$RUNNER_TEMP/final-review"
@@ -276,12 +278,19 @@ jobs:
           set -euo pipefail
           python3 -I .github/software-factory/control.py final-head "$PR" "$RUNNER_TEMP/current.json"
           # Skips a moved head and the parts of this report that are already posted.
+          gh api --paginate --slurp "repos/$GH_REPO/pulls/$PR/reviews?per_page=100" > "$RUNNER_TEMP/reviews.json"
           python3 -I .github/software-factory/control.py final-comments "$RUNNER_TEMP/review" \
-            "$RUNNER_TEMP/input/identity.json" "$RUNNER_TEMP/current.json" "$RUNNER_TEMP/comments"
+            "$RUNNER_TEMP/input/identity.json" "$RUNNER_TEMP/current.json" "$RUNNER_TEMP/comments" \
+            "$RUNNER_TEMP/reviews.json"
           shopt -s nullglob
           for file in "$RUNNER_TEMP/comments/"*.md; do
             gh pr comment "$PR" --body-file "$file"
           done
+          # One review holds every inline finding, so a rejected location fails the whole step
+          # instead of posting half of them.
+          if [ -f "$RUNNER_TEMP/comments/inline.json" ]; then
+            gh api --method POST "repos/$GH_REPO/pulls/$PR/reviews" --input "$RUNNER_TEMP/comments/inline.json" > /dev/null
+          fi
           # An unavailable review is posted so the PR shows why, then fails this check.
           if jq -e '.verdict == "unavailable"' "$RUNNER_TEMP/review/review.json" > /dev/null; then
             echo '::error::final-review-unavailable'

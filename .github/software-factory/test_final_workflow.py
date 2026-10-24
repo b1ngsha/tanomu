@@ -30,9 +30,10 @@ class FinalRunnerStepTest(unittest.TestCase):
 
     def review(self, claude, spec="true"):
         env = {"HEAD": HEAD, "BASE": BASE, "SPEC": spec, "ANTHROPIC_MODEL": "deepseek-flash",
-               "CLAUDE_SETTINGS": "settings.json"}
+               "CLAUDE_SETTINGS": "settings.json", "FINAL_PATCH": ".factory-input/final.patch"}
         files = {"temp/final-input/identity.json": '{"run":"42"}',
-                 "candidate/.factory-input/identity.json": '{"run":"forged"}'}
+                 "candidate/.factory-input/identity.json": '{"run":"forged"}',
+                 "candidate/.factory-input/final.patch": "+++ b/src/a.ts\n@@ -0,0 +1,2 @@\n+one\n+two\n"}
         return self.run_step("review", claude=claude, select="Review the pull request", env=env, files=files,
                              setup=lambda directory: env.update(
                                  REVIEW_OUTPUT=str(directory / "temp/final-review/review.json")))
@@ -63,7 +64,7 @@ class FinalRunnerStepTest(unittest.TestCase):
                     self.assertEqual(session[-1], control.prompt(f"final-{axis}", BASE, HEAD).rstrip("\n"))
                     self.assertIn("final.patch", session[-1])
                 review = json.loads(self.temp("final-review/review.json").read_text())
-                self.assertEqual(review, {"verdict": "request_changes", "advisory": [], "findings": [
+                self.assertEqual(review, {"verdict": "request_changes", "advisory": [], "inline": [], "findings": [
                     f"{axis.title()}: src/a.ts: breaks AGENTS.md" for axis in axes]})
                 self.assertTrue(self.temp("final-review/review.md").is_file())
                 self.assertEqual(json.loads(self.temp("final-review/identity.json").read_text()), {"run": "42"})
@@ -81,6 +82,16 @@ class FinalRunnerStepTest(unittest.TestCase):
                 review = json.loads(self.temp("final-review/review.json").read_text())
                 self.assertEqual((review["verdict"], review["unavailable"]), ("unavailable", [
                     {"axis": "Standards", "reason": reason}, {"axis": "Spec", "reason": reason}]))
+
+    def test_review_records_only_commentable_locations(self):
+        claude = self.result(subtype="success", is_error=False, structured_output={"findings": [
+            {"blocking": True, "finding": "bug", "path": "src/a.ts", "line": 2},
+            {"blocking": False, "finding": "not in the diff", "path": "src/a.ts", "line": 99}]})
+        result, _ = self.review(claude)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        review = json.loads(self.temp("final-review/review.json").read_text())
+        self.assertEqual(review["inline"], [{"axis": axis, "blocking": True, "finding": "bug",
+                                             "path": "src/a.ts", "line": 2} for axis in ("Standards", "Spec")])
 
     def test_sessions_are_always_recorded_and_scanned(self):
         for spec, axes in (("true", ["standards", "spec"]), ("false", ["standards"])):
@@ -165,7 +176,8 @@ class FinalRunnerStepTest(unittest.TestCase):
             self.assertRegex(body.split("\n", 1)[0], rf"<!-- tanomu-final-review head={HEAD} "
                                                      rf"digest=[0-9a-f]{{16}} part={part}/{len(bodies)} -->")
             self.assertLessEqual(len(body.encode()), 60_000)
-        self.assertTrue(all(call[:3] == ["pr", "comment", "17"] for call in self.calls("gh")[2:]))
+        self.assertTrue(all(call[:3] == ["pr", "comment", "17"]
+                            for call in self.calls("gh") if call[:1] == ["pr"]))
         self.assertIn(report.replace("@", "@​")[-500:], "".join(bodies))
         # A rerun after a partial post fills in only the missing parts.
         posted = [{"body": bodies[0], "user": {"login": "github-actions[bot]", "type": "Bot"}}]
@@ -180,6 +192,17 @@ class FinalRunnerStepTest(unittest.TestCase):
         self.assertIn("::error::final-review-unavailable", result.stdout)
         [body] = bodies
         self.assertIn("- **Unavailable** — Spec: timeout", body)
+
+    def test_publisher_submits_the_inline_review_after_the_summary(self):
+        result, bodies = self.publish(review=(("verdict", "request_changes"), ("findings", ["Standards: bug"]),
+            ("advisory", []), ("inline", [{"axis": "Standards", "blocking": True, "finding": "bug",
+                                          "path": "src/a.ts", "line": 2}])))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        calls = self.calls("gh")
+        post = next(call for call in calls if call[:3] == ["api", "--method", "POST"])
+        self.assertEqual(post[3], f"repos/{REPO}/pulls/17/reviews")
+        self.assertEqual(post[4:6], ["--input", str(self.directory / "temp/comments/inline.json")])
+        self.assertLess(calls.index(next(call for call in calls if call[:2] == ["pr", "comment"])), calls.index(post))
 
     def test_publisher_skips_a_moved_head(self):
         result, bodies = self.publish(head="c" * 40)
@@ -356,6 +379,16 @@ class FinalWorkflowContractTest(unittest.TestCase):
                     expression = re.sub(r"!(?!=)", "not ", expression)
                     gates.append(eval(expression.replace("&&", "and").replace("||", "or"), {"__builtins__": {}}))
                 self.assertEqual(tuple(gates), expected)
+
+    def test_inline_comments_are_validated_against_the_diff_and_deduped(self):
+        run = next(step["run"] for step in self.jobs["publish"]["steps"] if "gh pr comment" in step.get("run", ""))
+        order = ["control.py final-head", 'gh api --paginate --slurp "repos/$GH_REPO/pulls/$PR/reviews',
+                 "control.py final-comments", "gh pr comment", 'gh api --method POST "repos/$GH_REPO/pulls/$PR/reviews"']
+        self.assertEqual(sorted(order, key=run.index), order)
+        self.assertIn('"$RUNNER_TEMP/reviews.json"', run)
+        review = next(step for step in self.jobs["review"]["steps"] if step.get("name") == "Review the pull request")
+        self.assertEqual(review["env"]["FINAL_PATCH"], ".factory-input/final.patch")
+        self.assertNotIn("GH_TOKEN", json.dumps(self.jobs["review"]))
 
     def test_publisher_rechecks_the_head_before_posting(self):
         run = next(step["run"] for step in self.jobs["publish"]["steps"] if "gh pr comment" in step.get("run", ""))

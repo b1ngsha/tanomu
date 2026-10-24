@@ -51,6 +51,8 @@ class FinalRecoveryTest(unittest.TestCase):
             return self.record
         if path.endswith("/actions/workflows/final-review.yml"):
             return {"id": 9}
+        if path.endswith("/reviews?per_page=100"):
+            return []
         if path.endswith("/artifacts?name=final-review&per_page=100"):
             return {"artifacts": [self.artifact]}
         raise AssertionError(path)

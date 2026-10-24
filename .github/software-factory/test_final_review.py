@@ -215,12 +215,12 @@ class FinalCommentsTest(unittest.TestCase):
         (self.review / "review.json").write_text(json.dumps(result))
         (self.review / "review.md").write_text(markdown)
 
-    def comments(self, posted=(), head=HEAD, eligible=True):
+    def comments(self, posted=(), head=HEAD, eligible=True, reviews=None):
         current = {"pr": 2, "head": head, "eligible": eligible, "posted": list(posted)}
         for name, value in (("identity", self.identity), ("current", current)):
             (self.directory / f"{name}.json").write_text(json.dumps(value))
         fresh = control.final_comments(str(self.review), str(self.directory / "identity.json"),
-                                       str(self.directory / "current.json"), str(self.output))
+                                       str(self.directory / "current.json"), str(self.output), reviews=reviews)
         bodies = [path.read_bytes().decode() for path in sorted(self.output.glob("*.md"))] if fresh else None
         for path in self.output.glob("*.md"):
             path.unlink()
@@ -271,6 +271,30 @@ class FinalCommentsTest(unittest.TestCase):
         self.identity["run"] = "124"
         self.assertEqual(len(self.comments([marker for marker, _, _ in parts])), len(parts))
 
+    def test_posts_one_inline_review_and_dedupes_by_its_marker(self):
+        result = {"verdict": "request_changes", "findings": ["Standards: bug @owner"], "advisory": [],
+                  "inline": [{"axis": "Standards", "blocking": True, "finding": "bug @owner",
+                              "path": "src/a.ts", "line": 2}]}
+        self.write(result, "raw")
+        self.comments()
+        payload = json.loads((self.output / "inline.json").read_text())
+        self.assertEqual((payload["commit_id"], payload["event"]), (HEAD, "COMMENT"))
+        self.assertEqual(payload["comments"], [{"path": "src/a.ts", "line": 2, "side": "RIGHT",
+                                                "body": "**Standards · blocking** — bug @​owner"}])
+        marker = control.INLINE_MARKER.fullmatch(payload["body"].split("\n", 1)[0])
+        self.assertEqual(marker[1], HEAD)
+        (self.output / "inline.json").unlink()
+        # The workflow's own identical review suppresses a duplicate; anyone else's marker does not.
+        for user, expected in ((BOT, False), ({"login": "mallory", "type": "User"}, True)):
+            with self.subTest(user=user["login"]):
+                self.comments(reviews=[[{"body": payload["body"], "user": user}]])
+                self.assertEqual((self.output / "inline.json").exists(), expected)
+                (self.output / "inline.json").unlink(missing_ok=True)
+        # Findings without a location never produce an empty review.
+        self.write({"verdict": "approve", "findings": [], "advisory": [], "inline": []}, "")
+        self.comments()
+        self.assertFalse((self.output / "inline.json").exists())
+
     def test_stale_head_posts_nothing(self):
         self.assertIsNone(self.comments(eligible=False))
         self.assertIsNone(self.comments(head=OTHER))
@@ -293,6 +317,50 @@ class FinalCommentsTest(unittest.TestCase):
         self.comments(head=OTHER)
         result = subprocess.run(args, capture_output=True, text=True)
         self.assertEqual((result.returncode, result.stdout), (0, "::notice::final-review-stale\n"))
+
+
+class InlineFindingsTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.patch = self.directory / "final.patch"
+        self.patch.write_text("""diff --git a/src/a.ts b/src/a.ts
+--- a/src/a.ts
++++ b/src/a.ts
+@@ -1,2 +1,3 @@
+ context
+-old
++new one
++new two
+ tail
+""")
+
+    def review(self, findings):
+        events = self.directory / "events.jsonl"
+        events.write_text(json.dumps({"type": "result", "subtype": "success",
+                                      "structured_output": {"findings": findings}}) + "\n")
+        output = self.directory / "review.json"
+        with mock.patch.dict(os.environ, {"FINAL_PATCH": str(self.patch)}):
+            return control.claude_review_result([("Standards", str(events), "0")], str(output))
+
+    def test_keeps_only_locations_that_exist_in_the_diff(self):
+        report = self.review([
+            {"blocking": True, "finding": "bug", "path": "src/a.ts", "line": 2},
+            {"blocking": False, "finding": "added", "path": "src/a.ts", "line": 3},
+            {"blocking": False, "finding": "outside", "path": "src/a.ts", "line": 9},
+            {"blocking": False, "finding": "wrong file", "path": "src/b.ts", "line": 1},
+            {"blocking": False, "finding": "unlocated"},
+            {"blocking": False, "finding": "null", "path": None, "line": None},
+        ])
+        self.assertEqual(report["inline"], [
+            {"axis": "Standards", "blocking": True, "finding": "bug", "path": "src/a.ts", "line": 2},
+            {"axis": "Standards", "blocking": False, "finding": "added", "path": "src/a.ts", "line": 3}])
+        self.assertEqual(json.loads((self.directory / "review.json").read_text())["inline"], report["inline"])
+
+    def test_rejects_malformed_locations(self):
+        for item in ({"path": 1}, {"line": 0}, {"line": "2"}, {"path": " "}):
+            with self.subTest(item=item):
+                with self.assertRaisesRegex(ValueError, "^invalid-findings$"):
+                    control.validate_findings({"findings": [{"blocking": False, "finding": "x", **item}]})
 
 
 class ClaudeResultTest(unittest.TestCase):

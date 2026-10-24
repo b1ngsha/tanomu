@@ -266,6 +266,15 @@ Rerunning the publisher also fills missing parts from its existing report. A mov
 head makes the report stale and prevents publication. Manual dispatch always
 requests a fresh review.
 
+Findings may carry a repository-relative path and a new-file line number. Only
+locations that exist in the reviewed diff are kept; the rest stay in the summary
+text. After posting the summary, the publisher submits all located findings as one
+PR review with inline comments (`COMMENT`, never an approval or a change request),
+so a rejected location fails the step rather than posting half of them. A marker
+in that review's body deduplicates identical findings on reruns and during
+recovery; only `github-actions[bot]` markers count. Findings too large for one
+comment remain in the losslessly split summary.
+
 This review is advisory: it submits no GitHub Review, changes no labels or PR
 state, starts no repair, and is not a required merge check. The maintainer still
 inspects CI and decides Ready for review and merge. Factory retro neither waits
