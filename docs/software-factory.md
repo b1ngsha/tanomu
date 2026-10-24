@@ -17,7 +17,7 @@ The implementation lifecycle is:
 ```text
 ready-for-agent + agent:implement -> implementing
   -> round: implement -> format + checks -> Standards review + Spec review
-       check failure or blocking finding -> next round (four rounds in total)
+       check failure or blocking finding -> next round (three rounds in total)
   -> draft PR -> ready-for-human
        -> independent final PR review -> advisory comments
   -> needs-human (authorization, patch validation, credential or infrastructure failure, or budget exhausted)
@@ -80,7 +80,7 @@ reranked. Only a blocking finding requests changes. Smells are always advisory.
 All findings from every completed round are rendered from `review.json` and published
 as comments after handoff, including earlier rounds that requested changes; no
 second review-Markdown response is generated. Both kinds of repair share one budget
-of four rounds. Repair is not a blind retry: every round is checked again, and only
+of three rounds: the initial attempt and two repairs. Repair is not a blind retry: every round is checked again, and only
 the patch that passed checks and review is published.
 
 Authorization, patch-validation, credential-scan, implementer-error and infrastructure failures

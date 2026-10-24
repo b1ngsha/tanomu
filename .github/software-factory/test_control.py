@@ -465,7 +465,7 @@ class FeedbackTest(GateTest):
 
     def test_terminal_report_missing_artifacts_and_safe_check_detail(self):
         jobs = {name: {"result": "skipped", "outputs": {}} for name in
-                ("claim", "handoff", "round1", "round2", "round3", "round4")}
+                ("claim", "handoff", "round1", "round2", "round3")}
         jobs["claim"]["result"] = "success"
         jobs["round1"]["result"] = "failure"
         with mock.patch.dict(os.environ, {"OUTCOMES": json.dumps(jobs)}), mock.patch.object(control.subprocess, "run"), mock.patch.object(control, "status_comment") as comment:
@@ -474,6 +474,19 @@ class FeedbackTest(GateTest):
         self.assertIn("Reason: round-failed", comment.call_args.args[1])
         self.assertIn("check-failed=lint", control.round_status({"verify": {"outputs": {"failed_check": "lint"}}}))
         self.assertNotIn(SECRET, control.round_status({"verify": {"outputs": {"failed_check": SECRET}}}))
+
+    def test_third_round_exhausts_the_shared_budget(self):
+        for outcome, reason in (("checks_failed", "checks-exhausted"),
+                                ("request_changes", "rework-exhausted")):
+            jobs = {name: {"result": "success", "outputs": {}} for name in
+                    ("claim", "round1", "round2", "round3", "handoff")}
+            jobs["handoff"]["result"] = "skipped"
+            jobs["round3"]["outputs"]["outcome"] = outcome
+            with mock.patch.dict(os.environ, {"OUTCOMES": json.dumps(jobs)}), \
+                    mock.patch.object(control.subprocess, "run"), \
+                    mock.patch.object(control, "status_comment") as comment:
+                control.terminal_report("1", str(self.out))
+            self.assertIn(f"Reason: {reason}", comment.call_args.args[1])
 
     def test_round_states_preserve_success_and_explicit_not_started(self):
         jobs = {"implement": {"result": "success"}, "verify": {"result": "success"},
@@ -1066,7 +1079,7 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(trigger["workflow_call"].get("secrets"), {
             "AGENT_API_KEY": {"required": True},
         })
-        for name in ("round1", "round2", "round3", "round4"):
+        for name in ("round1", "round2", "round3"):
             with self.subTest(round=name):
                 self.assertEqual(self.implement["jobs"][name].get("secrets"), {
                     "AGENT_API_KEY": "${{ secrets.AGENT_API_KEY }}",
@@ -1082,7 +1095,7 @@ class WorkflowContractTest(unittest.TestCase):
     def test_repairable_outcomes_reach_every_later_round(self):
         jobs = self.implement["jobs"]
         rounds = sorted(name for name in jobs if name.startswith("round"))
-        self.assertEqual(rounds, ["round1", "round2", "round3", "round4"])
+        self.assertEqual(rounds, ["round1", "round2", "round3"])
         for previous, current in zip(rounds, rounds[1:]):
             with self.subTest(round=current):
                 self.assertEqual(jobs[current]["needs"], previous)
@@ -1237,7 +1250,7 @@ class WorkflowContractTest(unittest.TestCase):
 
     def test_review_publish_holds_no_model_secret(self):
         publish = self.implement["jobs"]["publish-reviews"]
-        self.assertEqual(set(publish["needs"]), {"claim", "round1", "round2", "round3", "round4", "handoff"})
+        self.assertEqual(set(publish["needs"]), {"claim", "round1", "round2", "round3", "handoff"})
         self.assertIn("always()", publish["if"])
         self.assertIn("needs.claim.result == 'success'", publish["if"])
         self.assertNotIn("secrets", str(publish))

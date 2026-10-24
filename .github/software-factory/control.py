@@ -311,10 +311,10 @@ def terminal_report(number, directory):
         reason = "handoff-failed"
     elif any(job["result"] == "cancelled" for job in jobs.values()):
         reason = "cancelled"
-    elif jobs["round4"]["outputs"].get("outcome") in ("checks_failed", "request_changes"):
-        reason = {"checks_failed": "checks-exhausted", "request_changes": "rework-exhausted"}[jobs["round4"]["outputs"]["outcome"]]
+    elif jobs["round3"]["outputs"].get("outcome") in ("checks_failed", "request_changes"):
+        reason = {"checks_failed": "checks-exhausted", "request_changes": "rework-exhausted"}[jobs["round3"]["outputs"]["outcome"]]
     lines = [f"Factory status: {state}. Reason: {reason}."]
-    for n in range(1, 5):
+    for n in range(1, 4):
         if jobs[f"round{n}"]["result"] == "skipped":
             continue
         try:
