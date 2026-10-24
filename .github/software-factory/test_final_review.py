@@ -209,11 +209,10 @@ class FinalCommentsTest(unittest.TestCase):
         os.environ.pop("FACTORY_AUTH_FILE", None)
         self.identity = {"pr": 2, "head": HEAD, "base": BASE, "issues": [1, 3], "run": "123"}
         self.write({"verdict": "request_changes", "findings": ["Spec: missing @owner"],
-                    "advisory": ["Standards: smell"]}, "### Spec — full response\n\nraw @team reply\n")
+                    "advisory": ["Standards: smell"]})
 
-    def write(self, result, markdown):
+    def write(self, result):
         (self.review / "review.json").write_text(json.dumps(result))
-        (self.review / "review.md").write_text(markdown)
 
     def comments(self, posted=(), head=HEAD, eligible=True, reviews=None):
         current = {"pr": 2, "head": head, "eligible": eligible, "posted": list(posted)}
@@ -239,43 +238,39 @@ class FinalCommentsTest(unittest.TestCase):
             parsed.append(([match[1], match[2], int(match[3]), int(match[4])], preface, chunk))
         return parsed
 
-    def test_publishes_findings_summary_then_verbatim_response(self):
+    def test_publishes_the_structured_findings_once(self):
         [(marker, preface, chunk)] = self.parts(self.comments())
         self.assertEqual(chunk, "### Findings\n\n- **Blocking** — Spec: missing @​owner\n"
-                                "- Advisory — Standards: smell\n\n### Spec — full response\n\nraw @​team reply\n")
+                                "- Advisory — Standards: smell\n")
         self.assertEqual(marker[1], hashlib.sha256((preface + chunk).encode()).hexdigest()[:16])
         self.assertIn("Spec: #1, #3.", preface)
         self.identity["issues"] = []
-        self.write({"verdict": "approve", "findings": [], "advisory": []}, "")
+        self.write({"verdict": "approve", "findings": [], "advisory": []})
         [(_, preface, chunk)] = self.parts(self.comments())
         self.assertIn("only the Standards axis ran", preface)
-        self.assertEqual(chunk, "### Findings\n\nNo findings.\n\n")
+        self.assertEqual(chunk, "### Findings\n\nNo findings.\n")
 
     def test_large_unicode_report_splits_losslessly_and_skips_posted_parts(self):
-        markdown = mixed_text(250_000)
-        self.write({"verdict": "approve", "findings": [], "advisory": []}, markdown)
+        finding = mixed_text(250_000)
+        self.write({"verdict": "approve", "findings": [], "advisory": [finding]})
         parts = self.parts(self.comments())
         self.assertGreater(len(parts), 3)
         self.assertEqual([marker[2:] for marker, _, _ in parts], [[i, len(parts)] for i in range(1, len(parts) + 1)])
         self.assertEqual("".join(chunk for _, _, chunk in parts),
-                         "### Findings\n\nNo findings.\n\n" + markdown.replace("@", "@​"))
-        # A rerun with the same report fills in only the missing parts, in order.
+                         "### Findings\n\n- Advisory — " + finding.replace("@", "@​") + "\n")
         missing = self.parts(self.comments([marker for marker, _, _ in parts if marker[2] not in (2, 3)]))
         self.assertEqual([marker[2] for marker, _, _ in missing], [2, 3])
         self.assertEqual(self.comments([marker for marker, _, _ in parts]), [])
-        # A different report gets a new digest, so the whole set is posted again.
-        self.write({"verdict": "approve", "findings": [], "advisory": []}, markdown + "x")
+        self.write({"verdict": "approve", "findings": [], "advisory": [finding + "x"]})
         self.assertEqual(len(self.parts(self.comments([marker for marker, _, _ in parts]))), len(parts))
-        # So does an identical report from a new run, such as a manual re-review.
-        self.write({"verdict": "approve", "findings": [], "advisory": []}, markdown)
+        self.write({"verdict": "approve", "findings": [], "advisory": [finding]})
         self.identity["run"] = "124"
         self.assertEqual(len(self.comments([marker for marker, _, _ in parts])), len(parts))
 
     def test_posts_one_inline_review_and_dedupes_by_its_marker(self):
-        result = {"verdict": "request_changes", "findings": ["Standards: bug @owner"], "advisory": [],
-                  "inline": [{"axis": "Standards", "blocking": True, "finding": "bug @owner",
-                              "path": "src/a.ts", "line": 2}]}
-        self.write(result, "raw")
+        self.write({"verdict": "request_changes", "findings": ["Standards: bug @owner"], "advisory": [],
+                    "inline": [{"axis": "Standards", "blocking": True, "finding": "bug @owner",
+                                "path": "src/a.ts", "line": 2}]})
         self.comments()
         payload = json.loads((self.output / "inline.json").read_text())
         self.assertEqual((payload["commit_id"], payload["event"]), (HEAD, "COMMENT"))
@@ -284,14 +279,12 @@ class FinalCommentsTest(unittest.TestCase):
         marker = control.INLINE_MARKER.fullmatch(payload["body"].split("\n", 1)[0])
         self.assertEqual(marker[1], HEAD)
         (self.output / "inline.json").unlink()
-        # The workflow's own identical review suppresses a duplicate; anyone else's marker does not.
         for user, expected in ((BOT, False), ({"login": "mallory", "type": "User"}, True)):
             with self.subTest(user=user["login"]):
                 self.comments(reviews=[[{"body": payload["body"], "user": user}]])
                 self.assertEqual((self.output / "inline.json").exists(), expected)
                 (self.output / "inline.json").unlink(missing_ok=True)
-        # Findings without a location never produce an empty review.
-        self.write({"verdict": "approve", "findings": [], "advisory": [], "inline": []}, "")
+        self.write({"verdict": "approve", "findings": [], "advisory": [], "inline": []})
         self.comments()
         self.assertFalse((self.output / "inline.json").exists())
 
@@ -300,11 +293,13 @@ class FinalCommentsTest(unittest.TestCase):
         self.assertIsNone(self.comments(head=OTHER))
         self.assertFalse(self.output.exists())
 
-    def test_refuses_credentials_in_either_file(self):
-        for result, markdown in (({"verdict": "approve", "findings": [f"x {SECRET}"], "advisory": []}, ""),
-                                 ({"verdict": "approve", "findings": [], "advisory": []}, mixed_text(90_000) + SECRET)):
-            with self.subTest(markdown=len(markdown)):
-                self.write(result, markdown)
+    def test_refuses_credentials_in_summary_or_inline_comments(self):
+        for result in ({"verdict": "approve", "findings": [f"x {SECRET}"], "advisory": []},
+                       {"verdict": "approve", "findings": [], "advisory": [],
+                        "inline": [{"axis": "Standards", "blocking": False, "finding": SECRET,
+                                    "path": "src/a.ts", "line": 2}]}):
+            with self.subTest(inline="inline" in result):
+                self.write(result)
                 self.assertRaisesRegex(ValueError, "^credential-pattern-in-artifact$", self.comments)
 
     def test_cli_reports_stale_head_and_writes_comments(self):
@@ -340,7 +335,7 @@ class InlineFindingsTest(unittest.TestCase):
                                       "structured_output": {"findings": findings}}) + "\n")
         output = self.directory / "review.json"
         with mock.patch.dict(os.environ, {"FINAL_PATCH": str(self.patch)}):
-            return control.claude_review_result([("Standards", str(events), "0")], str(output))
+            return control.claude_review_result([("Standards", str(events))], str(output))
 
     def test_keeps_only_locations_that_exist_in_the_diff(self):
         report = self.review([
@@ -376,22 +371,20 @@ class ClaudeResultTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, f"^{reason}$"):
             control.claude_result(self.write(events))
 
-    def test_accepts_successful_structured_output(self):
-        output, findings = control.claude_result(self.write([
-            {"type": "system", "subtype": "init"},
+    def test_reads_only_the_terminal_structured_result(self):
+        findings = control.claude_result(self.write([
+            {"type": "system", "subtype": "init"}, "not json telemetry",
             {"type": "result", "subtype": "success", "is_error": False,
              "structured_output": {"findings": [{"blocking": True, "finding": "bug"}]}},
         ]))
-        self.assertEqual(output["findings"], findings)
+        self.assertEqual(findings, [{"blocking": True, "finding": "bug"}])
 
     def test_rejects_incomplete_or_unstructured_results(self):
         base = {"type": "result", "subtype": "success", "is_error": False}
-        for event, reason in ((base, "no-structured-output"),
-                              ({**base, "structured_output": {"findings": []}}, "no-result")):
+        for events, reason in (([base], "no-structured-output"),
+                               ([{**base, "structured_output": {"findings": []}}, {"type": "assistant"}], "no-result"),
+                               ([], "no-result")):
             with self.subTest(reason=reason):
-                events = [event] if reason == "no-result" else [{"type": "system"}, event]
-                if reason == "no-result":
-                    events.append({"type": "assistant"})
                 self.assertReason(events, reason)
 
     def test_rejects_provider_failure_and_structured_output_exhaustion(self):
@@ -408,27 +401,6 @@ class ClaudeResultTest(unittest.TestCase):
         self.assertReason([{"type": "result", "subtype": "success",
                             "structured_output": {"findings": [{"blocking": "yes", "finding": "x"}]}}],
                           "invalid-findings")
-
-    def test_writes_unavailable_report_without_model_text(self):
-        failed = self.write([{"type": "result", "subtype": "error_max_structured_output_retries"}])
-        output = self.directory / "review.json"
-        report = control.claude_review_result([("Standards", failed, "0")], str(output))
-        self.assertEqual(report, {"verdict": "unavailable", "findings": [], "advisory": [],
-                                  "unavailable": [{"axis": "Standards", "reason": "structured-output-retries"}]})
-        self.assertNotIn("error_max", (output.with_suffix(".md")).read_text())
-
-    def test_unavailable_report_keeps_the_other_axis_findings(self):
-        failed = self.write([{"type": "result", "subtype": "error_api", "is_error": True}])
-        reviewed = self.directory / "reviewed.jsonl"
-        reviewed.write_text(json.dumps({"type": "result", "subtype": "success", "structured_output": {
-            "findings": [{"blocking": False, "finding": "smell"}]}}) + "\n")
-        output = self.directory / "review.json"
-        report = control.claude_review_result([("Standards", str(reviewed), "0"), ("Spec", failed, "0")], str(output))
-        self.assertEqual(report, {"verdict": "unavailable", "findings": [], "advisory": ["Standards: smell"],
-                                  "unavailable": [{"axis": "Spec", "reason": "provider-error"}]})
-        markdown = output.with_suffix(".md").read_text()
-        self.assertIn("### Standards — full response", markdown)
-        self.assertIn("### Spec — unavailable (provider-error)", markdown)
 
 
 class ClaudeConfigureTest(unittest.TestCase):

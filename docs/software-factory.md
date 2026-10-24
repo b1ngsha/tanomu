@@ -249,13 +249,13 @@ this repository's issues referenced by
 `Closes`, `Fixes`, `Resolves` or `Refs #N` in the PR body; their captured bodies supply this review's specification.
 Without a linked issue, Spec is skipped and the report explains why. Each axis runs
 in a fresh session under a 600-second budget and returns schema-validated structured
-output, which `control.py` validates again. An axis that times out, errors or
-returns no valid result is reported as unavailable with a fixed reason; the other
-axis's findings are kept, and the publisher posts the report and then fails.
+output. `control.py` reads the terminal result and validates it again; intermediate
+stream events stay on the runner and are not uploaded. A timeout, provider error or
+invalid result fails the job without publishing a partial review.
 
 The model job has no GitHub write token. A separate publisher with no model secret
-posts blocking and advisory findings and the complete responses as new comments,
-never editing previous reports. It neutralizes mentions, scans credentials and
+posts the structured blocking and advisory findings as new comments, never editing
+previous reports. It neutralizes mentions, scans credentials and
 splits losslessly at 60,000 UTF-8 bytes. Invisible first-line markers identify the
 head, report digest and part number. Only markers authored by `github-actions[bot]`
 count for deduplication: automatic entry skips a complete report for that head.
@@ -275,11 +275,11 @@ in that review's body deduplicates identical findings on reruns and during
 recovery; only `github-actions[bot]` markers count. Findings too large for one
 comment remain in the losslessly split summary.
 
-This review is advisory: it submits no GitHub Review, changes no labels or PR
-state, starts no repair, and is not a required merge check. The maintainer still
-inspects CI and decides Ready for review and merge. Factory retro neither waits
-for nor reads it; its scanned sessions stay in the separate review run's artifacts
-for three days. See [ADR 0007](adr/0007-final-review-via-pull-request-target.md).
+This review is advisory: its PR review uses `COMMENT`, not an approval or change
+request. It changes no labels or PR state, starts no repair, and is not a required
+merge check. The maintainer still inspects CI and decides Ready for review and
+merge. Factory retro neither waits for nor reads it. Only the structured report and
+its identity are retained for three days. See [ADR 0007](adr/0007-final-review-via-pull-request-target.md).
 The automatic trigger can be validated live only after the workflow reaches main.
 
 ## Execution observation and recovery

@@ -9,9 +9,9 @@ them as strict JSON with no retry, so formatting noise from the free model (such
 a leading zero-width space) failed whole runs as `invalid-review`. Implement, round
 review and final review therefore move to a pinned Claude Code CLI, one PR per
 path, final review first as the spike. Review and retro use Claude Code's
-schema-validated structured output with the existing findings schema. When it
-still fails, the publisher posts an explicit "review unavailable" result with the
-reason and the check fails; the job does not retry the whole review.
+schema-validated structured output with the existing findings schema. A provider
+failure, timeout or invalid structured result fails the job without publishing a
+partial review; the job does not retry the whole review.
 
 The default deployment is direct from each job to one provider's official
 Anthropic-compatible endpoint. DeepSeek's documented endpoint is

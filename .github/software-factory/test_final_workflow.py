@@ -66,22 +66,17 @@ class FinalRunnerStepTest(unittest.TestCase):
                 review = json.loads(self.temp("final-review/review.json").read_text())
                 self.assertEqual(review, {"verdict": "request_changes", "advisory": [], "inline": [], "findings": [
                     f"{axis.title()}: src/a.ts: breaks AGENTS.md" for axis in axes]})
-                self.assertTrue(self.temp("final-review/review.md").is_file())
                 self.assertEqual(json.loads(self.temp("final-review/identity.json").read_text()), {"run": "42"})
 
-    def test_failed_axes_are_reported_unavailable_without_leaking(self):
-        for claude, reason in ((f"echo {SECRET} >&2\nexec sleep 20", "timeout"), ("exit 3", "runner-error"),
-                               (self.result(subtype="error_max_structured_output_retries", is_error=True),
-                                "structured-output-retries")):
-            with self.subTest(reason=reason):
+    def test_failed_axes_fail_without_leaking_or_publishing(self):
+        for claude, status, calls in ((f"echo {SECRET} >&2\nexec sleep 20", 124, 1), ("exit 3", 3, 1),
+                                      (self.result(subtype="error_max_structured_output_retries", is_error=True), 1, 2)):
+            with self.subTest(status=status):
                 result, _ = self.review(claude)
-                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.returncode, status, result.stderr)
                 self.assertNotIn(SECRET, result.stdout + result.stderr)
-                # Each axis still runs, so one failure does not hide the other's findings.
-                self.assertEqual(len(self.calls("claude")), 2)
-                review = json.loads(self.temp("final-review/review.json").read_text())
-                self.assertEqual((review["verdict"], review["unavailable"]), ("unavailable", [
-                    {"axis": "Standards", "reason": reason}, {"axis": "Spec", "reason": reason}]))
+                self.assertEqual(len(self.calls("claude")), calls)
+                self.assertFalse(self.temp("final-review/review.json").exists())
 
     def test_review_records_only_commentable_locations(self):
         claude = self.result(subtype="success", is_error=False, structured_output={"findings": [
@@ -92,22 +87,6 @@ class FinalRunnerStepTest(unittest.TestCase):
         review = json.loads(self.temp("final-review/review.json").read_text())
         self.assertEqual(review["inline"], [{"axis": axis, "blocking": True, "finding": "bug",
                                              "path": "src/a.ts", "line": 2} for axis in ("Standards", "Spec")])
-
-    def test_sessions_are_always_recorded_and_scanned(self):
-        for spec, axes in (("true", ["standards", "spec"]), ("false", ["standards"])):
-            with self.subTest(spec=spec):
-                files = {"temp/final-standards-summary.txt": "opencode-summary {}\n", "temp/session/leak.txt": SECRET}
-                result, _ = self.run_step("review", select="control.py transcript", env={"SPEC": spec}, files=files)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                # Only the scanned transcripts and summary, never the planted leak.
-                self.assertEqual(sorted(self.uploaded("review")), sorted(
-                    [f"final-{axis}.md" for axis in axes] + ["final-standards-summary.txt"]))
-                leak = json.dumps({"type": "text", "part": {"text": SECRET}}) + "\n"
-                result, _ = self.run_step("review", select="control.py transcript", env={"SPEC": spec},
-                                          files={"temp/final-standards.jsonl": leak})
-                self.assertEqual(result.returncode, 1)
-                self.assertIn("::error::credential-in-artifact", result.stderr)
-                self.assertNotIn(SECRET, result.stdout + result.stderr)
 
     def stage(self, plant=lambda candidate: None):
         env = {}
@@ -155,21 +134,20 @@ class FinalRunnerStepTest(unittest.TestCase):
                 self.assertFalse((self.directory / "temp/final.patch").exists())
                 self.assertFalse((self.directory / "temp/identity.json").exists())
 
-    def publish(self, head=HEAD, comments=(), report="Looks fine. @maintainer\n",
-                review=(("verdict", "approve"), ("findings", []), ("advisory", []))):
+    def publish(self, head=HEAD, comments=(), review=(("verdict", "approve"), ("findings", []), ("advisory", []))):
         files = {"pull.json": json.dumps({**PULL, "head": {**PULL["head"], "sha": head}}),
                  "comments.json": json.dumps([list(comments)]),
                  "temp/input/identity.json": json.dumps({"pr": 17, "head": HEAD, "base": BASE, "issues": [], "run": "42"}),
-                 "temp/review/review.json": json.dumps(dict(review)),
-                 "temp/review/review.md": report}
+                 "temp/review/review.json": json.dumps(dict(review))}
         result, _ = self.run_step("publish", gh=GH, select="control.py final-head", files=files, env={
             "PR": "17", "GITHUB_REF": "refs/heads/main", "GH_REPO": REPO, "FACTORY_AUTH_FILE": ""})
         bodies = self.directory / "bodies"
         return result, [path.read_text() for path in sorted(bodies.iterdir())] if bodies.exists() else []
 
     def test_publisher_posts_every_part_in_order(self):
-        report = base.mixed_text(80_000)
-        result, bodies = self.publish(report=report)
+        finding = base.mixed_text(80_000)
+        review = (("verdict", "approve"), ("findings", []), ("advisory", [finding]))
+        result, bodies = self.publish(review=review)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertGreater(len(bodies), 1)
         for part, body in enumerate(bodies, 1):
@@ -178,20 +156,11 @@ class FinalRunnerStepTest(unittest.TestCase):
             self.assertLessEqual(len(body.encode()), 60_000)
         self.assertTrue(all(call[:3] == ["pr", "comment", "17"]
                             for call in self.calls("gh") if call[:1] == ["pr"]))
-        self.assertIn(report.replace("@", "@​")[-500:], "".join(bodies))
-        # A rerun after a partial post fills in only the missing parts.
+        self.assertIn(finding.replace("@", "@​")[-500:], "".join(bodies))
         posted = [{"body": bodies[0], "user": {"login": "github-actions[bot]", "type": "Bot"}}]
-        result, rest = self.publish(comments=posted, report=report)
+        result, rest = self.publish(comments=posted, review=review)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(rest, bodies[1:])
-
-    def test_publisher_posts_an_unavailable_review_then_fails(self):
-        result, bodies = self.publish(review=(("verdict", "unavailable"), ("findings", []), ("advisory", []), (
-            "unavailable", [{"axis": "Spec", "reason": "timeout"}])))
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("::error::final-review-unavailable", result.stdout)
-        [body] = bodies
-        self.assertIn("- **Unavailable** — Spec: timeout", body)
 
     def test_publisher_submits_the_inline_review_after_the_summary(self):
         result, bodies = self.publish(review=(("verdict", "request_changes"), ("findings", ["Standards: bug"]),
@@ -332,15 +301,14 @@ class FinalWorkflowContractTest(unittest.TestCase):
         all_uploads = [step for job in self.jobs.values() for step in job["steps"]
                        if "upload-artifact" in step.get("uses", "")]
         uploads = {step["with"]["name"]: step for step in all_uploads}
-        self.assertEqual(set(uploads), {"final-input", "final-review", "session-final-review"})
+        self.assertEqual(set(uploads), {"final-input", "final-review"})
         for step in all_uploads:
             name = step["with"]["name"]
             with self.subTest(artifact=name):
                 self.assertEqual(step["with"]["retention-days"], 3)
                 self.assertNotIn("*", step["with"]["path"])
-        self.assertEqual(uploads["session-final-review"]["if"], "always() && steps.session.outcome == 'success'")
-        record = next(step for step in self.jobs["review"]["steps"] if step.get("id") == "session")
-        self.assertEqual((record["if"], record["continue-on-error"]), ("always()", True))
+        self.assertEqual(set(uploads["final-review"]["with"]["path"].splitlines()), {
+            "${{ runner.temp }}/final-review/review.json", "${{ runner.temp }}/final-review/identity.json"})
 
     def test_recovery_is_selected_before_upload_and_bypasses_the_model(self):
         identify = self.jobs["identify"]

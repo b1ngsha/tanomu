@@ -71,7 +71,6 @@ jobs:
           name: final-review
           path: |
             ${{ runner.temp }}/final-review/review.json
-            ${{ runner.temp }}/final-review/review.md
             ${{ runner.temp }}/final-review/identity.json
           retention-days: 3
           if-no-files-found: error
@@ -159,10 +158,10 @@ jobs:
           test ! -e "$canary/hook-ran" || { echo '::error::claude-canary-hook-ran'; exit 1; }
           test ! -e "$canary/mcp-ran" || { echo '::error::claude-canary-mcp-ran'; exit 1; }
           python3 -I ../trusted/.github/software-factory/control.py claude-result \
-            "Canary=$RUNNER_TEMP/claude-canary.jsonl=0" "$RUNNER_TEMP/claude-canary-review.json"
+            "Canary=$RUNNER_TEMP/claude-canary.jsonl" "$RUNNER_TEMP/claude-canary-review.json"
           python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/claude-canary-review.json"
           ! grep -Fq CANARY_INSTRUCTION "$RUNNER_TEMP/claude-canary-review.json"
-          grep -Fq '"verdict": "approve"' "$RUNNER_TEMP/claude-canary-review.json" || { echo '::error::claude-canary-unavailable'; exit 1; }
+          grep -Fq '"verdict": "approve"' "$RUNNER_TEMP/claude-canary-review.json" || { echo '::error::claude-canary-invalid'; exit 1; }
       - name: Review the pull request
         working-directory: candidate
         env:
@@ -197,51 +196,21 @@ jobs:
               --permission-mode dontAsk --permission-prompts none --disable-slash-commands \
               --strict-mcp-config --mcp-config '{"mcpServers":{}}' --settings "$CLAUDE_SETTINGS" \
               "$prompt" || status=$?
-            # A failed axis is reported as unavailable; the publisher posts it and then fails.
-            files+=("${axis^}=$RUNNER_TEMP/final-$axis.jsonl=$status")
+            if [ "$status" -ne 0 ]; then
+              echo "::error::claude-exit-$status"
+              exit "$status"
+            fi
+            files+=("${axis^}=$RUNNER_TEMP/final-$axis.jsonl")
           done
           python3 -I ../trusted/.github/software-factory/control.py claude-result "${files[@]}" "$REVIEW_OUTPUT"
           python3 -I ../trusted/.github/software-factory/control.py scan-output "$REVIEW_OUTPUT"
-          python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/final-review/review.md"
           cp -- "$RUNNER_TEMP/final-input/identity.json" "$RUNNER_TEMP/final-review/identity.json"
           python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/final-review/identity.json"
-      - name: Record sessions
-        id: session
-        if: always()
-        continue-on-error: true
-        env:
-          SPEC: ${{ needs.identify.outputs.spec }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/session"
-          axes=(standards)
-          if [ "$SPEC" = true ]; then axes+=(spec); fi
-          for axis in "${axes[@]}"; do
-            python3 -I trusted/.github/software-factory/control.py transcript \
-              "$RUNNER_TEMP/final-$axis.jsonl" "$RUNNER_TEMP/session/final-$axis.md"
-            if [ -f "$RUNNER_TEMP/final-$axis-summary.txt" ]; then
-              python3 -I trusted/.github/software-factory/control.py scan-session "$RUNNER_TEMP/final-$axis-summary.txt"
-              cp "$RUNNER_TEMP/final-$axis-summary.txt" "$RUNNER_TEMP/session/final-$axis-summary.txt"
-            fi
-            python3 -I trusted/.github/software-factory/control.py scan-session "$RUNNER_TEMP/session/final-$axis.md"
-          done
-      - if: always() && steps.session.outcome == 'success'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: session-final-review
-          path: |
-            ${{ runner.temp }}/session/final-standards.md
-            ${{ runner.temp }}/session/final-standards-summary.txt
-            ${{ runner.temp }}/session/final-spec.md
-            ${{ runner.temp }}/session/final-spec-summary.txt
-          retention-days: 3
-          if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: final-review
           path: |
             ${{ runner.temp }}/final-review/review.json
-            ${{ runner.temp }}/final-review/review.md
             ${{ runner.temp }}/final-review/identity.json
           retention-days: 3
           if-no-files-found: error
@@ -290,9 +259,4 @@ jobs:
           # instead of posting half of them.
           if [ -f "$RUNNER_TEMP/comments/inline.json" ]; then
             gh api --method POST "repos/$GH_REPO/pulls/$PR/reviews" --input "$RUNNER_TEMP/comments/inline.json" > /dev/null
-          fi
-          # An unavailable review is posted so the PR shows why, then fails this check.
-          if jq -e '.verdict == "unavailable"' "$RUNNER_TEMP/review/review.json" > /dev/null; then
-            echo '::error::final-review-unavailable'
-            exit 1
           fi

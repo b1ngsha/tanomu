@@ -32,9 +32,6 @@ FINDINGS_SCHEMA = {
                        "line": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]}},
     }}},
 }
-CLAUDE_UNAVAILABLE = {"timeout", "runner-error", "invalid-claude-events", "no-result",
-                      "structured-output-retries", "max-turns", "no-structured-output", "provider-error",
-                      "invalid-review", "invalid-findings"}
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 # Credential-shaped tokens; the lookbehind keeps kebab-case text such as "task-..." from matching.
 CREDENTIAL_PATTERN = re.compile(
@@ -592,21 +589,15 @@ def review_axis(filename):
     return validate_findings(result)
 
 
-def claude_events(filename):
+def claude_result(filename):
+    """Read the terminal result; intermediate stream events are only liveness telemetry."""
+    lines = [line for line in Path(filename).read_text().splitlines() if line.strip()]
+    require(lines, "no-result")
     try:
-        parsed = [json.loads(line, object_pairs_hook=lambda pairs: unique_json(pairs, "invalid-claude-events"))
-                  for line in Path(filename).read_text().splitlines()]
+        event = json.loads(lines[-1], object_pairs_hook=lambda pairs: unique_json(pairs, "invalid-claude-events"))
     except (json.JSONDecodeError, RecursionError, ValueError):
         raise ValueError("invalid-claude-events") from None
-    require(parsed and all(isinstance(event, dict) for event in parsed), "invalid-claude-events")
-    return parsed
-
-
-def claude_result(filename):
-    parsed = claude_events(filename)
-    result = [event for event in parsed if event.get("type") == "result"]
-    require(len(result) == 1 and parsed[-1] is result[0], "no-result")
-    event = result[0]
+    require(isinstance(event, dict) and event.get("type") == "result", "no-result")
     subtype = event.get("subtype")
     reasons = {"error_max_structured_output_retries": "structured-output-retries",
                "error_max_turns": "max-turns"}
@@ -614,46 +605,20 @@ def claude_result(filename):
         raise ValueError(reasons[subtype])
     require(subtype == "success" and event.get("is_error") is not True, "provider-error")
     require("structured_output" in event, "no-structured-output")
-    output = event["structured_output"]
-    findings = validate_findings(output)
-    return output, findings
+    return validate_findings(event["structured_output"])
 
 
 def claude_review_result(files, output):
-    reviewed, unavailable = [], []
-    for axis, filename, status in files:
-        try:
-            status = int(status)
-            require(0 <= status <= 255, "invalid-status")
-            if status:
-                raise ValueError("timeout" if status == 124 else "runner-error")
-            result, findings = claude_result(filename)
-            reviewed.append((axis, result, findings))
-        except (ValueError, OSError) as error:
-            reason = str(error) if str(error) in CLAUDE_UNAVAILABLE else "invalid-claude-events"
-            unavailable.append({"axis": axis, "reason": reason})
-    # A failed axis does not discard the other axis's findings, but the report as a whole is unavailable.
+    reviewed = [(axis, claude_result(filename)) for axis, filename in files]
     blocking, advisory = [], []
-    for axis, _, findings in reviewed:
+    for axis, findings in reviewed:
         for item in findings:
             (blocking if item["blocking"] else advisory).append(f"{axis}: {item['finding']}")
-    if unavailable:
-        verdict = "unavailable"
-    elif blocking:
-        verdict = "request_changes"
-    else:
-        verdict = "approve"
-    report = {"verdict": verdict, "findings": blocking, "advisory": advisory}
+    report = {"verdict": "request_changes" if blocking else "approve",
+              "findings": blocking, "advisory": advisory}
     if os.environ.get("FINAL_PATCH"):
         report["inline"] = inline_findings(reviewed, Path(os.environ["FINAL_PATCH"]))
-    if unavailable:
-        report["unavailable"] = unavailable
-    markdown = "\n".join([f"### {axis} — full response\n\n```json\n"
-                          f"{json.dumps(result, ensure_ascii=False, indent=2)}\n```\n"
-                          for axis, result, _ in reviewed]
-                         + [f"### {item['axis']} — unavailable ({item['reason']})\n" for item in unavailable])
     Path(output).write_text(json.dumps(report, ensure_ascii=False))
-    Path(output).with_suffix(".md").write_text(markdown)
     return report
 
 
@@ -725,7 +690,7 @@ def inline_findings(reviewed, patch):
     """Findings whose model-supplied location really exists in the reviewed diff."""
     commentable = patch_lines(patch.read_text())
     inline = []
-    for axis, _, findings in reviewed:
+    for axis, findings in reviewed:
         for item in findings:
             path, line = item.get("path"), item.get("line")
             if isinstance(path, str) and type(line) is int and line in commentable.get(path, ()):
@@ -946,14 +911,11 @@ def final_comments(directory, identity, current, output, reviews=None):
     # A PR closed, retargeted or moved since the review is stale, not an error.
     if not current["eligible"] or (current["pr"], current["head"]) != (reviewed["pr"], reviewed["head"]):
         return False
-    for name in ("review.json", "review.md"):
-        scan(source / name, public=True, limit=None)
+    scan(source / "review.json", public=True, limit=None)
     result = json.loads((source / "review.json").read_text())
-    findings = ([f"- **Unavailable** — {item['axis']}: {item['reason']}" for item in result.get("unavailable", [])]
-                + [f"- **Blocking** — {item}" for item in result["findings"]]
+    findings = ([f"- **Blocking** — {item}" for item in result["findings"]]
                 + [f"- Advisory — {item}" for item in result["advisory"]])
-    report = ("### Findings\n\n" + ("\n".join(findings) or "No findings.") + "\n\n"
-              + (source / "review.md").read_text()).replace("@", "@" + chr(0x200b))
+    report = ("### Findings\n\n" + ("\n".join(findings) or "No findings.") + "\n").replace("@", "@" + chr(0x200b))
     run, head = reviewed["run"], reviewed["head"]
     spec = (f"Spec: {', '.join(f'#{issue}' for issue in reviewed['issues'])}." if reviewed["issues"] else
             "No issue is linked with Closes/Fixes/Resolves/Refs #N, so only the Standards axis ran.")
@@ -982,7 +944,7 @@ def final_comments(directory, identity, current, output, reviews=None):
         marker = f"<!-- tanomu-final-inline head={head} digest={location} -->"
         seen = set()
         for page in reviews or []:
-            for item in page if isinstance(page, list) else [page]:
+            for item in page:
                 user = item.get("user") or {}
                 match = INLINE_MARKER.fullmatch((item.get("body") or "").split("\n", 1)[0])
                 if match and user.get("login") == "github-actions[bot]" and user.get("type") == "Bot":
@@ -1028,8 +990,8 @@ def recovery_artifact(repo, run):
                                       stderr=subprocess.DEVNULL)
     with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
         members = zipped.infolist()
-        require({item.filename for item in members} == {"identity.json", "review.json", "review.md"}
-                and len(members) == 3, "invalid-review-archive")
+        require({item.filename for item in members} == {"identity.json", "review.json"}
+                and len(members) == 2, "invalid-review-archive")
         # Do not extract paths; exclude symlinks and special files without capping full reports.
         require(all((item.external_attr >> 16) & 0o170000 in (0, 0o100000) for item in members),
                 "invalid-review-archive")
@@ -1075,7 +1037,7 @@ def final_resume(number, event, directory, output):
                     scan(root / name, public=True, limit=None)
                 (root / "current.json").write_text(json.dumps({"pr": current["pr"], "head": current["head"],
                                                               "eligible": True, "posted": []}))
-                reviews = api(f"repos/{repo}/pulls/{number}/reviews?per_page=100")
+                reviews = [api(f"repos/{repo}/pulls/{number}/reviews?per_page=100")]
                 final_comments(root, root / "identity.json", root / "current.json", root / "comments",
                                reviews=reviews)
                 bodies = sorted((root / "comments").glob("*.md"))
@@ -1199,8 +1161,8 @@ if __name__ == "__main__":
         elif command == "claude-result":
             files = []
             for item in args[:-1]:
-                axis, filename, status = item.split("=", 2)
-                files.append((axis, filename, status))
+                axis, filename = item.split("=", 1)
+                files.append((axis, filename))
             claude_review_result(files, args[-1])
         elif command == "prompt":
             print(prompt(*args), end="")
