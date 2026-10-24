@@ -924,7 +924,7 @@ class RunnerStepTest(unittest.TestCase):
                 result, summary = self.run_step(job, self.stub_events(*leaky) + f"\necho {SECRET} >&2\nexec sleep 20")
                 self.assertEqual(result.returncode, 124, result.stderr)
                 self.assertIn('"exit_status": 124', result.stdout)
-                self.assertIn('"tool_use": 4', summary)
+                self.assertIn('"exit_status": 124', summary)
                 self.assertIn("::error::standards-timeout" if job == "review" else "::error::opencode-exit-124", result.stdout)
                 self.assertNotIn(SECRET, result.stdout + result.stderr + summary)
                 # A timed-out review stops before the second axis spends its budget.
@@ -953,7 +953,7 @@ class RunnerStepTest(unittest.TestCase):
         result, summary = self.run_step("review", self.reply(
             {"findings": [{"blocking": False, "finding": "src/a.ts: possible Mysterious Name"}]}))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(summary.count("### OpenCode run"), 2)
+        self.assertEqual(summary.count("### Factory Agent run"), 2)
         sessions = self.calls("opencode")
         self.assertEqual(len(sessions), 2)
         axes = control.review_axes()

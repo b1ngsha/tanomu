@@ -42,7 +42,7 @@ class SupervisorTest(unittest.TestCase):
         self.assertEqual(process.returncode, status, stderr)
         self.assertNotIn(SECRET, stdout + stderr + self.github.read_text() + self.summary.read_text())
         self.assertEqual(stderr, "")
-        summary = json.loads(self.summary.read_text().removeprefix("opencode-summary "))
+        summary = json.loads(self.summary.read_text().removeprefix("agent-summary "))
         self.assertEqual(summary["exit_status"], status)
         self.assertIn(self.summary.read_text().strip(), stdout)
         return stdout, summary
@@ -58,23 +58,22 @@ class SupervisorTest(unittest.TestCase):
                 self.assertIn(SECRET, self.events.with_suffix(".stderr").read_text())
 
     def test_heartbeat_counts_activity_and_silence_without_echoing_fields(self):
-        event = {"type": "tool_use", "part": {"tool": SECRET, "state": {"status": SECRET}}}
-        source = (f"import json, time; print(json.dumps({event!r}), flush=True); time.sleep(.22); "
-                  "print('{\"type\":\"text\"}', flush=True); time.sleep(.28)")
+        source = (f"import time; print({SECRET!r}, flush=True); time.sleep(.22); "
+                  "print('more output', flush=True); time.sleep(.28)")
         stdout, final = self.finish(self.start(source), 0)
-        beats = [json.loads(line.removeprefix("opencode-heartbeat ")) for line in stdout.splitlines()
-                 if line.startswith("opencode-heartbeat ")]
+        beats = [json.loads(line.removeprefix("agent-heartbeat ")) for line in stdout.splitlines()
+                 if line.startswith("agent-heartbeat ")]
         self.assertGreaterEqual(len(beats), 3)
         self.assertTrue(all(beat["phase"] == "review" and beat["axis"] == "standards" for beat in beats))
-        self.assertTrue(any(beat["events"] == 1 for beat in beats))
-        self.assertTrue(any(beat["events"] == 2 for beat in beats))
-        self.assertTrue(any(beat["last_event_age_seconds"] > .08 for beat in beats))
-        self.assertEqual(final["tools"], {"other": {"other": 1}})
+        self.assertTrue(any(beat["result_bytes"] > 0 for beat in beats))
+        self.assertTrue(any(beat["last_activity_age_seconds"] > .08 for beat in beats))
+        self.assertGreater(final["result_bytes"], 0)
 
     def test_silent_timeout_is_124_and_emits_heartbeat(self):
         stdout, summary = self.finish(self.start("import time; time.sleep(20)", budget=".25"), 124)
-        self.assertIn('"last_event_age_seconds": null', stdout)
-        self.assertEqual(summary["events"], 0)
+        self.assertIn('"last_activity_age_seconds": null', stdout)
+        self.assertEqual(summary["result_bytes"], 0)
+        self.assertEqual(summary["transcript_bytes"], 0)
 
     def test_isolated_control_import_ignores_modules_in_candidate_directory(self):
         (self.root / "control.py").write_text(f"raise RuntimeError({SECRET!r})")
@@ -104,9 +103,9 @@ class SupervisorTest(unittest.TestCase):
             os.close(reader)
             os.close(writer)
 
-    def test_smoke_is_an_allowlisted_phase(self):
-        stdout, _ = self.finish(self.start("import time; time.sleep(.15)", phase="smoke"), 0)
-        self.assertIn('"phase": "smoke"', stdout)
+    def test_retro_is_an_allowlisted_phase(self):
+        stdout, _ = self.finish(self.start("import time; time.sleep(.15)", phase="retro"), 0)
+        self.assertIn('"phase": "retro"', stdout)
 
     def test_spawn_failure_and_invalid_phase_are_sanitized(self):
         self.finish(self.start("", command=[str(self.root / SECRET)]), 127)

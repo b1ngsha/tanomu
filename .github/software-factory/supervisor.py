@@ -1,5 +1,4 @@
-"""Bounded OpenCode runner. Raw output stays local; logs contain allowlisted telemetry only."""
-import importlib.util
+"""Bounded Factory Agent runner. Raw output stays local; logs contain file activity only."""
 import json
 import math
 import os
@@ -11,7 +10,7 @@ import time
 
 HEARTBEAT_SECONDS = 60
 KILL_GRACE_SECONDS = 15
-PHASES = {"implement": ("implement", None), "retro": ("retro", None), "smoke": ("smoke", None),
+PHASES = {"implement": ("implement", None), "retro": ("retro", None),
           **{f"{phase}-{axis}": (phase, axis) for phase in ("review", "final")
              for axis in ("standards", "spec")}}
 
@@ -47,7 +46,7 @@ def cleanup(process):
 
 def main(args):
     try:
-        events, summary, phase, budget, separator, *command = args
+        result_file, summary, phase, budget, separator, *command = args
         budget = float(budget)
         if phase not in PHASES or separator != "--" or not command or not math.isfinite(budget) or budget <= 0:
             raise ValueError
@@ -56,24 +55,29 @@ def main(args):
         return 2
 
     phase_name, axis = PHASES[phase]
-    # -I excludes cwd/PYTHONPATH; load only the control module next to this trusted script.
-    spec = importlib.util.spec_from_file_location("factory_control", Path(__file__).with_name("control.py"))
-    control = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(control)
     stdout_blocking = os.get_blocking(sys.stdout.fileno())
     os.set_blocking(sys.stdout.fileno(), False)
-    started, clock = int(time.time()), time.monotonic()
+    clock = time.monotonic()
     cancelled = 0
 
     def cancel(sig, _frame):
         nonlocal cancelled
         cancelled = cancelled or sig
 
+    def activity():
+        sizes = []
+        for filename in (result_file, os.environ.get("CLAUDE_TRANSCRIPT")):
+            try:
+                sizes.append(Path(filename).stat().st_size if filename else 0)
+            except OSError:
+                sizes.append(0)
+        return {"result_bytes": sizes[0], "transcript_bytes": sizes[1]}
+
     old_handlers = {sig: signal.signal(sig, cancel) for sig in (signal.SIGTERM, signal.SIGINT)}
     process, status = None, 125
-    next_heartbeat, last_activity, observed = clock + HEARTBEAT_SECONDS, None, 0
+    next_heartbeat, last_activity, observed = clock + HEARTBEAT_SECONDS, None, activity()
     try:
-        with Path(events).open("wb") as output, Path(events).with_suffix(".stderr").open("wb") as errors:
+        with Path(result_file).open("wb") as output, Path(result_file).with_suffix(".stderr").open("wb") as errors:
             try:
                 process = subprocess.Popen(command, stdout=output, stderr=errors, start_new_session=True)
             except OSError:
@@ -93,39 +97,36 @@ def main(args):
                         break
                     if now >= next_heartbeat:
                         try:
-                            counts = control.summarize(events, "0", str(int(now - clock)), str(started))
-                            if counts["events"] != observed:
-                                observed = counts["events"]
-                                last_activity = min(time.time(), Path(events).stat().st_mtime)
-                            emit("opencode-heartbeat", {
+                            current = activity()
+                            if current != observed:
+                                observed, last_activity = current, time.time()
+                            emit("agent-heartbeat", {
                                 "phase": phase_name, "axis": axis,
                                 "elapsed_seconds": round(now - clock, 2),
-                                "last_event_age_seconds": (round(max(0, time.time() - last_activity), 2)
-                                                           if last_activity is not None else None),
-                                **{key: counts[key] for key in ("events", "event_types", "tools")}})
+                                "last_activity_age_seconds": (round(max(0, time.time() - last_activity), 2)
+                                                              if last_activity is not None else None), **current})
                         except Exception:
-                            # Telemetry failure cannot change execution or expose exception text.
-                            emit("opencode-heartbeat", {"phase": phase_name, "axis": axis,
-                                                       "elapsed_seconds": int(now - clock), "available": False})
+                            emit("agent-heartbeat", {"phase": phase_name, "axis": axis,
+                                                     "elapsed_seconds": int(now - clock), "available": False})
                         next_heartbeat = now + HEARTBEAT_SECONDS
                     time.sleep(min(.05, max(0, clock + budget - now)))
     except Exception:
-        emit("opencode-supervisor", {"status": "runner-error"})
+        emit("agent-supervisor", {"status": "runner-error"})
     finally:
         if process:
             cleanup(process)
         if cancelled and status != 124:
             status = 128 + cancelled
         try:
-            counts = control.summarize(events, str(status), str(int(time.monotonic() - clock)), str(started))
+            counts = {"exit_status": status, "elapsed_seconds": int(time.monotonic() - clock), **activity()}
             line = json.dumps(counts, sort_keys=True)
-            Path(summary).write_text(f"opencode-summary {line}\n")
-            emit("opencode-summary", counts)
+            Path(summary).write_text(f"agent-summary {line}\n")
+            emit("agent-summary", counts)
             if os.environ.get("GITHUB_STEP_SUMMARY"):
                 with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as target:
-                    target.write(f"### OpenCode run\n\n```json\n{line}\n```\n")
+                    target.write(f"### Factory Agent run\n\n```json\n{line}\n```\n")
         except Exception:
-            emit("opencode-supervisor", {"status": "summary-failed"})
+            emit("agent-supervisor", {"status": "summary-failed"})
         os.set_blocking(sys.stdout.fileno(), stdout_blocking)
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)
