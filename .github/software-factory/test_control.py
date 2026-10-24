@@ -11,6 +11,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import authorization  # noqa: E402
 import control  # noqa: E402
 
 CONTROL = Path(control.__file__).resolve()
@@ -283,8 +284,8 @@ class GateTest(TaskDirectory):
                       [labeled("labeled", "intruder", "ready-for-agent"),
                        labeled("labeled", OWNER), {"event": "commented"}]]
         self.calls = []
-        self.enterContext(mock.patch.object(control, "api", self.fake_api))
-        self.enterContext(mock.patch.object(control.subprocess, "check_output", self.fake_events))
+        self.enterContext(mock.patch.object(authorization, "api", self.fake_api))
+        self.enterContext(mock.patch.object(authorization.subprocess, "check_output", self.fake_events))
 
     def fake_api(self, path):
         self.calls.append(path)
@@ -301,7 +302,7 @@ class GateTest(TaskDirectory):
         return json.dumps(self.pages).encode()
 
     def gate(self):
-        control.gate("1", str(self.out))
+        authorization.gate("1", str(self.out))
 
     def test_accepts_authorized_issue_and_writes_body(self):
         self.gate()
@@ -352,7 +353,7 @@ class GateTest(TaskDirectory):
     def test_gate_captures_any_current_body_without_manual_config(self):
         self.issue["body"] = "Implement issue ten. Refs #99. bLoCkEd By #2"
         self.gate()
-        captured = control.snapshot("1", str(self.out))
+        captured = authorization.snapshot("1", str(self.out))
         self.assertEqual(captured["blocked_by"], ["2"])
         self.assertEqual((self.out / "issue.md").read_text(), self.issue["body"])
         self.issue["body"] += " changed"
@@ -362,19 +363,19 @@ class GateTest(TaskDirectory):
         self.issue["body"] = "Feature.\r\nBlocked by: #2\r\n"
         self.issue["labels"] = [{"name": n} for n in ("ready-for-agent", "agent:implement")]
         self.pages = [[labeled("labeled", OWNER)]]
-        control.gate("1", str(self.out))
-        control.revalidate("1", str(self.out))
+        authorization.gate("1", str(self.out))
+        authorization.revalidate("1", str(self.out))
         self.issue["labels"] = [{"name": n} for n in ("ready-for-agent", "implementing")]
         self.pages = [[{**labeled("labeled", "github-actions[bot]", "implementing"), "id": 987}]]
-        control.record_claim("1", str(self.out), str(self.root / "claim.json"))
+        authorization.record_claim("1", str(self.out), str(self.root / "claim.json"))
         self.assertEqual((self.out / "issue.md").read_bytes(), self.issue["body"].encode())
 
     def test_issue_ten_needs_no_task_file(self):
-        with mock.patch.object(control, "api", side_effect=lambda path: self.issue if path.endswith("issues/10") else []), \
-                mock.patch.object(control.subprocess, "check_output", return_value=json.dumps(self.pages).encode()):
+        with mock.patch.object(authorization, "api", side_effect=lambda path: self.issue if path.endswith("issues/10") else []), \
+                mock.patch.object(authorization.subprocess, "check_output", return_value=json.dumps(self.pages).encode()):
             self.issue["body"] = "Feature without task JSON. Refs #99."
-            control.gate("10", str(self.out))
-        self.assertEqual(control.snapshot("10", str(self.out))["branch"], "feat/10-implement")
+            authorization.gate("10", str(self.out))
+        self.assertEqual(authorization.snapshot("10", str(self.out))["branch"], "feat/10-implement")
 
     def test_rejects_unfinished_dependency(self):
         for dependency in ({"state": "open", "state_reason": None},
@@ -390,7 +391,7 @@ class GateTest(TaskDirectory):
         self.assertRejects("open-dependency", self.gate)
 
     def test_only_explicit_same_repo_refs_are_dependencies(self):
-        self.assertEqual(control.dependencies(
+        self.assertEqual(authorization.dependencies(
             "Refs #3. blocked BY: #2, #7; Blocked by #4. Blocked by owner/repo#5. "
             "Blocked by https://github.com/x/y/issues/6. bLoCkEd By #2"), ["2", "7", "4"])
 
@@ -410,6 +411,7 @@ class GateTest(TaskDirectory):
 class FeedbackTest(GateTest):
     def setUp(self):
         super().setUp()
+        self.enterContext(mock.patch.object(control, "api", self.fake_api))
         self.enterContext(mock.patch.dict(os.environ, {
             "EVENT_NAME": "issues", "LABEL_NAME": "agent:implement",
             "GITHUB_STEP_SUMMARY": str(self.root / "summary"),
@@ -503,7 +505,7 @@ class FeedbackTest(GateTest):
 class ClaimedTest(GateTest):
     def setUp(self):
         super().setUp()
-        control.gate("1", str(self.out))
+        authorization.gate("1", str(self.out))
         self.issue["labels"] = [{"name": name} for name in ("ready-for-agent", "implementing")]
         self.event = {**labeled("labeled", "github-actions[bot]", "implementing"), "id": 987}
         self.pages = [[labeled("labeled", OWNER)], [self.event]]
@@ -513,15 +515,15 @@ class ClaimedTest(GateTest):
 
     # GateTest's cases also exercise the shared validation against claimed state.
     def gate(self):
-        control.validate_issue("1", claimed=True, captured=control.snapshot("1", str(self.out)))
+        authorization.validate_issue("1", claimed=True, captured=authorization.snapshot("1", str(self.out)))
 
     def test_accepts_authorized_issue_and_writes_body(self):
-        control.record_claim("1", str(self.out), str(self.record))
-        control.claimed("1", str(self.out), str(self.record))
+        authorization.record_claim("1", str(self.out), str(self.record))
+        authorization.claimed("1", str(self.out), str(self.record))
         record = json.loads(self.record.read_text())
         self.assertEqual(record, {"issue": "1", "repository": REPO, "run_id": "123",
                                   "run_attempt": "1", "event_id": 987,
-                                  "snapshot": control.snapshot("1", str(self.out))})
+                                  "snapshot": authorization.snapshot("1", str(self.out))})
 
     def test_rejects_label_without_event_history(self):
         self.pages = [[labeled("labeled", OWNER)]]
@@ -554,9 +556,9 @@ class ClaimedTest(GateTest):
         self.issue["body"] += " changed"
         self.assertRejects("body-changed", control.record_claim, "1", str(self.out), str(self.record))
         self.issue["body"] = original
-        control.record_claim("1", str(self.out), str(self.record))
+        authorization.record_claim("1", str(self.out), str(self.record))
         self.issue["body"] = "Entirely new spec. Blocked by #99"
-        control.claimed("1", str(self.out), str(self.record))
+        authorization.claimed("1", str(self.out), str(self.record))
         self.assertEqual((self.out / "issue.md").read_text(), original)
 
     def test_gate_captures_any_current_body_without_manual_config(self):
@@ -566,7 +568,7 @@ class ClaimedTest(GateTest):
         pass
 
     def test_rejects_stale_run_attempt_repository_issue_and_event(self):
-        control.record_claim("1", str(self.out), str(self.record))
+        authorization.record_claim("1", str(self.out), str(self.record))
         original = self.record.read_text()
         for key, value in (("run_id", "999"), ("run_attempt", "2"), ("repository", "other/repo"),
                            ("issue", "2"), ("event_id", 988)):

@@ -12,6 +12,12 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent
+# Isolated mode omits the script directory; only trusted siblings are imported.
+sys.path.insert(0, str(ROOT))
+from authorization import (claimed, claim_identity, dependencies, gate, metadata,  # noqa: E402
+                          record_claim, revalidate, snapshot, validate_issue)
+from common import CREDENTIAL_PATTERN, api, require  # noqa: E402
+
 CLAUDE_CODE_VERSION = "2.1.304"
 CLAUDE_PROVIDER_HOSTS = {"api.deepseek.com", "api.moonshot.ai", "api.moonshot.cn"}
 MAX_ARTIFACT_BYTES = 512_000
@@ -32,60 +38,17 @@ FINDINGS_SCHEMA = {
     }}},
 }
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-# Credential-shaped tokens; the lookbehind keeps kebab-case text such as "task-..." from matching.
-CREDENTIAL_PATTERN = re.compile(
-    rb"(?<![A-Za-z0-9_-])(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})"
-    rb"|-----BEGIN [A-Z ]*PRIVATE KEY-----")
-
-
-def require(condition, reason):
-    if not condition:
-        raise ValueError(reason)
-
 
 def git(*args, env=None):
     # The candidate controls the worktree, so never let it run fsmonitor hooks in a trusted gate.
     return subprocess.check_output(["git", "-c", "core.fsmonitor=false", *args], env=env)
 
-
-def api(path):
-    return json.loads(subprocess.check_output(["gh", "api", path]))
-
-
-def metadata(number):
-    require(re.fullmatch(r"[1-9][0-9]*", number), "invalid-issue")
-    return {"issue": number, "branch": f"feat/{number}-implement",
-            "title": f"feat(repo): implement issue #{number}"}
-
-
-def snapshot(number, directory):
-    record = json.loads((Path(directory) / "input.json").read_text())
-    require(all(record.get(key) == value for key, value in {
-        **metadata(number), "repository": os.environ["GITHUB_REPOSITORY"],
-        "run_id": os.environ["GITHUB_RUN_ID"],
-        "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-    }.items()), "stale-input")
-    body = (Path(directory) / "issue.md").read_bytes()
-    require(hashlib.sha256(body).hexdigest() == record["body_sha256"], "body-changed")
-    return record
-
-
-def dependencies(body):
-    # Only an explicit bare same-repository dependency declaration counts.
-    declarations = re.findall(
-        r"(?<![\w/])blocked by:?[ \t]+(#[1-9][0-9]*(?:[ \t]*,[ \t]*#[1-9][0-9]*)*)\b", body, re.I)
-    return list(dict.fromkeys(number for text in declarations
-                              for number in re.findall(r"#([1-9][0-9]*)", text)))
-
-
 def skill(name, filename="SKILL.md"):
     return (ROOT / "skills" / name / filename).read_text()
-
 
 def section(text, start, end):
     require(start in text and end in text, "skill-changed")
     return text[text.index(start):text.index(end)].strip()
-
 
 def review_axes():
     """The sub-agent briefs from the pinned code-review skill; re-vendoring must keep them parseable."""
@@ -108,7 +71,6 @@ def review_axes():
         },
     }
 
-
 ROUND_REVIEW = {
     "DIFF": "The diff is .factory-input/candidate.patch, already applied to this workspace; there is\n"
             "no commit to diff against. The sole spec is the gate snapshot .factory-input/issue.md.\n"
@@ -119,7 +81,6 @@ ROUND_REVIEW = {
                   "claim that it passed.",
 }
 SHA = re.compile(r"[0-9a-f]{40}")
-
 
 def final_review(base, head):
     require(SHA.fullmatch(base) and SHA.fullmatch(head), "invalid-sha")
@@ -136,7 +97,6 @@ def final_review(base, head):
         "ACCEPTANCE": "",
     }
 
-
 def review_prompt(name, context):
     axis = review_axes()[name]
     text = (ROOT / "prompts" / "review.md").read_text()
@@ -146,7 +106,6 @@ def review_prompt(name, context):
     if axis["context"]:
         parts.append(axis["context"])
     return "\n\n".join(parts) + "\n"
-
 
 def prompt(mode, *args):
     if mode in ("final-standards", "final-spec"):
@@ -158,52 +117,6 @@ def prompt(mode, *args):
     require(mode in ("review-standards", "review-spec"), "invalid-mode")
     return review_prompt(mode.removeprefix("review-"), ROUND_REVIEW)
 
-
-def validate_issue(number, claimed=False, captured=None, compare=False):
-    spec = metadata(number)
-    require(os.environ["GITHUB_REF"] == "refs/heads/main", "wrong-ref")
-    repo = os.environ["GITHUB_REPOSITORY"]
-    owner = repo.split("/")[0]
-    require(os.environ["GITHUB_ACTOR"] == owner, "wrong-actor")
-    require(os.environ["GITHUB_TRIGGERING_ACTOR"] == owner, "wrong-triggering-actor")
-    issue = api(f"repos/{repo}/issues/{number}")
-    require("pull_request" not in issue and issue["state"] == "open", "not-open-issue")
-    require(issue["user"]["login"] == owner, "wrong-author")
-    labels = {label["name"] for label in issue["labels"]}
-    authorization = "implementing" if claimed else "agent:implement"
-    forbidden = {"needs-human", "ready-for-human", "agent:implement" if claimed else "implementing"}
-    require({"ready-for-agent", authorization} <= labels, "missing-authorization")
-    require(not forbidden & labels, "already-claimed")
-    events = json.loads(subprocess.check_output([
-        "gh", "api", "--paginate", "--slurp", f"repos/{repo}/issues/{number}/events?per_page=100"
-    ]))
-    authorizations = [event for page in events for event in page
-                      if event.get("event") in ("labeled", "unlabeled")
-                      and event.get("label", {}).get("name") == authorization]
-    require(bool(authorizations) and authorizations[-1]["event"] == "labeled"
-            and authorizations[-1]["actor"]["login"] == ("github-actions[bot]" if claimed else owner),
-            "wrong-label-actor")
-    body = issue.get("body") or ""
-    if captured is not None and compare:
-        require(hashlib.sha256(body.encode()).hexdigest() == captured["body_sha256"]
-                and issue.get("title", "") == captured["issue_title"], "body-changed")
-        if not claimed:
-            require(authorizations[-1]["id"] == captured["authorization_id"], "stale-authorization")
-    blockers = dependencies(body) if captured is None else captured["blocked_by"]
-    if captured is None or compare:
-        require(not issue.get("issue_dependencies_summary", {}).get("blocked_by", 0),
-                "open-dependency")
-    for dependency in blockers:
-        blocker = api(f"repos/{repo}/issues/{dependency}")
-        require(blocker["state"] == "closed" and blocker.get("state_reason") == "completed",
-                "open-dependency")
-    refs = api(f"repos/{repo}/git/matching-refs/heads/{spec['branch']}")
-    require(not any(ref["ref"] == f"refs/heads/{spec['branch']}" for ref in refs), "branch-exists")
-    pulls = api(f"repos/{repo}/pulls?state=all&head={owner}:{spec['branch']}")
-    require(not pulls, "pr-exists")
-    return issue, authorizations[-1], blockers
-
-
 REVIEW_STATES = {"started", "passed", "timeout", "runner-error", "invalid-output"}
 CHECK_STAGES = {"format", "lint", "typecheck", "build", "test"}
 GATE_REASONS = {
@@ -213,10 +126,8 @@ GATE_REASONS = {
     "credential-pattern-in-artifact", "control-failed", "diagnostics-unavailable",
 }
 
-
 def safe_reason(error):
     return str(error) if isinstance(error, ValueError) and str(error) in GATE_REASONS else "control-failed"
-
 
 def gate_attempt(number, directory):
     reason = "passed"
@@ -230,7 +141,6 @@ def gate_attempt(number, directory):
             output.write(f"reason={reason}\n")
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
             summary.write(f"Factory gate: {reason}. Inspect this run before authorizing work.\n")
-
 
 def status_comment(number, body):
     """One bot-owned status comment per run, updated on rerun; never trust public markers."""
@@ -247,7 +157,6 @@ def status_comment(number, body):
     subprocess.run(["gh", "api", "--method", "PATCH" if existing else "POST", path,
                     "--input", "-"], input=json.dumps({"body": marker + "\n" + body}),
                    text=True, check=True, stdout=subprocess.DEVNULL)
-
 
 def gate_feedback(number, result, reason):
     reason = reason if reason in GATE_REASONS else "diagnostics-unavailable"
@@ -278,7 +187,6 @@ def gate_feedback(number, result, reason):
     status_comment(number, f"Factory gate rejected: {reason}. No issue labels changed.\n\n"
                    f"Next action: {action}\n\nRun: https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}")
 
-
 def round_status(jobs):
     """Only orchestration outcomes; never echo candidate outputs or model text."""
     parts = []
@@ -297,7 +205,6 @@ def round_status(jobs):
             state = "not-started"
         parts.append(f"{axis}={state}")
     return ", ".join(parts)
-
 
 def terminal_report(number, directory):
     metadata(number)
@@ -333,48 +240,6 @@ def terminal_report(number, directory):
     subprocess.run(["gh", "issue", "edit", number, "--remove-label", "implementing", "--add-label", state], check=True)
     status_comment(number, body)
 
-
-def gate(number, directory):
-    issue, event, blockers = validate_issue(number)
-    body = issue.get("body") or ""
-    require(not CREDENTIAL_PATTERN.search((body + issue.get("title", "")).encode()),
-            "credential-pattern-in-artifact")
-    output = Path(directory)
-    output.mkdir(parents=True, exist_ok=True)
-    (output / "issue.md").write_text(body)
-    (output / "input.json").write_text(json.dumps({
-        **metadata(number), "repository": os.environ["GITHUB_REPOSITORY"],
-        "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-        "body_sha256": hashlib.sha256(body.encode()).hexdigest(),
-        "issue_title": issue.get("title", ""), "blocked_by": blockers,
-        "authorization_id": event["id"],
-    }))
-
-
-def revalidate(number, directory):
-    validate_issue(number, captured=snapshot(number, directory), compare=True)
-
-
-def claim_identity(number, event):
-    require(type(event.get("id")) is int and event["id"] > 0, "invalid-claim-event")
-    return {"issue": number, "repository": os.environ["GITHUB_REPOSITORY"],
-            "run_id": os.environ["GITHUB_RUN_ID"], "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-            "event_id": event["id"]}
-
-
-def record_claim(number, directory, filename):
-    captured = snapshot(number, directory)
-    _, event, _ = validate_issue(number, claimed=True, captured=captured, compare=True)
-    Path(filename).write_text(json.dumps({**claim_identity(number, event), "snapshot": captured}))
-
-
-def claimed(number, directory, filename):
-    captured = snapshot(number, directory)
-    _, event, _ = validate_issue(number, claimed=True, captured=captured)
-    record = json.loads(Path(filename).read_text())
-    require(record == {**claim_identity(number, event), "snapshot": captured}, "stale-claim")
-
-
 def scope(number, base):
     metadata(number)
     resolved = subprocess.run(["git", "rev-parse", "--verify", "--quiet", "--end-of-options",
@@ -408,7 +273,6 @@ def scope(number, base):
                                env=env, capture_output=True)
         require(check.returncode == 0, "whitespace-error")
 
-
 def scan(filename, public=False, limit=MAX_ARTIFACT_BYTES):
     require(public or bool(os.environ.get("FACTORY_AUTH_FILE")), "missing-auth-file")
     require(limit is None or Path(filename).stat().st_size <= limit, "artifact-too-large")
@@ -437,12 +301,10 @@ def diagnose(filename, command, log):
     tail = Path(log).read_bytes()[-MAX_DIAGNOSTIC_BYTES:].decode(errors="replace")
     Path(filename).write_text(json.dumps({"command": command, "output": ANSI.sub("", tail)}))
 
-
 def unique_json(pairs, reason="invalid-json"):
     keys = [key for key, _ in pairs]
     require(len(keys) == len(set(keys)), reason)
     return dict(pairs)
-
 
 def validate_findings(result):
     require(isinstance(result, dict) and set(result) == {"findings"}, "invalid-review")
@@ -457,7 +319,6 @@ def validate_findings(result):
                     for item in findings),
             "invalid-findings")
     return findings
-
 
 def claude_result(filename):
     """Validate Claude Code's native single-result envelope."""
@@ -475,12 +336,10 @@ def claude_result(filename):
     require(subtype == "success" and event.get("is_error") is False, "provider-error")
     return event
 
-
 def claude_findings(filename):
     event = claude_result(filename)
     require("structured_output" in event, "no-structured-output")
     return validate_findings(event["structured_output"])
-
 
 def claude_transcript(session_id, output):
     require(re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", session_id),
@@ -488,7 +347,6 @@ def claude_transcript(session_id, output):
     source = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "factory" / f"{session_id}.jsonl"
     require(source.is_file() and not source.is_symlink(), "missing-transcript")
     shutil.copyfile(source, output)
-
 
 def claude_review_result(files, output):
     reviewed = [(axis, claude_findings(filename)) for axis, filename in files]
@@ -503,13 +361,11 @@ def claude_review_result(files, output):
     Path(output).write_text(json.dumps(report, ensure_ascii=False))
     return report
 
-
 def claude_schema(mode="final"):
     schema = json.loads(json.dumps(FINDINGS_SCHEMA))
     if mode == "round":
         schema["properties"]["findings"]["items"]["required"] = ["blocking", "finding"]
     print(json.dumps(schema, separators=(",", ":")))
-
 
 def configure_claude(directory, mode="review"):
     require(mode in ("implement", "review"), "invalid-mode")
@@ -553,7 +409,6 @@ def configure_claude(directory, mode="review"):
             env.write(f"{name}={value}\n")
     return {"base_url": base_url, "model": model, "auth": str(auth), "settings": str(settings)}
 
-
 def patch_lines(patch):
     """New-file line numbers that a PR review comment can anchor to, per path."""
     path, line, commentable, hunk = None, 0, {}, False
@@ -574,7 +429,6 @@ def patch_lines(patch):
                 line += 1
     return commentable
 
-
 def inline_findings(reviewed, patch):
     """Findings whose model-supplied location really exists in the reviewed diff."""
     commentable = patch_lines(patch.read_text())
@@ -587,9 +441,7 @@ def inline_findings(reviewed, patch):
                                "path": path, "line": line})
     return inline
 
-
 COMMENT_BYTES = 60_000
-
 
 def split(text, budget):
     """Split losslessly into chunks of at most budget UTF-8 bytes, at character boundaries."""
@@ -601,7 +453,6 @@ def split(text, budget):
         chunks.append(chunk)
         remaining = remaining[len(chunk.encode()):]
     return chunks
-
 
 def comments(directory, output):
     """Publishable round-review findings, split losslessly to fit GitHub's comment limit."""
@@ -631,17 +482,14 @@ def comments(directory, output):
             require(len(body.encode()) <= COMMENT_BYTES, "comment-too-large")
             (target / f"{index:04d}.md").write_text(body)
 
-
 FINAL_MARKER = re.compile(r"<!-- tanomu-final-review head=([0-9a-f]{40}) digest=([0-9a-f]{16}) "
                           r"part=([1-9][0-9]*)/([1-9][0-9]*) -->")
 # Bare `#N` only: `owner/repo#N` and URLs point outside this repository.
 LINKED_ISSUE = re.compile(r"(?<![\w/])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs):?\s+#([1-9][0-9]*)\b",
                           re.I)
 
-
 def linked_issues(body):
     return list(dict.fromkeys(int(number) for number in LINKED_ISSUE.findall(body or "")))
-
 
 def final_pull(number):
     """The PR, why it is not an open same-repository PR into main, and the final review sets
@@ -665,7 +513,6 @@ def final_pull(number):
         if match and comment["user"]["login"] == "github-actions[bot]" and comment["user"]["type"] == "Bot":
             posted.append([match[1], match[2], int(match[3]), int(match[4])])
     return pull, problems, posted
-
 
 def final_identify(number, event, directory):
     require(event in ("pull_request_target", "workflow_dispatch"), "invalid-event")
@@ -703,12 +550,10 @@ def final_identify(number, event, directory):
     return {"pr": number, "head": head, "base": base, "skip": json.dumps(skip),
             "spec": json.dumps(bool(issues))}
 
-
 def final_head(number, filename):
     pull, problems, posted = final_pull(number)
     Path(filename).write_text(json.dumps({"pr": int(number), "head": pull["head"]["sha"],
                                           "eligible": not problems, "posted": posted}))
-
 
 def pr_diff(head, base):
     """Write the PR diff into a fresh .factory-input before any untrusted input is copied there."""
@@ -725,9 +570,7 @@ def pr_diff(head, base):
     with open(directory / "final.patch", "xb") as patch:
         patch.write(git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head))
 
-
 INLINE_MARKER = re.compile(r"<!-- tanomu-final-inline head=([0-9a-f]{40}) digest=([0-9a-f]{16}) -->")
-
 
 def final_comments(directory, identity, current, output, reviews=None):
     source, target = Path(directory), Path(output)
@@ -796,7 +639,6 @@ def final_comments(directory, identity, current, output, reviews=None):
         (target / f"{part:04d}.md").write_text(body)
     return True
 
-
 def recovery_artifact(repo, run):
     """Read only allowlisted regular files from a validated run; never extract archive paths."""
     record = api(f"repos/{repo}/actions/runs/{run}")
@@ -820,7 +662,6 @@ def recovery_artifact(repo, run):
         require(all((item.external_attr >> 16) & 0o170000 in (0, 0o100000) for item in members),
                 "invalid-review-archive")
         return {item.filename: zipped.read(item).decode("utf-8") for item in members}
-
 
 def final_resume(number, event, directory, output):
     """Recover an incomplete automatic publication; unavailable or invalid artifacts mean fresh review."""
@@ -878,7 +719,6 @@ def final_resume(number, event, directory, output):
             # No untrusted response, archive contents or model text reaches logs.
             continue
     return False
-
 
 if __name__ == "__main__":
     try:
