@@ -97,6 +97,7 @@ class SkillPinTest(unittest.TestCase):
     files = {
         "LICENSE": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
         "code-review/SKILL.md": "09eb147f793e4647949edd32dbad278f0554dfb56e0d46b699cd4c2c55bf0357",
+        "pr/SKILL.md": "ab63f1cf78647389edcd386c9427c5dfca27ed2836930c24773ffee834c19bcd",
     }
     skills = CONTROL.parent / "skills"
 
@@ -1140,6 +1141,14 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(downloads(handoff), {"checked-${{ steps.approved.outputs.round }}", "factory-claim", "factory-input"})
         self.assertNotIn("advisory", str(handoff))
         self.assertNotIn("review.json", str(handoff))
+
+    def test_handoff_uses_trusted_pr_skill_for_the_body(self):
+        step = next(step for step in self.implement["jobs"]["handoff"]["steps"]
+                    if step.get("id") == "pr")
+        self.assertIn('control.py pr-body "$ISSUE" "$ROUND" "$RUNNER_TEMP/pr.md"', step["run"])
+        self.assertEqual(step["env"]["ROUND"], "${{ steps.approved.outputs.round }}")
+        self.assertNotIn("gh pr create", step["run"].split("control.py pr-body")[0])
+        self.assertNotRegex(step["run"], r"printf .*Implements")
 
     def test_handoff_uses_trusted_control_after_patch_with_write_token(self):
         steps = self.implement["jobs"]["handoff"]["steps"]
