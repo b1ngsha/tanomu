@@ -93,6 +93,9 @@ class FinalRecoveryTest(unittest.TestCase):
         self.assertIn(f"repos/{REPO}/actions/runs/100", self.api_calls)
 
     def test_complete_summary_with_missing_inline_is_recovered(self):
+        self.identity["summary_format"] = "compact"
+        self.files["identity.json"] = json.dumps(self.identity)
+        (self.source / "identity.json").write_text(self.files["identity.json"])
         report = {"verdict": "approve", "findings": [], "advisory": ["Standards: bug"],
                   "inline": [{"axis": "Standards", "blocking": False, "finding": "bug",
                               "path": "src/a.ts", "line": 1}]}
@@ -103,9 +106,10 @@ class FinalRecoveryTest(unittest.TestCase):
         current.write_text(json.dumps({"pr": 2, "head": HEAD, "eligible": True, "posted": []}))
         control.final_comments(self.source, self.source / "identity.json", current, output)
         self.comments = [{"user": BOT, "body": body.read_text()} for body in sorted(output.glob("*.md"))]
-        self.assertIn("Standards: bug", self.comments[0]["body"])
+        self.assertNotIn("Standards: bug", self.comments[0]["body"])
         self.assertTrue(self.resume())
         self.assertEqual(json.loads((self.output / "review.json").read_text()), report)
+        self.assertEqual(json.loads((self.output / "identity.json").read_text())["summary_format"], "compact")
 
     def test_manual_dispatch_never_reuses_reports(self):
         self.assertFalse(self.resume("workflow_dispatch"))

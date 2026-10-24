@@ -467,7 +467,7 @@ def final_identify(number, event, directory):
         issues.append(issue_number)
     (output / "identity.json").write_text(json.dumps(
         {"pr": int(number), "head": head, "base": base, "issues": issues,
-         "run": os.environ["GITHUB_RUN_ID"]}))
+         "run": os.environ["GITHUB_RUN_ID"], "summary_format": "compact"}))
     return {"pr": number, "head": head, "base": base, "skip": json.dumps(skip),
             "spec": json.dumps(bool(issues))}
 
