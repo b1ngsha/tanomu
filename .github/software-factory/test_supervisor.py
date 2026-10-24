@@ -103,10 +103,6 @@ class SupervisorTest(unittest.TestCase):
             os.close(reader)
             os.close(writer)
 
-    def test_retro_is_an_allowlisted_phase(self):
-        stdout, _ = self.finish(self.start("import time; time.sleep(.15)", phase="retro"), 0)
-        self.assertIn('"phase": "retro"', stdout)
-
     def test_spawn_failure_and_invalid_phase_are_sanitized(self):
         self.finish(self.start("", command=[str(self.root / SECRET)]), 127)
         process = self.start("pass", phase=SECRET)

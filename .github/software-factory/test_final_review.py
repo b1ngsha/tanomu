@@ -367,14 +367,11 @@ class ClaudeResultTest(unittest.TestCase):
         path.write_text(json.dumps(event))
         return str(path)
 
-    def test_reads_native_structured_and_text_results(self):
+    def test_reads_native_structured_results(self):
         filename = self.write({"type": "result", "subtype": "success", "is_error": False,
                                "structured_output": {"findings": [{"blocking": True, "finding": "bug"}]},
                                "result": "Done."})
         self.assertEqual(control.claude_findings(filename), [{"blocking": True, "finding": "bug"}])
-        output = self.directory / "retro.md"
-        control.claude_text(filename, output)
-        self.assertEqual(output.read_text(), "Done.")
 
     def test_rejects_incomplete_or_unstructured_results(self):
         base = {"type": "result", "subtype": "success", "is_error": False}
@@ -391,7 +388,7 @@ class ClaudeResultTest(unittest.TestCase):
             with self.subTest(subtype=subtype), self.assertRaisesRegex(ValueError, f"^{reason}$"):
                 control.claude_result(self.write({"type": "result", "subtype": subtype, "is_error": True}))
 
-    def test_rejects_duplicate_keys_invalid_findings_and_empty_text(self):
+    def test_rejects_duplicate_keys_and_invalid_findings(self):
         path = self.directory / "duplicate.json"
         path.write_text('{"type":"result","subtype":"success","structured_output":{"findings":[],"findings":[]}}')
         with self.assertRaisesRegex(ValueError, "^invalid-claude-result$"):
@@ -399,9 +396,6 @@ class ClaudeResultTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "^invalid-findings$"):
             control.claude_findings(self.write({"type": "result", "subtype": "success", "is_error": False,
                 "structured_output": {"findings": [{"blocking": "yes", "finding": "x"}]}}))
-        with self.assertRaisesRegex(ValueError, "^invalid-result-text$"):
-            control.claude_text(self.write({"type": "result", "subtype": "success", "is_error": False,
-                                            "result": " \n"}), self.directory / "retro.md")
 
     def test_copies_only_a_named_native_transcript(self):
         session = "123e4567-e89b-42d3-a456-426614174000"

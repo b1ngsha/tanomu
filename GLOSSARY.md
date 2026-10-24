@@ -37,7 +37,7 @@ _Avoid_: channel, vendor, supplier
 ## Software Factory
 
 **Factory Agent**:
-A model-driven participant in the software factory that performs an implementation, review, or retrospective role without deployment authority.
+A model-driven participant in the software factory that performs an implementation or review role without deployment authority.
 _Avoid_: bot, autonomous maintainer
 
 **Provider Preflight**:
@@ -45,7 +45,7 @@ An operational check that a Provider works for a Factory Agent role. It is not a
 _Avoid_: smoke task, implementation round
 
 **Run Evidence**:
-The retained record of a Factory Agent run and its outcomes, used for retrospectives and human diagnosis. It does not authorize publication or delivery.
+The retained record of a Factory Agent run and its outcomes, used for human diagnosis. It does not authorize publication or delivery.
 _Avoid_: trusted transcript, approval record
 
 ## Blog Digest

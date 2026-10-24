@@ -10,7 +10,7 @@ import time
 
 HEARTBEAT_SECONDS = 60
 KILL_GRACE_SECONDS = 15
-PHASES = {"implement": ("implement", None), "retro": ("retro", None),
+PHASES = {"implement": ("implement", None),
           **{f"{phase}-{axis}": (phase, axis) for phase in ("review", "final")
              for axis in ("standards", "spec")}}
 

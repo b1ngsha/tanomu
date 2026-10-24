@@ -10,7 +10,7 @@ import time
 
 PATHS = {"implement": "software-factory-implement.yml", "final-review": "final-review.yml"}
 STATES = {"queued", "in_progress", "success", "failure", "cancelled", "skipped", "timed_out", "neutral", "action_required"}
-JOBS = {"gate", "gate-feedback", "claim", "handoff", "retro", "retro-publish", "report",
+JOBS = {"gate", "gate-feedback", "claim", "handoff", "publish-reviews", "report",
         "identify", "review", "publish"} | {f"round{n} / {stage}" for n in range(1, 5)
                                                    for stage in ("implement", "verify", "review", "diagnostics")}
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -61,7 +61,7 @@ def summarize_jobs(jobs, kind):
     return {"jobs": safe, "phase": active[-1] if active else "waiting-or-completed",
             "delivery": safe.get("handoff", "pending") if kind == "implement" else "separate-implementation-run",
             "final_review": "pending-separate-run" if kind == "implement" else safe.get("publish", "pending"),
-            "retro": safe.get("retro-publish", safe.get("retro", "pending")) if kind == "implement" else "separate-implementation-run",
+            "review_comments": safe.get("publish-reviews", "pending") if kind == "implement" else "separate-implementation-run",
             "ci": "unavailable-inspect-pr-checks"}
 
 
@@ -141,14 +141,14 @@ def snapshot(api, repo, run_id):
                            for item in artifacts if type(item.get("id")) is int]
     result["evidence_state"] = "recorded" if result["artifacts"] else "unavailable-not-proof-never-produced"
     result["next_action"] = ("Observe progress in Actions; no retry is authorized." if status in ("queued", "in_progress") else
-                             "Inspect delivery, final review, retro and PR checks separately; human acceptance and merge remain required.")
+                             "Inspect delivery, review comments, final review and PR checks separately; human acceptance and merge remain required.")
     return result
 
 
 def render(record):
     lines = [f"Factory {record['kind']}: **{record['state']}**; phase: {record['phase']}.",
              f"Execution: {record['run_id']}.{record['run_attempt']}; parent: {record['parent'] or 'none'}.",
-             f"Delivery: {record['delivery']}; independent final review: {record['final_review']}; retro: {record['retro']}; CI: {record['ci']}."]
+             f"Delivery: {record['delivery']}; independent final review: {record['final_review']}; review comments: {record['review_comments']}; CI: {record['ci']}."]
     lines.extend(f"{name}: {state}." for name, state in record["jobs"].items())
     lines.extend([f"Next action: {record['next_action']}", "Evidence: " + " · ".join(record["evidence"].values()),
                   f"Artifact metadata: {record['evidence_state']}; expired recorded artifacts: {sum(item['expired'] for item in record['artifacts'])}.",
