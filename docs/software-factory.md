@@ -68,10 +68,10 @@ Recheck this policy before changing models. The pinned CLI uses its tested legac
 
 Final PR review instead runs a pinned Claude Code CLI against a provider's official
 Anthropic-compatible endpoint, with paid usage on a dedicated key. Its configuration
-lives in the `factory-review` environment, which has no required reviewers and
-accepts deployments from `main` only: the variables `FACTORY_REVIEW_BASE_URL`
+lives in the `agent` environment, which has no required reviewers and
+accepts deployments from `main` only: the variables `AGENT_BASE_URL`
 (`https://api.deepseek.com/anthropic`, or a verified Moonshot endpoint) and
-`FACTORY_REVIEW_MODEL`, and the secret `FACTORY_REVIEW_API_KEY`, which should carry
+`AGENT_MODEL`, and the secret `AGENT_API_KEY`, which should carry
 a provider-side spend limit. Every model alias Claude Code uses is set to that one
 model, so no hidden request goes to another model. DeepSeek `deepseek-flash` passed
 the read-only tool loop, the structured findings schema and the canary in a manual
@@ -241,8 +241,8 @@ this repository's issues referenced by
 `Closes`, `Fixes`, `Resolves` or `Refs #N` in the PR body; their captured bodies supply this review's specification.
 Without a linked issue, Spec is skipped and the report explains why. Each axis runs
 in a fresh session under a 600-second budget and returns schema-validated structured
-output. `control.py` reads the terminal result and validates it again; intermediate
-stream events stay on the runner and are not uploaded. A timeout, provider error or
+output. `control.py` reads the native single-result JSON envelope and validates its
+`structured_output` again. Native result files stay on the runner and are not uploaded. A timeout, provider error or
 invalid result fails the job without publishing a partial review.
 
 The model job has no GitHub write token. A separate publisher with no model secret
