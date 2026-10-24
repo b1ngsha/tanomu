@@ -1176,23 +1176,21 @@ class WorkflowContractTest(unittest.TestCase):
         generation = self.claude_steps()["implement"]["run"]
         for forbidden in ("--dangerously-skip-permissions", "bypassPermissions"):
             self.assertNotIn(forbidden, canary + generation)
-        self.assertIn("--tools Read,Glob,Grep,Edit,Write,Bash", canary)
+        self.assertIn('agent_runner.py" canary implement 120 --', canary)
         self.assertIn("Use Write to create canary-write", canary)
         self.assertIn("then Edit to replace initial with ok", canary)
         self.assertIn("Use Bash to test that canary-write contains ok", canary)
         self.assertIn('test "$(< "$canary/canary-write")" = ok', canary)
         self.assertIn("test ! -e \"$canary/hook-ran\" && test ! -e \"$canary/mcp-ran\"", canary)
 
-    def test_review_aggregates_and_scans_only_structured_findings(self):
-            run = self.claude_steps()["review"]["run"]
-            self.assertIn('control.py claude-result', run)
-            self.assertIn('control.py scan-output "$REVIEW_OUTPUT"', run)
-            self.assertLess(run.index("control.py claude-result"), run.index("control.py scan-output"))
-            self.assertNotIn("review.md", run)
-            steps = self.round["jobs"]["review"]["steps"]
-            upload = next(step["with"] for step in steps
-                          if step.get("with", {}).get("name") == "feedback-${{ inputs.round }}")
-            self.assertEqual(upload["path"], "${{ runner.temp }}/feedback")
+    def test_review_uses_shared_runner_and_explicit_feedback_artifact(self):
+        run = self.claude_steps()["review"]["run"]
+        self.assertIn('agent_runner.py round 600 -- "$ISSUE"', run)
+        self.assertNotIn("review.md", run)
+        steps = self.round["jobs"]["review"]["steps"]
+        upload = next(step["with"] for step in steps
+                      if step.get("with", {}).get("name") == "feedback-${{ inputs.round }}")
+        self.assertEqual(upload["path"], "${{ runner.temp }}/feedback")
 
     def jobs(self):
         for workflow in (self.implement, self.round):
@@ -1200,31 +1198,22 @@ class WorkflowContractTest(unittest.TestCase):
 
     def claude_steps(self):
             return {name: step for name, job in self.jobs() for step in job.get("steps", [])
-                    if "claude -p" in step.get("run", "")}
+                    if re.search(r"agent_runner.py (implement|round) ", step.get("run", ""))}
 
     def test_model_deadlines(self):
-            steps = self.claude_steps()
-            self.assertEqual(set(steps), {"implement", "review"})
-            for name, seconds in (("implement", 1500), ("review", 600)):
-                with self.subTest(job=name):
-                    self.assertEqual(re.findall(r' (\d+) -- \\\s+claude -p', steps[name]["run"]),
-                                     [str(seconds)])
+        steps = self.claude_steps()
+        self.assertEqual(set(steps), {"implement", "review"})
+        self.assertIn("agent_runner.py implement 1500 --", steps["implement"]["run"])
+        self.assertIn('agent_runner.py round 600 --', steps["review"]["run"])
 
-    def test_review_runs_both_axes_and_aggregates_both_files(self):
-            run = self.claude_steps()["review"]["run"]
-            self.assertIn("for axis in standards spec; do", run)
-            self.assertIn('prompt "review-$axis"', run)
-            self.assertIn('"$RUNNER_TEMP/review-$axis.json" "$RUNNER_TEMP/review-$axis-summary.txt" "review-$axis"', run)
-            self.assertIn('claude-findings "$RUNNER_TEMP/review-$axis.json"', run)
-            self.assertIn('"Standards=$RUNNER_TEMP/review-standards.json" "Spec=$RUNNER_TEMP/review-spec.json"', run)
 
     def test_only_implementation_gets_shell(self):
             modes = {name: re.findall(r"control\.py configure-claude \S+ (\w+)", step["run"])
                      for name, job in self.jobs() for step in job.get("steps", [])
                      if "control.py configure-claude" in step.get("run", "")}
             self.assertEqual(modes, {"implement": ["implement"], "review": ["review"]})
-            self.assertIn("--tools Read,Glob,Grep,Edit,Write,Bash", self.claude_steps()["implement"]["run"])
-            self.assertIn("--tools Read,Glob,Grep", self.claude_steps()["review"]["run"])
+            self.assertIn("agent_runner.py implement", self.claude_steps()["implement"]["run"])
+            self.assertIn("agent_runner.py round", self.claude_steps()["review"]["run"])
             self.assertNotIn("Write,Bash", self.claude_steps()["review"]["run"])
 
     def test_sessions_are_always_scanned_then_uploaded_for_three_days(self):

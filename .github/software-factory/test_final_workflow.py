@@ -70,13 +70,58 @@ class FinalRunnerStepTest(unittest.TestCase):
 
     def test_failed_axes_fail_without_leaking_or_publishing(self):
         for claude, status, calls in ((f"echo {SECRET} >&2\nexec sleep 20", 124, 1), ("exit 3", 3, 1),
-                                      (self.result(subtype="error_max_structured_output_retries", is_error=True), 1, 2)):
+                                      (self.result(subtype="error_max_structured_output_retries", is_error=True), 1, 1)):
             with self.subTest(status=status):
                 result, _ = self.review(claude)
                 self.assertEqual(result.returncode, status, result.stderr)
                 self.assertNotIn(SECRET, result.stdout + result.stderr)
                 self.assertEqual(len(self.calls("claude")), calls)
                 self.assertFalse(self.temp("final-review/review.json").exists())
+
+    def test_final_canary_exercises_the_review_invocation(self):
+        result, _ = self.run_step("review", self.reply({"findings": []}),
+                                  select="Verify candidate configuration is inert")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        [canary] = self.calls("claude")
+        result, _ = self.review(self.reply({"findings": []}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        def options(call):
+            # Option order is immaterial; compare every flag and value except the prompt.
+            return {arg: (call[index + 1] if index + 1 < len(call) - 1
+                          and not call[index + 1].startswith("--") else None)
+                    for index, arg in enumerate(call[:-1]) if arg.startswith("--")}
+        self.assertEqual(options(canary), options(self.calls("claude")[0]))
+
+    def test_canary_rejects_applied_candidate_instructions(self):
+        result, _ = self.run_step("review", self.reply({"findings": [
+            {"blocking": False, "finding": "CANARY_INSTRUCTION"}]}),
+            select="Verify candidate configuration is inert")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("::error::claude-canary-instruction-applied", result.stdout)
+
+    def test_invalid_standards_stop_spec_with_safe_outcomes(self):
+        for claude in ("printf '%s' 'not json'", self.result(), self.reply({"verdict": "approve", "findings": []}),
+                       self.reply({"findings": [{"blocking": True, "finding": " "}]})):
+            with self.subTest(claude=claude):
+                result, _ = self.review(claude)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertEqual(len(self.calls("claude")), 1)
+                self.assertEqual((self.directory / "output").read_text(),
+                                 "standards=started\nstandards=invalid-output\n")
+                self.assertFalse(self.temp("final-review/review.json").exists())
+
+    def test_invalid_spec_preserves_standards_and_withholds_report(self):
+        claude = ('if [[ "$*" == *"' + control.review_axes()["spec"]["brief"] + '"* ]]; then\n'
+                  + self.reply({"findings": [{"blocking": "yes", "finding": SECRET}]})
+                  + "\nelse\n" + self.reply({"findings": []}) + "\nfi")
+        result, _ = self.review(claude)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(len(self.calls("claude")), 2)
+        self.assertNotIn(SECRET, result.stdout + result.stderr)
+        self.assertEqual((self.directory / "output").read_text(),
+                         "standards=started\nstandards=passed\nspec=started\nspec=invalid-output\n")
+        self.assertFalse(self.temp("final-review/review.json").exists())
 
     def test_review_records_only_commentable_locations(self):
         claude = self.result(subtype="success", is_error=False, structured_output={"findings": [
@@ -137,7 +182,8 @@ class FinalRunnerStepTest(unittest.TestCase):
     def publish(self, head=HEAD, comments=(), review=(("verdict", "approve"), ("findings", []), ("advisory", []))):
         files = {"pull.json": json.dumps({**PULL, "head": {**PULL["head"], "sha": head}}),
                  "comments.json": json.dumps([list(comments)]),
-                 "temp/input/identity.json": json.dumps({"pr": 17, "head": HEAD, "base": BASE, "issues": [], "run": "42"}),
+                 "temp/input/identity.json": json.dumps({"pr": 17, "head": HEAD, "base": BASE, "issues": [], "run": "42",
+                                                         "summary_format": "compact"}),
                  "temp/review/review.json": json.dumps(dict(review))}
         result, _ = self.run_step("publish", gh=GH, select="control.py final-head", files=files, env={
             "PR": "17", "GITHUB_REF": "refs/heads/main", "GH_REPO": REPO, "FACTORY_AUTH_FILE": ""})
@@ -152,7 +198,7 @@ class FinalRunnerStepTest(unittest.TestCase):
         self.assertGreater(len(bodies), 1)
         for part, body in enumerate(bodies, 1):
             self.assertRegex(body.split("\n", 1)[0], rf"<!-- tanomu-final-review head={HEAD} "
-                                                     rf"digest=[0-9a-f]{{16}} part={part}/{len(bodies)} inline=(none|[0-9a-f]{{16}}) -->")
+                                                     rf"digest=[0-9a-f]{{16}} part={part}/{len(bodies)} inline=none -->")
             self.assertLessEqual(len(body.encode()), 60_000)
         self.assertTrue(all(call[:3] == ["pr", "comment", "17"]
                             for call in self.calls("gh") if call[:1] == ["pr"]))
@@ -167,6 +213,10 @@ class FinalRunnerStepTest(unittest.TestCase):
             ("advisory", []), ("inline", [{"axis": "Standards", "blocking": True, "finding": "bug",
                                           "path": "src/a.ts", "line": 2}])))
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("1 blocking, 0 advisory", bodies[0])
+        self.assertNotIn("Standards: bug", bodies[0])
+        payload = json.loads((self.directory / "temp/comments/inline.json").read_text())
+        self.assertIn("bug", payload["comments"][0]["body"])
         calls = self.calls("gh")
         post = next(call for call in calls if call[:3] == ["api", "--method", "POST"])
         self.assertEqual(post[3], f"repos/{REPO}/pulls/17/reviews")
@@ -278,19 +328,15 @@ class FinalWorkflowContractTest(unittest.TestCase):
                 for action in re.findall(r"uses: (\S+)", path.read_text()):
                     self.assertRegex(action, r"^[\w-]+/[\w-]+@[0-9a-f]{40}$|^\./")
         run = json.dumps(self.jobs["review"])
-        self.assertIn(f"@anthropic-ai/claude-code@{control.CLAUDE_CODE_VERSION} --no-audit --no-fund && "
-                      f"claude --version | grep -Fx '{control.CLAUDE_CODE_VERSION} (Claude Code)'", run)
+        self.assertIn('agent_runner.py install', run)
         self.assertIn('configure-claude \\"$RUNNER_TEMP/claude\\"', run)
         for forbidden in ("--dangerously-skip-permissions", "bypassPermissions", "@latest"):
             self.assertNotIn(forbidden, run)
         steps = {step.get("name"): step for step in self.jobs["review"]["steps"]}
         canary, review = steps["Verify candidate configuration is inert"], steps["Review the pull request"]
-        self.assertEqual(re.findall(r' (\d+) -- \\\s+claude -p', canary["run"]), ["120"])
-        self.assertEqual(re.findall(r' (\d+) -- \\\s+claude -p', review["run"]), ["600"])
-        # The canary proves the exact invocation the review uses, with the same model routing.
-        invocation = re.compile(r'claude -p .*?--settings "\$CLAUDE_SETTINGS"', re.DOTALL)
-        [canary_call], [review_call] = (invocation.findall(re.sub(r"\s+", " ", step["run"])) for step in (canary, review))
-        self.assertEqual(canary_call, review_call)
+        self.assertIn('agent_runner.py" canary final 120 --', canary["run"])
+        self.assertIn('agent_runner.py final 600 -- "$BASE" "$HEAD" "$SPEC"', review["run"])
+        self.assertIn('cp -- "$RUNNER_TEMP/final-input/identity.json"', review["run"])
         self.assertEqual(canary.get("env", {}), {})  # Both steps inherit the same job-level routing.
         model = "${{ vars.AGENT_MODEL }}"
         self.assertTrue(all(value == model for key, value in review["env"].items() if "MODEL" in key))
