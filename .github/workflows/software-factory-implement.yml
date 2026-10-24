@@ -113,6 +113,8 @@ jobs:
   round1:
     needs: claim
     uses: ./.github/workflows/software-factory-round.yml
+    secrets:
+      AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
     permissions:
       contents: read
     with:
@@ -123,6 +125,8 @@ jobs:
     needs: round1
     if: needs.round1.outputs.outcome == 'checks_failed' || needs.round1.outputs.outcome == 'request_changes'
     uses: ./.github/workflows/software-factory-round.yml
+    secrets:
+      AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
     permissions:
       contents: read
     with:
@@ -133,6 +137,8 @@ jobs:
     needs: round2
     if: needs.round2.outputs.outcome == 'checks_failed' || needs.round2.outputs.outcome == 'request_changes'
     uses: ./.github/workflows/software-factory-round.yml
+    secrets:
+      AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
     permissions:
       contents: read
     with:
@@ -143,6 +149,8 @@ jobs:
     needs: round3
     if: needs.round3.outputs.outcome == 'checks_failed' || needs.round3.outputs.outcome == 'request_changes'
     uses: ./.github/workflows/software-factory-round.yml
+    secrets:
+      AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
     permissions:
       contents: read
     with:

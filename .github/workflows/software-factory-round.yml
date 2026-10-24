@@ -1,6 +1,9 @@
 name: Software factory round
 on:
   workflow_call:
+    secrets:
+      AGENT_API_KEY:
+        required: true
     inputs:
       issue:
         required: true
