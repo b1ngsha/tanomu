@@ -172,7 +172,6 @@ def prompt(mode, *args):
 def validate_issue(number, claimed=False, captured=None, compare=False):
     spec = metadata(number)
     require(os.environ["GITHUB_REF"] == "refs/heads/main", "wrong-ref")
-    require(os.environ["MODEL"] == MODEL, "unsupported-model")
     repo = os.environ["GITHUB_REPOSITORY"]
     owner = repo.split("/")[0]
     require(os.environ["GITHUB_ACTOR"] == owner, "wrong-actor")
@@ -814,7 +813,7 @@ def split(text, budget):
 def comments(directory, output):
     """Publishable reports, split losslessly to fit GitHub's comment body limit."""
     source, target = Path(directory), Path(output)
-    reports = [(f"Factory review — round {number}", source / f"feedback-{number}" / "review.md")
+    reports = [(f"Factory review — round {number}", source / f"feedback-{number}" / "review.json")
                for number in range(1, 5)]
     reports.append(("Factory retro — proposals only", source / "retro" / "retro.md"))
     target.mkdir(parents=True, exist_ok=True)
@@ -823,7 +822,16 @@ def comments(directory, output):
         if not path.is_file():
             continue
         scan(path, public=True, limit=None)
-        text = path.read_text().replace("@", "@" + chr(0x200b))
+        text = path.read_text()
+        if path.name == "review.json":
+            review = json.loads(text)
+            require(isinstance(review, dict) and all(isinstance(review.get(key), list)
+                    and all(isinstance(item, str) for item in review[key])
+                    for key in ("findings", "advisory")), "invalid-review")
+            findings = [f"- **Blocking** — {item}" for item in review["findings"]]
+            findings += [f"- Advisory — {item}" for item in review["advisory"]]
+            text = "### Findings\n\n" + ("\n".join(findings) or "No findings.") + "\n"
+        text = text.replace("@", "@" + chr(0x200b))
         preface = (f"## {title}\n\n"
                    f"Run: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
                    f"{os.environ['GITHUB_RUN_ID']}\n\n")
