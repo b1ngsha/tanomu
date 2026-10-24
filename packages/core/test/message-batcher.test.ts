@@ -54,6 +54,39 @@ describe("createMessageBatcher", () => {
     ]);
   });
 
+  it("flushes a clean batch for the same chat after its first flush fails", async () => {
+    const error = new Error("model down");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    const flushes: Array<{ chatId: string; items: string[] }> = [];
+    const batcher = createMessageBatcher<string>({
+      windowMs: 2_500,
+      onFlush: async (chatId, items) => {
+        flushes.push({ chatId, items });
+        if (flushes.length === 1) throw error;
+      },
+    });
+
+    batcher.add("c1", "a");
+    await vi.advanceTimersByTimeAsync(2_500);
+
+    expect(flushes).toEqual([{ chatId: "c1", items: ["a"] }]);
+    expect(consoleError).toHaveBeenCalledWith("failed to flush messages for chat c1", error);
+
+    batcher.add("c1", "b");
+    await vi.advanceTimersByTimeAsync(2_499);
+
+    expect(flushes).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(flushes).toEqual([
+      { chatId: "c1", items: ["a"] },
+      { chatId: "c1", items: ["b"] },
+    ]);
+    expect(flushes.map((flush) => flush.chatId)).toEqual(["c1", "c1"]);
+    expect(consoleError).toHaveBeenCalledTimes(1);
+  });
+
   it("logs flush errors instead of throwing", async () => {
     const error = new Error("model down");
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
