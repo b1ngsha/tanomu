@@ -96,7 +96,6 @@ class TaskTest(TaskDirectory):
                 self.assertRejects("skill-changed", control.prompt, "review-standards", "1")
 
 
-
 class SkillPinTest(unittest.TestCase):
     """The vendored skills are trusted prompt text, so pin them to one upstream commit."""
 
@@ -691,14 +690,6 @@ class ScanTest(unittest.TestCase):
         self.assertNotIn(SECRET, result.stdout + result.stderr)
 
 
-
-
-
-
-
-
-
-
 def mixed_text(units):
     """Deterministic text mixing 1- to 4-byte UTF-8, joiners, mentions and whitespace runs."""
     pieces = ("a", "é", "检", "🙂", " @team", "  \t", "\n", "👩‍💻", "```", "\n\n")
@@ -840,7 +831,6 @@ class DiagnoseTest(unittest.TestCase):
             control.diagnose(str(self.output), "rm -rf /", str(self.log))
 
 
-
 class RunnerStepTest(unittest.TestCase):
     """Run real supervised workflow steps against a stub Claude Code binary."""
 
@@ -916,6 +906,15 @@ class RunnerStepTest(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertEqual((self.directory / "output").read_text(), "standards=started\nstandards=runner-error\n")
         self.assertEqual(len(self.calls("claude")), 1)
+
+    def test_canary_rejects_a_missing_shell_result(self):
+        for shell, status in ((False, 1), (True, 0)):
+            stub = 'printf ok > canary-write\n'
+            if shell:
+                stub += 'printf ok > canary-shell\n'
+            stub += self.reply({"findings": []})
+            result, _ = self.run_step("implement", stub, select="Verify candidate configuration is inert")
+            self.assertEqual(result.returncode, status, result.stderr)
 
     def test_implement_validates_native_result(self):
         result, _ = self.run_step("implement", self.result(result="Done."))
@@ -1067,8 +1066,6 @@ class RunnerStepTest(unittest.TestCase):
                 self.assertEqual((self.calls("gh"), bodies), ([], []))
 
 
-
-
 class WorkflowContractTest(unittest.TestCase):
     """Wiring between jobs is not exercised by the unit tests above, so pin its invariants."""
 
@@ -1181,7 +1178,8 @@ class WorkflowContractTest(unittest.TestCase):
             self.assertNotIn(forbidden, canary + generation)
         self.assertIn("--tools Read,Glob,Grep,Edit,Write,Bash", canary)
         self.assertIn("Use Write to create canary-write", canary)
-        self.assertIn("then Bash to test that file is nonempty", canary)
+        self.assertIn("then Edit to replace initial with ok", canary)
+        self.assertIn("Use Bash to test that canary-write contains ok", canary)
         self.assertIn('test "$(< "$canary/canary-write")" = ok', canary)
         self.assertIn("test ! -e \"$canary/hook-ran\" && test ! -e \"$canary/mcp-ran\"", canary)
 
@@ -1303,8 +1301,6 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn('control.py comments "$RUNNER_TEMP/reports"', run)
         self.assertLess(run.index("control.py comments"), run.index("gh "))
         self.assertIn("--body-file", run)
-
-
 
 
 if __name__ == "__main__":

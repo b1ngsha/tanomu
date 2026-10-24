@@ -12,7 +12,6 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent
-MODEL = "opencode/deepseek-v4.1-flash-free"
 CLAUDE_CODE_VERSION = "2.1.304"
 CLAUDE_PROVIDER_HOSTS = {"api.deepseek.com", "api.moonshot.ai", "api.moonshot.cn"}
 MAX_ARTIFACT_BYTES = 512_000
@@ -25,7 +24,7 @@ FINDINGS_SCHEMA = {
     "required": ["findings"],
     "properties": {"findings": {"type": "array", "items": {
         "type": "object", "additionalProperties": False,
-        # Round review has no schema, so path/line stay optional in local validation.
+        # Round review omits locations; local validation accepts them for final review.
         "required": ["blocking", "finding", "path", "line"],
         "properties": {"blocking": {"type": "boolean"}, "finding": {"type": "string", "pattern": r"\S"},
                        "path": {"anyOf": [{"type": "string", "pattern": r"\S"}, {"type": "null"}]},
@@ -217,7 +216,7 @@ def validate_issue(number, claimed=False, captured=None, compare=False):
 REVIEW_STATES = {"started", "passed", "timeout", "runner-error", "invalid-output"}
 CHECK_STAGES = {"format", "lint", "typecheck", "build", "test"}
 GATE_REASONS = {
-    "invalid-issue", "wrong-ref", "unsupported-model", "wrong-actor", "wrong-triggering-actor",
+    "invalid-issue", "wrong-ref", "wrong-actor", "wrong-triggering-actor",
     "not-open-issue", "wrong-author", "missing-authorization", "already-claimed",
     "wrong-label-actor", "open-dependency", "branch-exists", "pr-exists",
     "credential-pattern-in-artifact", "control-failed", "diagnostics-unavailable",
@@ -284,7 +283,6 @@ def gate_feedback(number, result, reason):
         "open-dependency": "Complete the declared dependencies before deliberate authorization.",
         "branch-exists": "Inspect the existing task branch and any PR before deliberate authorization.",
         "pr-exists": "Inspect the existing task PR before deliberate authorization.",
-        "unsupported-model": f"Use the supported model {MODEL} when deliberately authorizing work.",
     }.get(reason, "Inspect the gate checks and issue authorization before deliberately starting another run.")
     status_comment(number, f"Factory gate rejected: {reason}. No issue labels changed.\n\n"
                    f"Next action: {action}\n\nRun: https://github.com/{repo}/actions/runs/{os.environ['GITHUB_RUN_ID']}")
@@ -442,120 +440,11 @@ def scan(filename, public=False, limit=MAX_ARTIFACT_BYTES):
                 "credential-in-artifact")
     require(not CREDENTIAL_PATTERN.search(data), "credential-pattern-in-artifact")
 
-
-def events(filename):
-    try:
-        parsed = [json.loads(line) for line in Path(filename).read_text().splitlines()]
-    except json.JSONDecodeError:
-        raise ValueError("invalid-events") from None
-    require(parsed and all(isinstance(event, dict) and event.get("type") != "error"
-                           and not event.get("error") for event in parsed), "invalid-events")
-    return parsed
-
-
-# Run diagnostics name only these categories; every other string from the event stream,
-# including error messages, tool inputs and outputs, is never echoed.
-EVENT_TYPES = {"step_start", "step_finish", "text", "reasoning", "tool_use", "error"}
-TOOLS = {"read", "edit", "write", "patch", "glob", "grep", "list", "bash", "webfetch", "websearch",
-         "task", "skill", "todoread", "todowrite", "invalid"}
-TOOL_STATUSES = {"pending", "running", "completed", "error"}
-FINISH_REASONS = {"stop", "tool-calls", "length", "content-filter", "error", "other", "unknown"}
-MAX_EVENT_LINE_BYTES = 1_000_000
-MAX_EVENT_BYTES = 64_000_000
-
-
-def summarize(filename, status, elapsed, started):
-    require(re.fullmatch(r"[0-9]{1,3}", status) and re.fullmatch(r"[0-9]{1,6}", elapsed)
-            and re.fullmatch(r"[0-9]{1,12}", started), "invalid-summary-input")
-    counts = {"events": 0, "malformed": 0, "oversized": 0, "truncated": False}
-    types, tools, finish = {}, {}, {}
-    tokens = {"input": 0, "output": 0, "reasoning": 0}
-    streak = longest = 0
-    previous = last = None
-
-    def bump(table, key):
-        table[key] = table.get(key, 0) + 1
-
-    def pick(value, allowed):
-        return value if isinstance(value, str) and value in allowed else "other"
-
-    path = Path(filename)
-    with (path.open("rb") if path.is_file() else open(os.devnull, "rb")) as stream:
-        consumed = 0
-        while line := stream.readline(MAX_EVENT_LINE_BYTES + 1):
-            consumed += len(line)
-            if consumed > MAX_EVENT_BYTES:
-                counts["truncated"] = True
-                break
-            if len(line) > MAX_EVENT_LINE_BYTES:
-                counts["oversized"] += 1
-                while (not line.endswith(b"\n") and consumed <= MAX_EVENT_BYTES
-                       and (line := stream.readline(MAX_EVENT_LINE_BYTES))):
-                    consumed += len(line)
-                counts["truncated"] = consumed > MAX_EVENT_BYTES
-                continue
-            try:
-                event = json.loads(line)
-            except (ValueError, RecursionError):
-                event = None
-            if not isinstance(event, dict):
-                counts["malformed"] += 1
-                continue
-            counts["events"] += 1
-            kind = event.get("type")
-            bump(types, pick(kind, EVENT_TYPES))
-            if type(event.get("timestamp")) is int:
-                last = event["timestamp"]
-            part = event.get("part") if isinstance(event.get("part"), dict) else {}
-            if kind == "tool_use":
-                name = pick(part.get("tool"), TOOLS)
-                state = part.get("state") if isinstance(part.get("state"), dict) else {}
-                bump(tools.setdefault(name, {}), pick(state.get("status"), TOOL_STATUSES))
-                streak = streak + 1 if name == previous else 1
-                previous, longest = name, max(longest, streak)
-            elif kind == "step_finish":
-                bump(finish, pick(part.get("reason"), FINISH_REASONS))
-                used = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
-                for key in tokens:
-                    if type(used.get(key)) is int and 0 <= used[key] < 10**9:
-                        tokens[key] += used[key]
-    # OpenCode timestamps are epoch milliseconds. A gap before the deadline only shows that no
-    # JSON event was written after that point; it does not say why.
-    offset = last // 1000 - int(started) if last is not None else None
-    return {"exit_status": int(status), "elapsed_seconds": int(elapsed), **counts,
-            "event_types": types, "tools": tools, "longest_same_tool_streak": longest,
-            "finish_reasons": finish, "tokens": tokens,
-            "last_event_after_seconds": offset if offset is not None and 0 <= offset <= 10**6 else None}
-
-
 def diagnose(filename, command, log):
     # Only the tail matters for fixing a failure, and it bounds what reaches the model.
     require(command in CHECKS, "invalid-check")
     tail = Path(log).read_bytes()[-MAX_DIAGNOSTIC_BYTES:].decode(errors="replace")
     Path(filename).write_text(json.dumps({"command": command, "output": ANSI.sub("", tail)}))
-
-
-def reply(filename, *, final_message=False):
-    parsed = events(filename)
-    require(all(isinstance(event.get("part", {}), dict) for event in parsed), "invalid-events")
-    require(not any(event.get("type") == "step_finish"
-                    and event.get("part", {}).get("reason") in ("length", "content-filter")
-                    for event in parsed), "incomplete-output")
-    if final_message:
-        # v2.1.0 emits completed text parts, including progress in earlier messages.
-        # Select by protocol identity, never by searching for a parseable JSON substring.
-        messages = [event for event in parsed
-                    if event.get("type") in ("step_start", "step_finish", "text", "tool_use")]
-        ids = [event.get("part", {}).get("messageID") for event in messages]
-        if any(message is not None for message in ids):
-            require(all(isinstance(message, str) and message for message in ids), "invalid-events")
-            final = ids[-1]
-            require(all(message == final for message in ids[ids.index(final):]), "invalid-events")
-            parsed = [event for event in messages if event["part"]["messageID"] == final]
-    require(all(isinstance(event.get("part", {}).get("text"), str)
-                for event in parsed if event.get("type") == "text"), "invalid-events")
-    return "".join(event.get("part", {}).get("text", "") for event in parsed
-                   if event.get("type") == "text")
 
 
 def unique_json(pairs, reason="invalid-json"):
@@ -579,15 +468,6 @@ def validate_findings(result):
     return findings
 
 
-def review_axis(filename):
-    try:
-        result = json.loads(reply(filename, final_message=True),
-                            object_pairs_hook=lambda pairs: unique_json(pairs, "invalid-review"))
-    except json.JSONDecodeError:
-        raise ValueError("invalid-review") from None
-    return validate_findings(result)
-
-
 def claude_result(filename):
     """Validate Claude Code's native single-result envelope."""
     try:
@@ -603,7 +483,6 @@ def claude_result(filename):
         raise ValueError(reasons[subtype])
     require(subtype == "success" and event.get("is_error") is False, "provider-error")
     return event
-
 
 
 def claude_findings(filename):
@@ -640,13 +519,11 @@ def claude_review_result(files, output):
     return report
 
 
-
 def claude_schema(mode="final"):
     schema = json.loads(json.dumps(FINDINGS_SCHEMA))
     if mode == "round":
         schema["properties"]["findings"]["items"]["required"] = ["blocking", "finding"]
     print(json.dumps(schema, separators=(",", ":")))
-
 
 
 def configure_claude(directory, mode="review"):
@@ -673,7 +550,7 @@ def configure_claude(directory, mode="review"):
     settings = config / "settings.json"
     allowed = ["Read", "Glob", "Grep"]
     denied = ["NotebookEdit", "WebFetch", "WebSearch", "Task", "Agent", "Skill", "mcp__*",
-              "Read(.env)", "Read(.env.*)", "Read(**/.env)", "Read(**/.env.*)", "Read(//proc/**)",
+              "Read(**/.env)", "Read(**/.env.*)", "Read(!**/.env.example)", "Read(//proc/**)",
               "Read(//sys/**)", f"Read(//{auth})", f"Read(//{output}/**)"]
     if mode == "implement":
         allowed += ["Edit", "Write", "Bash"]
@@ -681,8 +558,7 @@ def configure_claude(directory, mode="review"):
         denied += ["Bash", "Edit", "Write"]
     settings.write_text(json.dumps({
         "permissions": {"defaultMode": "dontAsk", "allow": allowed, "deny": denied,
-                        "blockReadsOutsideWorkingDirectories": True},
-        "disableBypassPermissionsMode": "disable",
+                        "blockReadsOutsideWorkingDirectories": True, "disableBypassPermissionsMode": "disable"},
         "disableAllHooks": True,
         "enableAllProjectMcpServers": False,
     }))
@@ -691,7 +567,6 @@ def configure_claude(directory, mode="review"):
                             "CLAUDE_CODE_PROJECT_DIR_NAME": "factory", "FACTORY_AUTH_FILE": auth}.items():
             env.write(f"{name}={value}\n")
     return {"base_url": base_url, "model": model, "auth": str(auth), "settings": str(settings)}
-
 
 
 def patch_lines(patch):
@@ -726,73 +601,6 @@ def inline_findings(reviewed, patch):
                 inline.append({"axis": axis, "blocking": item["blocking"], "finding": item["finding"],
                                "path": path, "line": line})
     return inline
-
-
-def review(standards, spec=None):
-    # The axes stay labelled rather than reranked; only blocking findings cost a repair round.
-    # A final review of a PR without a linked issue has no Spec axis.
-    findings = [(axis, item) for axis, filename in (("Standards", standards), ("Spec", spec))
-                if filename for item in review_axis(filename)]
-    blocking = [f"{axis}: {item['finding']}" for axis, item in findings if item["blocking"]]
-    return {"verdict": "request_changes" if blocking else "approve", "findings": blocking,
-            "advisory": [f"{axis}: {item['finding']}" for axis, item in findings if not item["blocking"]]}
-
-
-def transcript(filename, output):
-    """Render the full session in event order, retaining every field without shortening."""
-    def render(value):
-        return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-
-    path = Path(filename)
-    with (path.open("rb") if path.is_file() else open(os.devnull, "rb")) as stream:
-        raw = stream.read().decode(errors="replace").splitlines()
-    entries, first = [], None
-    for number, line in enumerate(raw, 1):
-        try:
-            event = json.loads(line)
-        except (ValueError, RecursionError):
-            event = None
-        if not isinstance(event, dict):
-            entries.append(f"### {number} unparseable\n{render(line)}")
-            continue
-        kind = event.get("type")
-        part = event.get("part") if isinstance(event.get("part"), dict) else {}
-        if type(event.get("timestamp")) is int:
-            first = event["timestamp"] if first is None else first
-            kind = f"{kind} +{(event['timestamp'] - first) // 1000}s"
-        if event.get("type") in ("text", "reasoning"):
-            body = render(part.get("text", ""))
-        elif event.get("type") == "tool_use":
-            state = part.get("state") if isinstance(part.get("state"), dict) else {}
-            body = (f"{render(part.get('tool'))} {render(state.get('status'))}\n"
-                    f"input: {render(state.get('input'))}\n"
-                    f"output: {render(state.get('output', state.get('error')))}")
-        elif event.get("type") == "step_finish":
-            body = f"reason: {render(part.get('reason'))}, tokens: {render(part.get('tokens'))}"
-        else:
-            body = render(event)
-        # Keep the original event too: readable fields above are only an index into it.
-        entries.append(f"### {number} {kind}\n{body}\n\nRaw event:\n{line}")
-    data = ("\n\n".join(entries) if entries else "No events were recorded.") + "\n"
-    Path(output).write_text(data)
-
-
-def retro(filename, output):
-    text = reply(filename)
-    require(bool(text.strip()), "invalid-retro")
-    Path(output).write_text(text)
-
-
-def review_markdown(standards, spec=None):
-    sections = []
-    for axis, filename in (("Standards", standards), ("Spec", spec)):
-        if not filename:
-            continue
-        text = reply(filename, final_message=True)
-        # A longer fence keeps model-supplied backticks inside the verbatim report.
-        fence = "`" * max(3, max((len(run) + 1 for run in re.findall(r"`+", text)), default=0))
-        sections.append(f"### {axis} — full response\n\n{fence}json\n{text}\n{fence}\n")
-    return "\n".join(sections)
 
 
 COMMENT_BYTES = 60_000
@@ -1094,38 +902,6 @@ def final_resume(number, event, directory, output):
     return False
 
 
-def configure(directory, mode):
-    output = Path(directory).resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    for name in ("data/opencode", "config", "cache", "state"):
-        (output / name).mkdir(parents=True, exist_ok=True)
-    permissions = {"*": "deny", "read": {"*": "allow", ".env": "deny", ".env.*": "deny",
-                   "**/.env": "deny", "**/.env.*": "deny",
-                   ".env.example": "allow", "**/.env.example": "allow", "**/auth.json": "deny"},
-                   "glob": "allow", "grep": "allow", "list": "allow",
-                   "edit": "deny", "external_directory": "deny", "bash": "deny", "webfetch": "deny",
-                   "websearch": "deny", "task": "deny", "skill": "deny"}
-    if mode == "implement":
-        # Shell remains broad; fresh verify and publication scan the resulting patch.
-        permissions["edit"] = {**permissions["read"]}
-        permissions["bash"] = "allow"
-    else:
-        require(mode in ("review", "retro"), "invalid-mode")
-    auth = output / "data/opencode/auth.json"
-    auth.touch(mode=0o600)
-    auth.chmod(0o600)
-    auth.write_text(os.environ["OPENCODE_AUTH_JSON"])
-    config = output / "opencode.json"
-    config.write_text(json.dumps({"share": False, "permission": permissions}))
-    with open(os.environ["GITHUB_ENV"], "a") as env:
-        for key, value in {
-            "XDG_DATA_HOME": output / "data", "XDG_CONFIG_HOME": output / "config",
-            "XDG_CACHE_HOME": output / "cache", "XDG_STATE_HOME": output / "state",
-            "OPENCODE_CONFIG": config, "FACTORY_AUTH_FILE": auth,
-        }.items():
-            env.write(f"{key}={value}\n")
-
-
 if __name__ == "__main__":
     try:
         command, *args = sys.argv[1:]
@@ -1152,8 +928,6 @@ if __name__ == "__main__":
             output.write_text(json.dumps(safe))
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
                 summary.write(round_status(safe) + "\n")
-        elif command == "review-axis":
-            review_axis(*args)
         elif command == "revalidate":
             revalidate(*args)
         elif command == "record-claim":
@@ -1186,12 +960,6 @@ if __name__ == "__main__":
             reviews = json.loads(Path(args[4]).read_text()) if len(args) == 5 else None
             if not final_comments(*args[:4], reviews=reviews):
                 print("::notice::final-review-stale")
-        elif command == "transcript":
-            transcript(*args)
-        elif command == "retro":
-            retro(*args)
-        elif command == "configure":
-            configure(*args)
         elif command == "configure-claude":
             configure_claude(*args)
         elif command == "claude-schema":
@@ -1212,22 +980,8 @@ if __name__ == "__main__":
             claude_review_result(files, args[-1])
         elif command == "prompt":
             print(prompt(*args), end="")
-        elif command == "events":
-            events(*args)
-        elif command == "summary":
-            line = json.dumps(summarize(*args), sort_keys=True)
-            print(f"opencode-summary {line}")
-            if os.environ.get("GITHUB_STEP_SUMMARY"):
-                with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-                    summary.write(f"### OpenCode run\n\n```json\n{line}\n```\n")
         elif command == "diagnose":
             diagnose(*args)
-        elif command == "review":
-            result = review(*args)
-            output = Path(os.environ["REVIEW_OUTPUT"])
-            output.write_text(json.dumps(result))
-            output.with_suffix(".md").write_text(review_markdown(*args))
-            print(result["verdict"])
         else:
             raise ValueError("unknown-command")
     except Exception as error:

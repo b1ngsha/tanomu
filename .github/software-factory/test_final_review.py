@@ -419,8 +419,6 @@ class ClaudeResultTest(unittest.TestCase):
                 control.claude_transcript(session, output)
 
 
-
-
 class ClaudeConfigureTest(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -442,6 +440,7 @@ class ClaudeConfigureTest(unittest.TestCase):
         self.assertEqual(json.loads(auth.read_text()), {"key": SECRET})
         settings = json.loads((self.directory / "claude/config/settings.json").read_text())
         self.assertTrue(settings["permissions"]["blockReadsOutsideWorkingDirectories"])
+        self.assertEqual(settings["permissions"]["disableBypassPermissionsMode"], "disable")
         self.assertEqual(settings["permissions"]["allow"], ["Read", "Glob", "Grep"])
         self.assertTrue(any("Read(//" in item for item in settings["permissions"]["deny"]))
 
@@ -468,7 +467,6 @@ class OptionalSpecTest(unittest.TestCase):
         self.assertEqual(json.loads(output.read_text()),
                          {"verdict": "request_changes", "findings": ["Standards: x"], "advisory": []})
         self.assertFalse((directory / "review.md").exists())
-
 
 
 if __name__ == "__main__":

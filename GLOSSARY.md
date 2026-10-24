@@ -34,6 +34,20 @@ _Avoid_: skill, feature module
 An API endpoint that serves models or search, identified by its address, key, and protocol type.
 _Avoid_: channel, vendor, supplier
 
+## Software Factory
+
+**Factory Agent**:
+A model-driven participant in the software factory that performs an implementation, review, or retrospective role without deployment authority.
+_Avoid_: bot, autonomous maintainer
+
+**Provider Preflight**:
+An operational check that a Provider works for a Factory Agent role. It is not a stage in the software factory task lifecycle.
+_Avoid_: smoke task, implementation round
+
+**Run Evidence**:
+The retained record of a Factory Agent run and its outcomes, used for retrospectives and human diagnosis. It does not authorize publication or delivery.
+_Avoid_: trusted transcript, approval record
+
 ## Blog Digest
 
 **Feed**:
