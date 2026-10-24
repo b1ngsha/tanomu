@@ -10,21 +10,13 @@ This repository is public, but the software factory treats repository text as un
 - The implementation workflow verifies the label actor, issue author, issue state and explicit `Blocked by #N` dependencies, then captures the issue body automatically for that run. It writes untrusted text to a file rather than interpolating it into a shell command.
 - The agent never receives production secrets, the `production` environment, a GitHub App token, or deployment access.
 
-## Phased rollout
+## Provider Preflight
 
-The first phase is a manually dispatched, read-only smoke workflow. It uses a disposable, redacted fixture in the runner's temporary directory and writes only the Actions step summary as a repository-visible result. It checks out only trusted orchestration helpers outside the model fixture; it does not read an issue, write an issue or pull request, create a branch, call Feishu, or contact the production server.
+The initial manual smoke established Provider connectivity. Its disposable workflow
+has been retired; Provider Preflight is an operational check, not a lifecycle stage.
+Role-specific canaries and trusted workflow checks cover subsequent migrations.
 
-The smoke must be confirmed by the maintainer before a later pull request adds implementation, review, or rework workflows. Those workflows use patch artifacts, independent review context, and human approval before merge.
-
-## Smoke gates
-
-The smoke stops rather than guessing when any of these are unknown: authentication, CI use authorization, data retention policy, or whether the run could incur paid usage. It requires a manually configured, isolated `OPENCODE_AUTH_JSON` secret and an explicit model ID; it never uses the production model key and never enables extra paid usage automatically.
-
-The smoke is bounded by a ten-minute job timeout and runs one smoke at a time. It reports only non-sensitive status, duration, and model identifier in the Actions summary. It must fail on a non-zero command, timeout, missing credential, fixture mutation, or credential-shaped output. The first real smoke does not upload raw model output.
-
-The OpenCode config denies all tools by default and allows only read-only file inspection (`read`, `glob`, and `grep`). Public session sharing is disabled by configuration. The CLI version is pinned; `@latest` is not allowed.
-
-## Later task lifecycle
+## Task lifecycle
 
 The implementation lifecycle is:
 
