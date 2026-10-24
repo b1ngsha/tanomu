@@ -46,6 +46,7 @@ jobs:
         with:
           fetch-depth: 0
       - name: Check PR size (max 600 changed lines, see AGENTS.md)
+        shell: bash
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
