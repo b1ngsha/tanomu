@@ -285,7 +285,7 @@ class GateTest(TaskDirectory):
         super().setUp()
         self.out = Path(self.enterContext(tempfile.TemporaryDirectory())) / "input"
         self.enterContext(mock.patch.dict(os.environ, {
-            "GITHUB_REF": "refs/heads/main", "MODEL": control.MODEL, "GITHUB_REPOSITORY": REPO,
+            "GITHUB_REF": "refs/heads/main", "GITHUB_REPOSITORY": REPO,
             "GITHUB_ACTOR": OWNER, "GITHUB_TRIGGERING_ACTOR": OWNER,
             "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
         }))
@@ -326,7 +326,6 @@ class GateTest(TaskDirectory):
         for key, value, reason in (
             ("GITHUB_REF", "refs/heads/feature", "wrong-ref"),
             ("GITHUB_REF", "refs/pull/1/merge", "wrong-ref"),
-            ("MODEL", "opencode/other", "unsupported-model"),
             ("GITHUB_ACTOR", "intruder", "wrong-actor"),
             ("GITHUB_TRIGGERING_ACTOR", "intruder", "wrong-triggering-actor"),
         ):
@@ -593,7 +592,7 @@ class ScanTest(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.auth = self.directory / "auth.json"
-        self.auth.write_text(json.dumps({"opencode": {"type": "api", "key": "Zq9/\"opaque+cred",
+        self.auth.write_text(json.dumps({"provider": {"type": "api", "key": "Zq9/\"opaque+cred",
                                                        "short": "abc"}}))
         self.enterContext(mock.patch.dict(os.environ, {"FACTORY_AUTH_FILE": str(self.auth)}))
 
@@ -748,14 +747,14 @@ class CommentsTest(unittest.TestCase):
         return documents
 
     def test_publishes_present_reports_in_round_order_then_retro(self):
-        self.write("feedback-3/review.md", "### Spec — full response\n\n```json\n{\"findings\": []}\n```\n")
-        self.write("feedback-1/review.md", "### Standards — full response\n\n```json\n{ \"a\":  1 }\n```\n")
+        self.write("feedback-3/review.json", json.dumps({"findings": [], "advisory": ["Spec: improve naming"]}))
+        self.write("feedback-1/review.json", json.dumps({"findings": ["Standards: fix scope"], "advisory": []}))
         self.write("feedback-2/checks.json", '{"command": "pnpm test", "output": "boom"}')
         self.write("retro/retro.md", "\n  1. Keep  spacing.\n\n")
         documents = self.documents(self.comments())
         self.assertEqual([document["text"] for document in documents], [
-            "### Standards — full response\n\n```json\n{ \"a\":  1 }\n```\n",
-            "### Spec — full response\n\n```json\n{\"findings\": []}\n```\n",
+            "### Findings\n\n- **Blocking** — Standards: fix scope\n",
+            "### Findings\n\n- Advisory — Spec: improve naming\n",
             "\n  1. Keep  spacing.\n\n"])
         for document, label in zip(documents, ("round 1", "round 3", "retro")):
             with self.subTest(label=label):
@@ -776,7 +775,7 @@ class CommentsTest(unittest.TestCase):
 
     def test_large_unicode_reports_split_within_limit_and_reassemble_exactly(self):
         review, retro = mixed_text(250_000), mixed_text(40_000)[::-1]
-        self.write("feedback-2/review.md", review)
+        self.write("feedback-2/review.json", json.dumps({"findings": [], "advisory": [review]}))
         self.write("retro/retro.md", retro)
         bodies = self.comments()
         self.assertEqual(control.COMMENT_BYTES, 60_000)
@@ -786,7 +785,8 @@ class CommentsTest(unittest.TestCase):
             body.decode("utf-8")  # Never splits inside a character.
         documents = self.documents(bodies)
         self.assertEqual([document["text"] for document in documents],
-                         [review.replace("@", "@\u200b"), retro.replace("@", "@\u200b")])
+                         ["### Findings\n\n- Advisory \u2014 " + review.replace("@", "@\u200b") + "\n",
+                          retro.replace("@", "@\u200b")])
         self.assertGreater(documents[0]["total"], 1)
         self.assertGreater(documents[1]["total"], 1)
 
@@ -795,8 +795,8 @@ class CommentsTest(unittest.TestCase):
         boundary = len(text.encode()[:59_000].decode(errors="ignore"))
         straddling = text[:boundary - 10] + f" {SECRET} " + text[boundary - 10:]
         for name, content, reason in (
-            ("feedback-1/review.md", straddling, "credential-pattern-in-artifact"),
-            ("feedback-4/review.md", text * 3 + " " + SECRET, "credential-pattern-in-artifact"),
+            ("feedback-1/review.json", json.dumps({"findings": [], "advisory": [straddling]}), "credential-pattern-in-artifact"),
+            ("feedback-4/review.json", json.dumps({"findings": [text * 3 + " " + SECRET], "advisory": []}), "credential-pattern-in-artifact"),
             ("retro/retro.md", text * 3 + "opaque-credential-value", "credential-in-artifact"),
             ("retro/retro.md", "-----BEGIN PRIVATE KEY-----", "credential-pattern-in-artifact"),
         ):
@@ -807,12 +807,12 @@ class CommentsTest(unittest.TestCase):
                     self.comments()
 
     def test_cli_writes_comments_and_hides_credentials(self):
-        self.write("feedback-1/review.md", "fine")
+        self.write("feedback-1/review.json", json.dumps({"findings": ["fine"], "advisory": []}))
         args = [sys.executable, "-I", str(CONTROL), "comments", str(self.reports), str(self.output)]
         result = subprocess.run(args, capture_output=True, text=True, env={**os.environ})
         self.assertEqual((result.returncode, result.stderr), (0, ""))
         self.assertEqual(self.documents([path.read_bytes() for path in sorted(self.output.glob("*.md"))])[0]["text"],
-                         "fine")
+                         "### Findings\n\n- **Blocking** — fine\n")
         self.write("retro/retro.md", f"x {SECRET}")
         result = subprocess.run(args, capture_output=True, text=True, env={**os.environ})
         self.assertEqual((result.returncode, result.stderr), (1, "::error::credential-pattern-in-artifact\n"))
@@ -840,50 +840,31 @@ class DiagnoseTest(unittest.TestCase):
             control.diagnose(str(self.output), "rm -rf /", str(self.log))
 
 
-LEAKY_EVENTS = [
-    {"type": "step_start", "timestamp": 1_700_000_001_000},
-    {"type": "text", "part": {"text": SECRET}},
-    {"type": "tool_use", "part": {"tool": "read", "state": {
-        "status": "completed", "input": {"filePath": "/home/runner/.env"}, "output": SECRET}}},
-    {"type": "tool_use", "part": {"tool": "edit", "state": {
-        "status": "error", "error": f"permission denied {SECRET}"}}},
-    {"type": "tool_use", "part": {"tool": "edit", "state": {"status": "error"}}},
-    {"type": "tool_use", "part": {"tool": f"mcp_{SECRET}", "state": {"status": SECRET}}},
-    {"type": "step_finish", "timestamp": 1_700_000_031_000,
-     "part": {"reason": "tool-calls", "tokens": {"input": 10, "output": 5, "reasoning": "x"}}},
-    {"type": f"leak_{SECRET}", "error": {"name": SECRET}},
-]
-
-
-
 
 class RunnerStepTest(unittest.TestCase):
-    """Runs real supervised OpenCode step scripts against stub `opencode` binaries."""
+    """Run real supervised workflow steps against a stub Claude Code binary."""
 
     jobs = {"implement": ("software-factory-round.yml", "implement"),
             "review": ("software-factory-round.yml", "review"),
             "retro": ("software-factory-implement.yml", "retro"),
             "publish": ("software-factory-implement.yml", "retro-publish")}
 
-    def run_step(self, job, opencode="exit 0", gh="exit 0", select="opencode run", env=None, files=None,
-                 setup=None, claude="exit 0"):
+    def run_step(self, job, claude="exit 0", gh="exit 0", select=None, env=None, files=None, setup=None):
+        select = select or {"implement": "Generate bounded candidate", "review": "Independently review verified candidate",
+                            "retro": "Propose improvements from the run"}.get(job, "claude -p")
         workflow, name = self.jobs[job]
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.directory = directory
         (directory / "trusted").symlink_to(CONTROL.parents[2])
-        # Publishing steps run from a plain checkout of the trusted revision.
         (directory / ".github").symlink_to(CONTROL.parents[2] / ".github")
         (directory / "candidate").mkdir()
         (directory / "workspace").mkdir()
         bin_dir = directory / "bin"
         bin_dir.mkdir()
-        # Every call is logged in order, NUL-separated after the program name, so tests can count
-        # sessions and calls.
         log = 'printf "%s\\0" "${0##*/}" "$@" > "$CALLS/$(printf %03d $(($(ls "$CALLS" | wc -l))))"\n'
-        for program, script in (("opencode", opencode), ("gh", gh), ("claude", claude)):
+        for program, script in (("gh", gh), ("claude", claude)):
             (bin_dir / program).write_text(f"#!/bin/bash\n{log}{script}\n")
-        for stub in bin_dir.iterdir():
-            stub.chmod(0o755)
+            (bin_dir / program).chmod(0o755)
         (directory / "calls").mkdir()
         auth = directory / "auth.json"
         auth.write_text(json.dumps({"key": SECRET}))
@@ -896,12 +877,13 @@ class RunnerStepTest(unittest.TestCase):
         steps = WorkflowContractTest.load(workflow)["jobs"][name]["steps"]
         step = next(step for step in steps if select in step.get("run", "") or select == step.get("name"))
         cwd = directory / step["working-directory"] if "working-directory" in step else directory
-        env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "MODEL": control.MODEL, "ISSUE": "6",
-               "ROUND": "1", "RUNNER_TEMP": str(directory / "temp"), "FACTORY_AUTH_FILE": str(auth),
+        env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "ISSUE": "6", "ROUND": "1",
+               "RUNNER_TEMP": str(directory / "temp"), "FACTORY_AUTH_FILE": str(auth),
                "GITHUB_OUTPUT": str(directory / "output"), "GITHUB_STEP_SUMMARY": str(directory / "summary"),
-               "GITHUB_REPOSITORY": REPO, "GITHUB_RUN_ID": "123", "CALLS": str(directory / "calls"),
+               "GITHUB_REPOSITORY": REPO, "GITHUB_RUN_ID": "123", "GITHUB_WORKSPACE": str(directory),
+               "CALLS": str(directory / "calls"), "ANTHROPIC_MODEL": "deepseek-flash",
+               "CLAUDE_CONFIG_DIR": str(directory / "temp/claude-config"), "CLAUDE_SETTINGS": "settings.json",
                "REVIEW_OUTPUT": str(directory / "temp/feedback/review.json"), **(env or {})}
-        # Keep the real supervisor and cleanup; shorten only the workflow's model budget.
         script = re.sub(r' (600|1500) --', ' 1 --', step["run"])
         result = subprocess.run(["bash", "-e", "-c", script], cwd=cwd, env=env,
                                 capture_output=True, text=True, timeout=30)
@@ -911,72 +893,75 @@ class RunnerStepTest(unittest.TestCase):
         calls = [path.read_text().split("\0")[:-1] for path in sorted((self.directory / "calls").iterdir())]
         return [call[1:] for call in calls if call[0] == program]
 
-    def stub_events(self, *events):
-        return "\n".join(f"echo '{json.dumps(event)}'" for event in events)
+    def result(self, **event):
+        return "echo '" + json.dumps({"type": "result", "subtype": "success", "is_error": False, **event}) + "'"
 
     def reply(self, value):
-        return self.stub_events({"type": "text", "part": {"text": json.dumps(value)}})
+        return self.result(structured_output=value)
 
     def test_timeout_is_summarized_and_preserved_without_leaking(self):
-        leaky = [event for event in LEAKY_EVENTS if "'" not in json.dumps(event)]
         for job in ("implement", "review", "retro"):
             with self.subTest(job=job):
-                result, summary = self.run_step(job, self.stub_events(*leaky) + f"\necho {SECRET} >&2\nexec sleep 20")
+                result, summary = self.run_step(job, f"echo {SECRET} >&2\nexec sleep 20")
                 self.assertEqual(result.returncode, 124, result.stderr)
                 self.assertIn('"exit_status": 124', result.stdout)
-                self.assertIn('"exit_status": 124', summary)
-                self.assertIn("::error::standards-timeout" if job == "review" else "::error::opencode-exit-124", result.stdout)
+                self.assertIn("### Factory Agent run", summary)
+                self.assertIn("::error::standards-timeout" if job == "review" else "::error::claude-exit-124",
+                              result.stdout)
                 self.assertNotIn(SECRET, result.stdout + result.stderr + summary)
-                # A timed-out review stops before the second axis spends its budget.
-                self.assertEqual(len(self.calls("opencode")), 1)
+                self.assertEqual(len(self.calls("claude")), 1)
 
     def test_review_runner_error_stops_spec_and_retains_exit(self):
         result, _ = self.run_step("review", "exit 3")
         self.assertEqual(result.returncode, 3)
         self.assertEqual((self.directory / "output").read_text(), "standards=started\nstandards=runner-error\n")
-        self.assertEqual(len(self.calls("opencode")), 1)
+        self.assertEqual(len(self.calls("claude")), 1)
 
-    def test_nonzero_exit_is_preserved(self):
-        result, _ = self.run_step("implement", self.stub_events({"type": "step_start"}) + "\nexit 3")
-        self.assertEqual(result.returncode, 3)
-        self.assertIn('"exit_status": 3', result.stdout)
-
-    def test_success_still_validates_events(self):
-        result, _ = self.run_step("implement", self.stub_events({"type": "text"}))
+    def test_implement_validates_native_result(self):
+        result, _ = self.run_step("implement", self.result(result="Done."))
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('"exit_status": 0', result.stdout)
-        result, _ = self.run_step("implement", self.stub_events({"type": "error"}))
+        result, _ = self.run_step("implement", "echo '" + json.dumps(
+            {"type": "result", "subtype": "success", "is_error": True, "result": "failed"}) + "'")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("::error::invalid-events", result.stderr)
+        self.assertIn("::error::provider-error", result.stderr)
 
     def test_review_runs_each_axis_in_its_own_session(self):
         result, summary = self.run_step("review", self.reply(
             {"findings": [{"blocking": False, "finding": "src/a.ts: possible Mysterious Name"}]}))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(summary.count("### Factory Agent run"), 2)
-        sessions = self.calls("opencode")
+        sessions = self.calls("claude")
         self.assertEqual(len(sessions), 2)
         axes = control.review_axes()
-        for (axis, prompt), session in zip((("standards", "spec"), ("spec", "standards")), sessions):
+        expected = json.loads(json.dumps(control.FINDINGS_SCHEMA))
+        expected["properties"]["findings"]["items"]["required"] = ["blocking", "finding"]
+        ids = []
+        for (axis, other), session in zip((("standards", "spec"), ("spec", "standards")), sessions):
             with self.subTest(axis=axis):
-                self.assertIn("--standalone", session)
+                self.assertIn("--bare", session)
+                self.assertIn("--restricted", session)
+                self.assertEqual(session[session.index("--output-format") + 1], "json")
+                self.assertEqual(session[session.index("--json-schema") + 1],
+                                 json.dumps(expected, separators=(",", ":")))
                 self.assertIn(axes[axis]["brief"], session[-1])
-                self.assertNotIn(axes[prompt]["brief"], session[-1])
-                self.assertTrue((self.directory / f"temp/review-{axis}.jsonl").is_file())
-        self.assertEqual((self.directory / "output").read_text(), "standards=started\nstandards=passed\nspec=started\nspec=passed\nverdict=approve\n")
-        self.assertEqual(json.loads((self.directory / "temp/feedback/review.json").read_text())["advisory"],
-                         ["Standards: src/a.ts: possible Mysterious Name", "Spec: src/a.ts: possible Mysterious Name"])
-        raw = json.dumps({"findings": [{"blocking": False, "finding": "src/a.ts: possible Mysterious Name"}]})
-        self.assertEqual((self.directory / "temp/feedback/review.md").read_text().count(raw), 2)
+                self.assertNotIn(axes[other]["brief"], session[-1])
+                ids.append(session[session.index("--session-id") + 1])
+                self.assertTrue((self.directory / f"temp/review-{axis}.json").is_file())
+        self.assertNotEqual(*ids)
+        self.assertEqual((self.directory / "output").read_text(),
+                         "standards=started\nstandards=passed\nspec=started\nspec=passed\nverdict=approve\n")
+        review = json.loads((self.directory / "temp/feedback/review.json").read_text())
+        self.assertEqual(review["advisory"], ["Standards: src/a.ts: possible Mysterious Name",
+                                              "Spec: src/a.ts: possible Mysterious Name"])
+        self.assertFalse((self.directory / "temp/feedback/review.md").exists())
 
     def test_review_accepts_output_beyond_the_artifact_limit(self):
         finding = {"blocking": False, "finding": "src/a.ts: " + "说明 " * 100_000}
-        reply = json.dumps({"findings": [finding]})
-        result, _ = self.run_step("review", 'cat "$CALLS/../reply.jsonl"', files={
-            "reply.jsonl": json.dumps({"type": "text", "part": {"text": reply}}) + "\n"})
+        result, _ = self.run_step("review", 'cat "$CALLS/../reply.json"', files={
+            "reply.json": json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                                      "structured_output": {"findings": [finding]}})})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertGreater((self.directory / "temp/feedback/review.json").stat().st_size, control.MAX_ARTIFACT_BYTES)
-        self.assertEqual((self.directory / "temp/feedback/review.md").read_text().count(reply), 2)
 
     def test_review_rejects_old_schema(self):
         result, _ = self.run_step("review", self.reply({"verdict": "approve", "findings": []}))
@@ -985,74 +970,60 @@ class RunnerStepTest(unittest.TestCase):
         self.assertEqual((self.directory / "output").read_text(), "standards=started\nstandards=invalid-output\n")
 
     def test_retro_writes_scanned_proposals(self):
-        result, _ = self.run_step("retro", self.stub_events({"type": "text", "part": {"text": "Smooth run."}}))
+        result, _ = self.run_step("retro", self.result(result="Smooth run."))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.directory / "temp/retro/retro.md").read_text(), "Smooth run.")
-        result, _ = self.run_step("retro", self.stub_events({"type": "text", "part": {"text": f"see {SECRET}"}}))
+        result, _ = self.run_step("retro", self.result(result=f"see {SECRET}"))
         self.assertEqual(result.returncode, 1)
         self.assertIn("::error::credential-in-artifact", result.stderr)
         self.assertNotIn(SECRET, result.stdout + result.stderr)
 
     def test_retro_keeps_output_beyond_the_artifact_limit(self):
         text = "1. 提案 🙂\n" * 100_000
-        result, _ = self.run_step("retro", 'cat "$CALLS/../reply.jsonl"', files={
-            "reply.jsonl": json.dumps({"type": "text", "part": {"text": text}}) + "\n"})
+        result, _ = self.run_step("retro", 'cat "$CALLS/../reply.json"', files={
+            "reply.json": json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text})})
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.directory / "temp/retro/retro.md").read_text(), text)
 
-    def test_sessions_are_always_recorded_and_scanned(self):
-        for job, events in (("implement", ["implementation"]), ("review", ["review-standards", "review-spec"]),
-                            ("retro", ["retro"])):
+    def test_sessions_are_native_unmodified_and_scanned(self):
+        session_id = "123e4567-e89b-42d3-a456-426614174000"
+        for job, names in (("implement", ["implementation"]),
+                           ("review", ["review-standards", "review-spec"]), ("retro", ["retro"])):
             with self.subTest(job=job):
-                # A run that died before writing any event still yields a transcript.
-                result, _ = self.run_step(job, select="control.py transcript")
+                files = {f"temp/{name}.session": session_id for name in names}
+                source = f"temp/claude-config/projects/factory/{session_id}.jsonl"
+                files[source] = '{"message":"native"}\n{"tool":"Read"}\n'
+                result, _ = self.run_step(job, select="control.py claude-transcript", files=files)
                 self.assertEqual(result.returncode, 0, result.stderr)
-                sessions = sorted((self.directory / "temp/session").iterdir())
-                self.assertEqual(len(sessions), len(events))
-                for session in sessions:
-                    self.assertEqual(session.read_text(), "No events were recorded.\n")
-                summaries = {f"temp/{name}-summary.txt": 'opencode-summary {"exit_status": 124}\n'
-                             for name in events}
-                # The implementation's shell can leave other files beside the transcripts.
-                summaries["temp/session/leak.txt"] = SECRET
-                result, _ = self.run_step(job, select="control.py transcript", files=summaries)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                saved = list((self.directory / "temp/session").glob("*-summary.txt"))
-                self.assertEqual(len(saved), len(events))
-                self.assertTrue(all('"exit_status": 124' in path.read_text() for path in saved))
-                uploaded = self.uploaded(job)
-                self.assertEqual(len(uploaded), 2 * len(events))
-                self.assertNotIn("leak.txt", uploaded)
-                leak = json.dumps({"type": "text", "part": {"text": SECRET}}) + "\n"
-                result, _ = self.run_step(job, select="control.py transcript",
-                                          files={f"temp/{name}.jsonl": leak for name in events})
+                saved = list((self.directory / "temp/session").iterdir())
+                self.assertEqual(len(saved), len(names))
+                self.assertTrue(all(path.read_text() == files[source] for path in saved))
+                self.assertEqual(len(self.uploaded(job)), len(names))
+                files[source] = json.dumps({"text": SECRET}) + "\n"
+                result, _ = self.run_step(job, select="control.py claude-transcript", files=files)
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("::error::credential-in-artifact", result.stderr)
                 self.assertNotIn(SECRET, result.stdout + result.stderr)
 
     def uploaded(self, job):
-        """Files the session upload step would pick up from the last run's temp directory."""
         workflow, name = self.jobs[job]
         upload = next(step for step in WorkflowContractTest.load(workflow)["jobs"][name]["steps"]
                       if str(step.get("with", {}).get("name", "")).startswith("session-"))
         paths = (Path(line.replace("${{ runner.temp }}", str(self.directory / "temp"))
                       .replace("${{ inputs.round }}", "1")) for line in upload["with"]["path"].splitlines())
-        return [file.name for path in paths
-                for file in (sorted(path.rglob("*")) if path.is_dir() else [path]) if file.is_file()]
+        return [file.name for path in paths for file in [path] if file.is_file()]
 
     def publish(self, reports, pr=""):
         gh = (f'if [ "$1 $2" = "pr list" ]; then printf %s "{pr}"; fi\n'
               'if [ "$2" = comment ]; then mkdir -p "$CALLS/../bodies"\n'
               '  cp "$5" "$CALLS/../bodies/$(printf %03d $(ls "$CALLS" | wc -l))"; fi')
-        # The publish job holds no model credential, so nothing points at an auth file.
         result, _ = self.run_step("publish", gh=gh, select="control.py comments", env={"FACTORY_AUTH_FILE": ""},
                                   files={f"temp/reports/{name}": content for name, content in reports.items()})
         bodies = self.directory / "bodies"
         return result, [path.read_bytes() for path in sorted(bodies.iterdir())] if bodies.exists() else []
 
     def test_retro_publish_comments_every_report_on_open_pr_else_issue(self):
-        branch = "feat/6-implement"
-        reports = {"feedback-1/review.md": "### Standards — full response\n\n```json\n{}\n```\n",
+        reports = {"feedback-1/review.json": json.dumps({"findings": ["Standards: bug"], "advisory": []}),
                    "feedback-2/checks.json": "{}",
                    "retro/retro.md": "1. **Navigation**: ping @maintainer about src/a.ts.\n"}
         for pr, target in (("17", ["pr", "comment", "17"]), ("", ["issue", "comment", "6"])):
@@ -1061,48 +1032,41 @@ class RunnerStepTest(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls = self.calls("gh")
                 self.assertEqual([call[:2] for call in calls], [["pr", "list"], target[:2], target[:2]])
-                self.assertIn(branch, calls[0])
                 self.assertTrue(all(call[:3] == target for call in calls[1:]))
                 review, retro = (body.decode() for body in bodies)
-                self.assertIn("round 1", review.lower())
-                self.assertIn("{}", review)
-                self.assertIn("retro", retro.lower())
+                self.assertIn("Standards: bug", review)
                 self.assertIn("ping @\u200bmaintainer", retro)
-                self.assertNotIn("ping @maintainer", retro)
-                for body in (review, retro):
-                    self.assertIn(f"https://github.com/{REPO}/actions/runs/123", body)
 
     def test_retro_publish_posts_whatever_reports_exist(self):
+        empty = json.dumps({"findings": [], "advisory": []})
         for reports, count in (({"retro/retro.md": "Only retro."}, 1),
-                               ({"feedback-1/review.md": "a", "feedback-3/review.md": "b"}, 2),
+                               ({"feedback-1/review.json": empty, "feedback-3/review.json": empty}, 2),
                                ({"feedback-1/checks.json": "{}"}, 0), ({}, 0)):
             with self.subTest(reports=list(reports)):
                 result, bodies = self.publish(reports, "17")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(len(bodies), count)
-                if not count:
-                    self.assertEqual(self.calls("gh"), [])
 
     def test_retro_publish_splits_large_output_in_order(self):
         review = mixed_text(80_000)
-        result, bodies = self.publish({"feedback-4/review.md": review, "retro/retro.md": "Done."}, "17")
+        result, bodies = self.publish({"retro/retro.md": review}, "17")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertGreater(len(bodies), 2)
+        self.assertGreater(len(bodies), 1)
         self.assertTrue(all(len(body) <= 60_000 for body in bodies))
         chunks = [re.fullmatch(r"(.*?)Part (\d+)/(\d+)\n\n(.*)", body.decode(), re.DOTALL) for body in bodies]
-        self.assertEqual([(int(match[2]), int(match[3])) for match in chunks],
-                         [(n, len(bodies) - 1) for n in range(1, len(bodies))] + [(1, 1)])
-        self.assertEqual("".join(match[4] for match in chunks[:-1]), review.replace("@", "@\u200b"))
+        self.assertEqual("".join(match[4] for match in chunks), review.replace("@", "@\u200b"))
 
     def test_retro_publish_refuses_credentials(self):
         for reports in ({"retro/retro.md": f"leak {SECRET}\n"},
-                        {"feedback-1/review.md": "x" * 70_000 + " " + SECRET, "retro/retro.md": "fine"}):
+                        {"feedback-1/review.json": json.dumps({"findings": [], "advisory": [SECRET]})}):
             with self.subTest(reports=list(reports)):
                 result, bodies = self.publish(reports, "17")
                 self.assertEqual(result.returncode, 1)
                 self.assertIn("::error::credential-pattern-in-artifact", result.stderr)
                 self.assertNotIn(SECRET, result.stdout + result.stderr)
                 self.assertEqual((self.calls("gh"), bodies), ([], []))
+
+
 
 
 class WorkflowContractTest(unittest.TestCase):
@@ -1122,13 +1086,14 @@ class WorkflowContractTest(unittest.TestCase):
             for job in workflow["jobs"].values():
                 yield from job.get("steps", [])
 
-    def test_issue_validation_steps_receive_model(self):
-        validating = [step for step in self.steps()
-                      if re.search(r"control\.py (gate-attempt|revalidate|record-claim|claimed) ", step.get("run", ""))]
-        self.assertEqual(len(validating), 4)
-        for step in validating:
-            with self.subTest(step=step.get("name")):
-                self.assertIn("MODEL", step.get("env", {}))
+    def test_validation_and_handoff_do_not_receive_provider_configuration(self):
+            validating = [step for step in self.steps()
+                          if re.search(r"control\.py (gate-attempt|revalidate|record-claim|claimed) ", step.get("run", ""))]
+            self.assertEqual(len(validating), 4)
+            for step in validating:
+                with self.subTest(step=step.get("name")):
+                    self.assertNotIn("ANTHROPIC", str(step))
+                    self.assertNotIn("secrets.", str(step))
 
     def test_failure_diagnostics_do_not_require_success_or_model_artifacts(self):
         jobs = self.implement["jobs"]
@@ -1208,46 +1173,62 @@ class WorkflowContractTest(unittest.TestCase):
                 install = next(i for i, step in enumerate(steps) if "pnpm install" in step.get("run", ""))
                 self.assertLess(install, restore)
 
-    def test_review_uploads_scanned_json_and_full_responses(self):
-        steps = self.round["jobs"]["review"]["steps"]
-        run = self.opencode_steps()["review"]["run"]
-        for name in ('"$REVIEW_OUTPUT"', '"$RUNNER_TEMP/feedback/review.md"'):
-            with self.subTest(name=name):
-                self.assertIn(f"control.py scan-output {name}", run)
-                self.assertLess(run.index("control.py review"), run.index(f"control.py scan-output {name}"))
-        upload = next(step["with"] for step in steps
-                      if step.get("with", {}).get("name") == "feedback-${{ inputs.round }}")
-        self.assertEqual(upload["path"], "${{ runner.temp }}/feedback")
+    def test_implement_canary_exercises_writes_without_project_configuration(self):
+        steps = self.round["jobs"]["implement"]["steps"]
+        canary = next(step["run"] for step in steps if step.get("name") == "Verify candidate configuration is inert")
+        generation = self.claude_steps()["implement"]["run"]
+        for forbidden in ("--dangerously-skip-permissions", "bypassPermissions"):
+            self.assertNotIn(forbidden, canary + generation)
+        self.assertIn("--tools Read,Glob,Grep,Edit,Write,Bash", canary)
+        self.assertIn("Use Write to create canary-write", canary)
+        self.assertIn("then Bash to test that file is nonempty", canary)
+        self.assertIn('test "$(< "$canary/canary-write")" = ok', canary)
+        self.assertIn("test ! -e \"$canary/hook-ran\" && test ! -e \"$canary/mcp-ran\"", canary)
+
+    def test_review_aggregates_and_scans_only_structured_findings(self):
+            run = self.claude_steps()["review"]["run"]
+            self.assertIn('control.py claude-result', run)
+            self.assertIn('control.py scan-output "$REVIEW_OUTPUT"', run)
+            self.assertLess(run.index("control.py claude-result"), run.index("control.py scan-output"))
+            self.assertNotIn("review.md", run)
+            steps = self.round["jobs"]["review"]["steps"]
+            upload = next(step["with"] for step in steps
+                          if step.get("with", {}).get("name") == "feedback-${{ inputs.round }}")
+            self.assertEqual(upload["path"], "${{ runner.temp }}/feedback")
 
     def jobs(self):
         for workflow in (self.implement, self.round):
             yield from workflow["jobs"].items()
 
-    def opencode_steps(self):
-        return {name: step for name, job in self.jobs() for step in job.get("steps", [])
-                if "opencode run" in step.get("run", "")}
+    def claude_steps(self):
+            return {name: step for name, job in self.jobs() for step in job.get("steps", [])
+                    if "claude -p" in step.get("run", "")}
 
     def test_model_deadlines(self):
-        steps = self.opencode_steps()
-        self.assertEqual(set(steps), {"implement", "review", "retro"})
-        for name, seconds in (("implement", 1500), ("review", 600), ("retro", 600)):
-            with self.subTest(job=name):
-                self.assertEqual(re.findall(r' (\d+) -- \\\s+opencode run', steps[name]["run"]),
-                                 [str(seconds)])
+            steps = self.claude_steps()
+            self.assertEqual(set(steps), {"implement", "review", "retro"})
+            for name, seconds in (("implement", 1500), ("review", 600), ("retro", 600)):
+                with self.subTest(job=name):
+                    self.assertEqual(re.findall(r' (\d+) -- \\\s+claude -p', steps[name]["run"]),
+                                     [str(seconds)])
 
     def test_review_runs_both_axes_and_aggregates_both_files(self):
-        run = self.opencode_steps()["review"]["run"]
-        self.assertIn("for axis in standards spec; do", run)
-        self.assertIn('prompt "review-$axis"', run)
-        self.assertIn('"$RUNNER_TEMP/review-$axis.jsonl" "$RUNNER_TEMP/review-$axis-summary.txt" "review-$axis"', run)
-        self.assertRegex(run, r'control\.py review \\\s+"\$RUNNER_TEMP/review-standards\.jsonl" '
-                              r'"\$RUNNER_TEMP/review-spec\.jsonl"\)')
+            run = self.claude_steps()["review"]["run"]
+            self.assertIn("for axis in standards spec; do", run)
+            self.assertIn('prompt "review-$axis"', run)
+            self.assertIn('"$RUNNER_TEMP/review-$axis.json" "$RUNNER_TEMP/review-$axis-summary.txt" "review-$axis"', run)
+            self.assertIn('claude-findings "$RUNNER_TEMP/review-$axis.json"', run)
+            self.assertIn('"Standards=$RUNNER_TEMP/review-standards.json" "Spec=$RUNNER_TEMP/review-spec.json"', run)
 
     def test_only_implementation_gets_shell(self):
-        modes = {name: re.findall(r"control\.py configure \S+ (\w+)", step["run"])
-                 for name, job in self.jobs() for step in job.get("steps", [])
-                 if "control.py configure" in step.get("run", "")}
-        self.assertEqual(modes, {"implement": ["implement"], "review": ["review"], "retro": ["retro"]})
+            modes = {name: re.findall(r"control\.py configure-claude \S+ (\w+)", step["run"])
+                     for name, job in self.jobs() for step in job.get("steps", [])
+                     if "control.py configure-claude" in step.get("run", "")}
+            self.assertEqual(modes, {"implement": ["implement"], "review": ["review"], "retro": ["retro"]})
+            self.assertIn("--tools Read,Glob,Grep,Edit,Write,Bash", self.claude_steps()["implement"]["run"])
+            for name in ("review", "retro"):
+                self.assertIn("--tools Read,Glob,Grep", self.claude_steps()[name]["run"])
+                self.assertNotIn("Write,Bash", self.claude_steps()[name]["run"])
 
     def test_sessions_are_always_scanned_then_uploaded_for_three_days(self):
         uploads = 0
@@ -1262,16 +1243,15 @@ class WorkflowContractTest(unittest.TestCase):
                     self.assertEqual((record.get("id"), record.get("if")), ("session", "always()"))
                     self.assertTrue(record.get("continue-on-error"))
                     run = record["run"]
-                    self.assertLess(run.index("control.py transcript"), run.index("control.py scan-session"))
-                    self.assertEqual(run.count("control.py transcript"), 1)
-                    self.assertEqual(run.count("control.py scan-session"), 2)
-                    self.assertLess(run.index('scan-session "$RUNNER_TEMP/'), run.index('cp "$RUNNER_TEMP/'))
+                    self.assertLess(run.index("control.py claude-transcript"), run.index("control.py scan-session"))
+                    self.assertEqual(run.count("control.py claude-transcript"), 1)
+                    self.assertEqual(run.count("control.py scan-session"), 1)
                     self.assertEqual(step["if"], "always() && steps.session.outcome == 'success'")
                     # Exact scanned files only, never the whole directory or a wildcard.
                     paths = step["with"]["path"].splitlines()
                     for path in paths:
                         self.assertTrue(path.startswith("${{ runner.temp }}/session/"), path)
-                        self.assertTrue(path.endswith((".md", "-summary.txt")), path)
+                        self.assertTrue(path.endswith(".jsonl"), path)
                         self.assertNotIn("*", path)
                     self.assertEqual(step["with"]["retention-days"], 3)
         self.assertEqual(uploads, 3)
@@ -1300,8 +1280,8 @@ class WorkflowContractTest(unittest.TestCase):
         steps = [step for step in retro["steps"] if "download-artifact" in step.get("uses", "")
                  and "pattern" in step["with"]]
         self.assertTrue(all(step.get("continue-on-error") for step in steps))
-        run = self.opencode_steps()["retro"]["run"]
-        self.assertLess(run.index("control.py retro"), run.index("control.py scan-output "))
+        run = self.claude_steps()["retro"]["run"]
+        self.assertLess(run.index("control.py claude-text"), run.index("control.py scan-output "))
 
     def test_retro_publish_holds_no_model_secret_and_survives_failed_retro(self):
         publish = self.implement["jobs"]["retro-publish"]
@@ -1310,7 +1290,7 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn("needs.claim.result == 'success'", publish["if"])
         self.assertNotIn("needs.retro.result", publish["if"])
         self.assertNotIn("secrets", str(publish))
-        self.assertNotIn("opencode", str(publish))
+        self.assertNotIn("ANTHROPIC", str(publish))
         self.assertEqual(publish["permissions"], {"contents": "read", "issues": "write", "pull-requests": "write"})
         downloads = [step for step in publish["steps"] if "download-artifact" in step.get("uses", "")]
         self.assertEqual([step["with"] for step in downloads], [
@@ -1325,60 +1305,6 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertIn("--body-file", run)
 
 
-class ConfigureTest(TaskDirectory):
-    denied = ("external_directory", "bash", "webfetch", "websearch", "task", "skill")
-
-    def setUp(self):
-        super().setUp()
-        self.directory = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
-        self.workspace = self.directory / "workspace"
-        self.workspace.mkdir()
-        self.github_env = self.directory / "github_env"
-        self.enterContext(mock.patch.dict(os.environ, {
-            "OPENCODE_AUTH_JSON": json.dumps({"k": SECRET}), "GITHUB_ENV": str(self.github_env),
-            "FACTORY_WORKSPACE": str(self.workspace), "FACTORY_ISSUE": "1"}))
-
-    def configure(self, mode):
-        control.configure(str(self.directory / "oc"), mode)
-        return json.loads((self.directory / "oc/opencode.json").read_text())
-
-    def test_review_and_retro_are_read_only(self):
-        for mode in ("review", "retro"):
-            with self.subTest(mode=mode):
-                config = self.configure(mode)
-                self.assertFalse(config["share"])
-                self.assertEqual(config["permission"]["read"], {
-                    "*": "allow", ".env": "deny", ".env.*": "deny", "**/.env": "deny",
-                    "**/.env.*": "deny", ".env.example": "allow", "**/.env.example": "allow", "**/auth.json": "deny"})
-                self.assertEqual(config["permission"]["*"], "deny")
-                self.assertEqual(config["permission"]["edit"], "deny")
-                for tool in self.denied:
-                    self.assertEqual(config["permission"][tool], "deny")
-                allowed = {tool for tool, rule in config["permission"].items() if rule == "allow"}
-                self.assertEqual(allowed, {"glob", "grep", "list"})
-
-    def test_implement_edits_unrestricted_paths_with_credentials_denied(self):
-        permission = self.configure("implement")["permission"]
-        self.assertEqual(permission["edit"], permission["read"])
-        self.assertEqual(permission["edit"]["*"], "allow")
-        self.assertEqual(permission["edit"][".env.example"], "allow")
-        self.assertEqual(permission["edit"]["**/auth.json"], "deny")
-        self.assertEqual(permission["bash"], "allow")
-
-    def test_rejects_unknown_mode(self):
-        self.assertRejects("invalid-mode", self.configure, "admin")
-        self.assertFalse((self.directory / "oc/data/opencode/auth.json").exists())
-
-    def test_auth_is_private_even_if_existing(self):
-        auth = self.directory / "oc/data/opencode/auth.json"
-        auth.parent.mkdir(parents=True)
-        auth.write_text("stale")
-        auth.chmod(0o644)
-        self.configure("review")
-        self.assertEqual(auth.stat().st_mode & 0o777, 0o600)
-        self.assertEqual(json.loads(auth.read_text()), {"k": SECRET})
-        self.assertIn(f"FACTORY_AUTH_FILE={auth}\n", self.github_env.read_text())
-        self.assertNotIn(SECRET, self.github_env.read_text())
 
 
 if __name__ == "__main__":

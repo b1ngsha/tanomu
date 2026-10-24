@@ -26,7 +26,7 @@ class FinalRunnerStepTest(unittest.TestCase):
             "review": ("final-review.yml", "review"), "publish": ("final-review.yml", "publish"),
             "handoff": ("software-factory-implement.yml", "handoff")}
     run_step, calls, uploaded = base.RunnerStepTest.run_step, base.RunnerStepTest.calls, base.RunnerStepTest.uploaded
-    stub_events, reply = base.RunnerStepTest.stub_events, base.RunnerStepTest.reply
+    reply = base.RunnerStepTest.reply
 
     def review(self, claude, spec="true"):
         env = {"HEAD": HEAD, "BASE": BASE, "SPEC": spec, "ANTHROPIC_MODEL": "deepseek-flash",
@@ -39,7 +39,7 @@ class FinalRunnerStepTest(unittest.TestCase):
                                  REVIEW_OUTPUT=str(directory / "temp/final-review/review.json")))
 
     def result(self, **event):
-        return "echo '" + json.dumps({"type": "result", "subtype": "success", "is_error": False, **event}) + "'"
+        return base.RunnerStepTest.result(self, **event)
 
     def temp(self, name):
         return self.directory / "temp" / name
