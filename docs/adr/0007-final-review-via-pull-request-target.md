@@ -13,9 +13,9 @@ Use a separate `pull_request_target` workflow for opened, reopened and
 ready_for_review events, with trusted controls and prompts from main. A
 `pull_request` workflow can be rewritten by the candidate and is unsuitable for a
 review job holding a model credential. The candidate's exact head is data for
-read-only inspection; the diff starts at its merge base. OpenCode's standalone
-flag only starts a private server, so project config and Claude compatibility
-loading are explicitly disabled to prevent candidate plugins executing at startup.
+read-only inspection; the diff starts at its merge base. Claude Code runs with `--bare --restricted`, an isolated configuration, hooks
+disabled and an empty strict MCP configuration. A canary verifies candidate project
+configuration stays inert; only Read, Glob and Grep are available.
 Repository and issue text are untrusted, including instructions embedded in them.
 The model job has only
 read permissions; a separate publisher has GitHub write permissions and no model
@@ -27,14 +27,15 @@ on main. Manual dispatch also forces a new review. Pushes do not trigger it. Run
 are serialized per PR without cancelling the previous run; stale heads are not
 published.
 
-Standards always runs; Spec uses linked same-repository issues and any trusted task
-review requirements, excluding implementation path restrictions. Reports preserve
-all findings and full responses, split into credential-scanned comments with
+Standards always runs; Spec uses captured linked same-repository issues. Reports preserve
+all structured findings, split into credential-scanned comments with
 invisible head/digest/part markers. Only the Actions bot's markers count for
-complete-report deduplication or filling missing parts. Automatic recovery reuses
+complete-report deduplication or filling missing parts. Completion includes any
+inline review expected by the summary marker. Automatic recovery reuses
 an earlier trusted workflow's report only after checking its PR, head and digest;
 expired artifacts fall back to a fresh review. Manual dispatch always runs a new
 review. Old reports remain visible.
-Sessions expire after three days and are independent of factory retro. The cost is
+Final review does not persist native sessions; structured reports and identities
+expire after three days. The cost is
 an extra model review and an advisory report that can become outdated after a push;
 the maintainer can explicitly request a fresh one.

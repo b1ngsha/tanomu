@@ -29,7 +29,14 @@ A task is keyed by issue number and has one concurrency group. The implementatio
 ## Implementation controls
 
 The trusted controls and prompts live in `.github/software-factory/`.
-`control.py` runs from the dispatch revision, independently of the candidate tree.
+`control.py` is the compatibility CLI, loaded from the dispatch revision independently
+of the candidate tree. `authorization.py` owns task snapshots and claims;
+`publication.py` owns review markers and missing-part plans; `agent_runner.py` owns
+supervised, sequential review execution; `execution.py` shares metadata vocabulary
+and publication outcomes between observation and reconciliation. `artifacts.py`
+owns patch scope checks and credential scanning. `verification.py`
+executes candidate checks and binds them to the formatted source tree. Python entry
+points retain isolated mode and resolve modules only from their trusted directory.
 Run its regression suite with `python3 -I -m unittest discover -s .github/software-factory -p 'test_*.py'`.
 
 The issue body is the sole specification for implementation and Spec review. Gate captures it automatically for all rounds and reviews; no per-issue JSON or policy file is required.
@@ -47,6 +54,9 @@ referenced files and skills are vendored. To update, replace the skill from one 
 commit and update both pins. The prompt builder removes only the briefs' upstream
 "Under 400 words." instruction; vendored files stay unchanged. Reviews have no
 response word, character or finding-count cap and include supported judgement calls.
+The pinned `pr/SKILL.md` supplies the same PR-body template used by an interactive
+`/pr` session. Trusted handoff fills it with known run facts; the implementation
+agent does not invoke the skill or receive PR permissions.
 They require a successful native result with schema-validated `structured_output`;
 partial results and automatic whole-role retries are not accepted.
 
@@ -66,8 +76,18 @@ The gate checks the maintainer actors, issue author, latest authorization label
 actor, explicit dependencies and branch/PR uniqueness. Claim checks the captured body
 and consumes the execution
 label. Each round generates a patch, then a fresh runner without model credentials
-installs candidate dependencies, applies `pnpm format`, rechecks the patch and
-uploads the formatted patch before running lint, typecheck, admin build and database tests. A failing check produces
+builds a trusted Node 24 / pnpm 11.20.0 container, installs candidate dependencies
+without lifecycle scripts, applies `pnpm format`, rechecks the patch and uploads the
+formatted patch before running lint, typecheck, admin build and database tests.
+Candidate commands run inside disposable containers with only the candidate tree
+mounted writable and its Git directory mounted read-only. Trusted controls, patch
+evidence, Docker's socket and Actions command files are not mounted. Containers use
+the host network to reach the disposable database. After formatting, the host records
+the base SHA, patch SHA-256 and Git tree identity; after each later check it requires
+the same identity, ignoring ordinary untracked build output covered by `.gitignore`.
+A retained source mutation fails that check. This does not prove candidate tests are
+honest, and does not detect a temporary source mutation restored within one command;
+ordinary PR CI and human review remain authoritative. A failing check produces
 `checks.json` (the command and a bounded, ANSI-stripped output tail) for the next
 round. Passing checks lead to a read-only review along the two `code-review` axes,
 each in its own fresh Claude Code session so neither sees the other's conversation:
@@ -81,7 +101,7 @@ All findings from every completed round are rendered from `review.json` and publ
 as comments after handoff, including earlier rounds that requested changes; no
 second review-Markdown response is generated. Both kinds of repair share one budget
 of three rounds: the initial attempt and two repairs. Repair is not a blind retry: every round is checked again, and only
-the patch that passed checks and review is published.
+the patch bound to passing checks and review is published.
 
 Authorization, patch-validation, credential-scan, implementer-error and infrastructure failures
 are not repairable and stop the run, as does a repair round that leaves the patch
@@ -203,7 +223,7 @@ this repository's issues referenced by
 Without a linked issue, Spec is skipped and the report explains why. Each axis runs
 in a fresh session under a 600-second budget and returns schema-validated structured
 output. `control.py` reads the native single-result JSON envelope and validates its
-`structured_output` again. The result file stays on the runner and is not uploaded. A timeout, provider error or
+`structured_output` again. Each native envelope is validated before starting the next axis. The result file stays on the runner and is not uploaded. A timeout, provider error or
 invalid result fails the job without publishing a partial review.
 
 The model job has no GitHub write token. A separate publisher with no model secret
@@ -211,17 +231,26 @@ posts the structured blocking and advisory findings as new comments, never editi
 previous reports. It neutralizes mentions, scans credentials and
 splits losslessly at 60,000 UTF-8 bytes. Invisible first-line markers identify the
 head, report digest and part number. Only markers authored by `github-actions[bot]`
-count for deduplication: automatic entry skips a complete report for that head.
-For a partial set it attempts to recover the original report from an earlier
+count for deduplication. New summary markers also record the expected inline digest
+(or `none`); automatic entry skips only when every summary part and any expected
+inline review are present. Legacy summaries have unknown inline status and are
+checked through recovery. For an incomplete publication it attempts to recover the original report from an earlier
 trusted final-review run's artifacts, verifies its PR, head and digest, then posts
-only missing parts. Expired or missing artifacts fall back to a fresh review.
+missing parts. Recovery of legacy markers also posts a modern first-part receipt so
+completion remains detectable after the artifacts expire. Expired or missing
+artifacts needed for recovery fall back to a fresh review.
 Rerunning the publisher also fills missing parts from its existing report. A moved
 head makes the report stale and prevents publication. Manual dispatch always
 requests a fresh review.
 
 Findings may carry a repository-relative path and a new-file line number. Only
 locations that exist in the reviewed diff are kept; the rest stay in the summary
-text. After posting the summary, the publisher submits all located findings as one
+text. New reviews post a brief summary with blocking/advisory counts and direct readers
+to inline comments for located findings, without repeating their text. Findings
+without a publishable location, including oversized inline comments, remain in full
+in the summary. The presentation format is frozen in the review identity, so recovery
+of earlier reports preserves their original rendering and digest. After posting the
+summary, the publisher submits all located findings as one
 PR review with inline comments (`COMMENT`, never an approval or a change request),
 so a rejected location fails the step rather than posting half of them. A marker
 in that review's body deduplicates identical findings on reruns and during
@@ -246,10 +275,15 @@ No database, external telemetry, secret or notification integration is needed.
 `workflow_run` in-progress and completed events. It polls orchestration metadata once per
 minute for at most five hours, updating its bot-owned comment only when phase/outcomes
 change. This is STARTED and phase progress, not a model heartbeat notification. It writes
-one schema-versioned execution manifest with repository, run/attempt, issue/PR, explicit
-parent identity, branch/head/base when known, state/reason, phase/jobs, times, next action
-and evidence links. Missing fields remain unavailable. Implementation delivery, independent
+one schema-versioned execution manifest (schema 2) with repository, run/attempt,
+issue/PR, explicit parent identity, branch, current PR head/base, state/reason,
+phase/jobs, times, next action
+and evidence links. `current_head/current_base` describe the live PR, never the
+reviewed revision. `reviewed_head/reviewed_base` remain unknown because observation
+reads Actions metadata only; the frozen review identity stays in the review artifact.
+Missing fields remain unavailable. Implementation delivery, independent
 round-review comment publication, final-review publication and ordinary PR CI are separate states.
+Observer comment lookup follows all pages before creating a new comment; a failed lookup never authorizes a duplicate.
 The existing gate rejection/round diagnostics remain detailed evidence; observer comments
 use their own marker and cannot overwrite those diagnostics or final-review report markers.
 
@@ -265,8 +299,8 @@ failed dispatch, review publication, CI or observation.
 `software-factory-reconcile.yml` runs every six hours or manually on main with read-only
 permissions. Its Actions summary links recent trusted executions and reports stale running
 implementation (>3 hours), completed tasks retaining `implementing`, final review not
-observed >30 minutes after delivery, failed/missing publication and recorded expired
-evidence. It links available PR/head CI and merged-head deployment metadata; pending and
+observed >30 minutes after delivery, failed/missing final or claimed-round comment publication and recorded expired
+evidence, including session, feedback and checked-patch artifacts. It links available PR/head CI and merged-head deployment metadata; pending and
 unavailable remain explicit. It proposes concrete human inspection steps and never changes
 labels, authorizes implementation, retries, merges or deploys. This schedule performs only
 metadata reads; enabling it does not enable an automated implementation run.
