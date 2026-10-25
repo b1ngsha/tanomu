@@ -196,13 +196,16 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    env:
+      BASE: ${{ inputs.base }}
+      PATCH: ${{ github.workspace }}/checked/candidate.patch
     defaults:
       run:
         # Unlike the implicit default, an explicit bash shell sets pipefail for `| tee`.
         shell: bash
     outputs:
       # Derived from step outcomes, which candidate code cannot rewrite.
-      checks: ${{ steps.test.outcome == 'success' && 'passed' || 'failed' }}
+      checks: ${{ steps.integrity.outcome == 'success' && (steps.test.outcome == 'success' && 'passed' || 'failed') || '' }}
       failed_check: >-
         ${{ steps.format.outcome == 'failure' && 'format' || steps.lint.outcome == 'failure' && 'lint' ||
             steps.typecheck.outcome == 'failure' && 'typecheck' || steps.build.outcome == 'failure' && 'build' ||
@@ -241,21 +244,17 @@ jobs:
           git apply "$RUNNER_TEMP/patch/candidate.patch"
           git add -N .
           python3 -I ../trusted/.github/software-factory/control.py scope "$ISSUE" "$BASE"
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
-        with:
-          package_json_file: candidate/package.json
-      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: candidate/pnpm-lock.yaml
-      - run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build isolated verification runtime
+        run: |
+          printf 'VERIFICATION_FAILURE=%s/verification-failed\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          docker build -t tanomu-factory-verify:local -f trusted/.github/software-factory/verify.Dockerfile trusted/.github/software-factory
+      - run: python3 -I ../trusted/.github/software-factory/verification.py install "$BASE" "$PATCH" "$RUNNER_TEMP/checked-source.json"
         working-directory: candidate
       # Formatting is mechanical, so the orchestrator applies it instead of spending a repair round.
       - id: format
         continue-on-error: true
         working-directory: candidate
-        run: pnpm format 2>&1 | tee "$RUNNER_TEMP/checks.log"
+        run: python3 -I ../trusted/.github/software-factory/verification.py format "$BASE" "$PATCH" "$RUNNER_TEMP/checked-source.json" 2>&1 | tee "$RUNNER_TEMP/checks.log"
       - name: Export checked candidate
         working-directory: candidate
         env:
@@ -268,7 +267,8 @@ jobs:
           mkdir ../checked
           git diff --binary "$BASE" > ../checked/candidate.patch
           python3 -I ../trusted/.github/software-factory/control.py scan-public ../checked/candidate.patch
-      # Factory orchestration stays trusted; candidate scripts/tests run only on this disposable runner.
+          python3 -I ../trusted/.github/software-factory/verification.py freeze "$BASE" "$PATCH" "$RUNNER_TEMP/checked-source.json"
+      # Candidate commands have no mount for trusted code, evidence or Actions command files.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: checked-${{ inputs.round }}
@@ -279,24 +279,27 @@ jobs:
         if: steps.format.outcome == 'success'
         continue-on-error: true
         working-directory: candidate
-        run: pnpm lint 2>&1 | tee "$RUNNER_TEMP/checks.log"
+        run: python3 -I ../trusted/.github/software-factory/verification.py lint "$BASE" "$PATCH" "$RUNNER_TEMP/checked-source.json" 2>&1 | tee "$RUNNER_TEMP/checks.log"
       - id: typecheck
         if: steps.lint.outcome == 'success'
         continue-on-error: true
         working-directory: candidate
-        run: pnpm typecheck 2>&1 | tee "$RUNNER_TEMP/checks.log"
+        run: python3 -I ../trusted/.github/software-factory/verification.py typecheck "$BASE" "$PATCH" "$RUNNER_TEMP/checked-source.json" 2>&1 | tee "$RUNNER_TEMP/checks.log"
       - id: build
         if: steps.typecheck.outcome == 'success'
         continue-on-error: true
         working-directory: candidate
-        run: pnpm build:admin 2>&1 | tee "$RUNNER_TEMP/checks.log"
+        run: python3 -I ../trusted/.github/software-factory/verification.py build:admin "$BASE" "$PATCH" "$RUNNER_TEMP/checked-source.json" 2>&1 | tee "$RUNNER_TEMP/checks.log"
       - id: test
         if: steps.build.outcome == 'success'
         continue-on-error: true
         working-directory: candidate
         env:
           TEST_DATABASE_URL: postgres://tanomu:tanomu@localhost:5432/tanomu
-        run: pnpm test 2>&1 | tee "$RUNNER_TEMP/checks.log"
+        run: python3 -I ../trusted/.github/software-factory/verification.py test "$BASE" "$PATCH" "$RUNNER_TEMP/checked-source.json" 2>&1 | tee "$RUNNER_TEMP/checks.log"
+      - name: Reject verification infrastructure or source identity failures
+        id: integrity
+        run: python3 -I trusted/.github/software-factory/verification.py assert "$VERIFICATION_FAILURE"
       - name: Summarize failed check
         if: steps.test.outcome != 'success'
         env:

@@ -1114,9 +1114,23 @@ class WorkflowContractTest(unittest.TestCase):
         upload = next(index for index, step in enumerate(steps)
                       if step.get("with", {}).get("name") == "checked-${{ inputs.round }}")
         for index, step in enumerate(steps):
-            if re.search(r"pnpm (lint|typecheck|build:admin|test)", step.get("run", "")):
+            if re.search(r"verification.py (lint|typecheck|build:admin|test)", step.get("run", "")):
                 self.assertGreater(index, upload, step["run"])
         self.assertNotIn("secrets", str(self.round["jobs"]["verify"]))
+
+    def test_verification_identity_failure_stops_repair_and_review(self):
+        steps = self.round["jobs"]["verify"]["steps"]
+        reject = next(i for i, step in enumerate(steps) if "verification.py assert" in step.get("run", ""))
+        feedback = next(i for i, step in enumerate(steps) if "control.py diagnose" in step.get("run", ""))
+        self.assertLess(reject, feedback)
+        self.assertNotIn("continue-on-error", steps[reject])
+        self.assertNotIn("if", steps[reject])
+        self.assertIn('"$VERIFICATION_FAILURE"', steps[reject]["run"])
+        self.assertIn("VERIFICATION_FAILURE=", str(steps[:reject]))
+        self.assertEqual(steps[reject]["id"], "integrity")
+        checks = self.round["jobs"]["verify"]["outputs"]["checks"]
+        self.assertIn("steps.integrity.outcome == 'success'", checks)
+        self.assertTrue(checks.endswith("|| '' }}"))
 
     def test_shared_files_contain_no_task_specific_text(self):
         shared = [*(CONTROL.parent / "prompts").glob("*.md"),
