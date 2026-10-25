@@ -492,6 +492,14 @@ def pr_diff(head, base):
         patch.write(git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head))
 
 
+def pr_body(number, round_number, output):
+    metadata(number)
+    require(round_number in ("1", "2", "3"), "invalid-round")
+    target = Path(output)
+    target.write_text(publication.pr_body(number, round_number, os.environ["GITHUB_REPOSITORY"],
+                                         os.environ["GITHUB_RUN_ID"], skill("pr")))
+    scan(target, public=True)
+
 def posted_inline(number):
     repo = os.environ["GITHUB_REPOSITORY"]
     pages = json.loads(subprocess.check_output([
@@ -648,6 +656,8 @@ if __name__ == "__main__":
             final_head(*args)
         elif command == "pr-diff":
             pr_diff(*args)
+        elif command == "pr-body":
+            pr_body(*args)
         elif command == "final-comments":
             require(len(args) in (4, 5), "invalid-arguments")
             reviews = json.loads(Path(args[4]).read_text()) if len(args) == 5 else None
