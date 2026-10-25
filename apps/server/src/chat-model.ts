@@ -34,7 +34,7 @@ export function createChatModelResolver(db: Db, cipher: KeyCipher): () => Promis
       .from(capabilityBindings)
       .innerJoin(providers, eq(capabilityBindings.providerId, providers.id))
       .where(eq(capabilityBindings.capability, "chat"));
-    if (!binding) throw new Error("chat has no Binding; bind it in the admin console");
+    if (!binding) throw new Error("chat has no Binding");
 
     const model = byProtocol[binding.protocol](
       { baseURL: binding.baseUrl, apiKey: cipher.decrypt(binding.apiKey) },
