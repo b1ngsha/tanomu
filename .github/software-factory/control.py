@@ -1,5 +1,4 @@
 """Trusted factory gates. Run from the dispatch revision, never the candidate tree."""
-import hashlib
 import io
 import json
 import os
@@ -18,6 +17,8 @@ from authorization import (claimed, claim_identity, dependencies, gate, metadata
                           record_claim, revalidate, snapshot, validate_issue)
 from common import api, require  # noqa: E402
 from artifacts import MAX_ARTIFACT_BYTES, git, scan, scope  # noqa: E402
+import publication  # noqa: E402
+from publication import COMMENT_BYTES, FINAL_MARKER, INLINE_MARKER, split  # noqa: E402
 
 CLAUDE_CODE_VERSION = "2.1.304"
 CLAUDE_PROVIDER_HOSTS = {"api.deepseek.com", "api.moonshot.ai", "api.moonshot.cn"}
@@ -385,18 +386,7 @@ def inline_findings(reviewed, patch):
                                "path": path, "line": line})
     return inline
 
-COMMENT_BYTES = 60_000
 
-def split(text, budget):
-    """Split losslessly into chunks of at most budget UTF-8 bytes, at character boundaries."""
-    require(budget > 0, "invalid-comment-header")
-    remaining, chunks = text.encode(), []
-    while remaining:
-        chunk = remaining[:budget].decode("utf-8", errors="ignore")
-        require(bool(chunk), "invalid-comment-budget")
-        chunks.append(chunk)
-        remaining = remaining[len(chunk.encode()):]
-    return chunks
 
 def comments(directory, output):
     """Publishable round-review findings, split losslessly to fit GitHub's comment limit."""
@@ -409,12 +399,7 @@ def comments(directory, output):
             continue
         scan(path, public=True, limit=None)
         review = json.loads(path.read_text())
-        require(isinstance(review, dict) and all(isinstance(review.get(key), list)
-                and all(isinstance(item, str) for item in review[key])
-                for key in ("findings", "advisory")), "invalid-review")
-        findings = [f"- **Blocking** — {item}" for item in review["findings"]]
-        findings += [f"- Advisory — {item}" for item in review["advisory"]]
-        text = ("### Findings\n\n" + ("\n".join(findings) or "No findings.") + "\n").replace("@", "@" + chr(0x200b))
+        text = publication.findings_text(review)
         preface = (f"## Factory review — round {number}\n\n"
                    f"Run: https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/"
                    f"{os.environ['GITHUB_RUN_ID']}\n\n")
@@ -426,8 +411,6 @@ def comments(directory, output):
             require(len(body.encode()) <= COMMENT_BYTES, "comment-too-large")
             (target / f"{index:04d}.md").write_text(body)
 
-FINAL_MARKER = re.compile(r"<!-- tanomu-final-review head=([0-9a-f]{40}) digest=([0-9a-f]{16}) "
-                          r"part=([1-9][0-9]*)/([1-9][0-9]*) -->")
 # Bare `#N` only: `owner/repo#N` and URLs point outside this repository.
 LINKED_ISSUE = re.compile(r"(?<![\w/])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs):?\s+#([1-9][0-9]*)\b",
                           re.I)
@@ -455,7 +438,7 @@ def final_pull(number):
         # Anyone can paste a marker, so only the workflow's own comments count.
         match = FINAL_MARKER.fullmatch((comment.get("body") or "").split("\n", 1)[0])
         if match and comment["user"]["login"] == "github-actions[bot]" and comment["user"]["type"] == "Bot":
-            posted.append([match[1], match[2], int(match[3]), int(match[4])])
+            posted.append([match[1], match[2], int(match[3]), int(match[4]), match[5]])
     return pull, problems, posted
 
 def final_identify(number, event, directory):
@@ -465,14 +448,8 @@ def final_identify(number, event, directory):
     repo, head = os.environ["GITHUB_REPOSITORY"], pull["head"]["sha"]
     base = api(f"repos/{repo}/compare/{pull['base']['sha']}...{head}")["merge_base_commit"]["sha"]
     require(SHA.fullmatch(base), "invalid-sha")
-    sets = {}
-    for marker_head, digest, part, total in posted:
-        if marker_head == head:
-            sets.setdefault(digest, []).append((part, total))
-    # Parts are at least 1, so n distinct parts with maximum n are exactly 1..n.
-    complete = any(len({total for _, total in parts}) == 1
-                   and len({part for part, _ in parts}) == max(part for part, _ in parts) == parts[0][1]
-                   for parts in sets.values())
+    inline = posted_inline(number) if any(item[4] not in (None, "none") for item in posted) else set()
+    complete = publication.complete(head, posted, inline)
     # Only the automatic entry skips; a manual dispatch always reviews again. A skipped PR's
     # issue references are never fetched.
     skip = event == "pull_request_target" and (pull["user"]["type"] == "Bot" or complete)
@@ -514,7 +491,12 @@ def pr_diff(head, base):
     with open(directory / "final.patch", "xb") as patch:
         patch.write(git("diff", "--binary", "--no-ext-diff", "--no-textconv", base, head))
 
-INLINE_MARKER = re.compile(r"<!-- tanomu-final-inline head=([0-9a-f]{40}) digest=([0-9a-f]{16}) -->")
+
+def posted_inline(number):
+    repo = os.environ["GITHUB_REPOSITORY"]
+    pages = json.loads(subprocess.check_output([
+        "gh", "api", "--paginate", "--slurp", f"repos/{repo}/pulls/{number}/reviews?per_page=100"]))
+    return publication.inline_markers(pages)
 
 def final_comments(directory, identity, current, output, reviews=None):
     source, target = Path(directory), Path(output)
@@ -524,63 +506,10 @@ def final_comments(directory, identity, current, output, reviews=None):
         return False
     scan(source / "review.json", public=True, limit=None)
     result = json.loads((source / "review.json").read_text())
-    findings = ([f"- **Blocking** — {item}" for item in result["findings"]]
-                + [f"- Advisory — {item}" for item in result["advisory"]])
-    report = ("### Findings\n\n" + ("\n".join(findings) or "No findings.") + "\n").replace("@", "@" + chr(0x200b))
-    run, head = reviewed["run"], reviewed["head"]
-    spec = (f"Spec: {', '.join(f'#{issue}' for issue in reviewed['issues'])}." if reviewed["issues"] else
-            "No issue is linked with Closes/Fixes/Resolves/Refs #N, so only the Standards axis ran.")
-    preface = (f"## Final review — head {head[:12]}\n\n"
-               f"Merge base {reviewed['base']}. Run: https://github.com/{os.environ['GITHUB_REPOSITORY']}"
-               f"/actions/runs/{run}\n\n{spec} Advisory only: this does not "
-               "block merging and nothing was changed.\n\n")
-    # The preface names the run, so each run is a new set while a rerun of its publisher only
-    # fills in missing parts.
-    digest = hashlib.sha256((preface + report).encode()).hexdigest()[:16]
-    # Reserve space for the marker and part counter.
-    chunks = split(report, COMMENT_BYTES - len(preface.encode()) - 200)
-    posted = {tuple(marker) for marker in current["posted"]}
+    files = publication.plan(result, reviewed, current, os.environ["GITHUB_REPOSITORY"], reviews)
     target.mkdir(parents=True, exist_ok=True)
-    inline = result.get("inline", [])
-    require(isinstance(inline, list) and all(
-        isinstance(item, dict) and set(item) == {"axis", "blocking", "finding", "path", "line"}
-        and isinstance(item["axis"], str) and type(item["blocking"]) is bool
-        and isinstance(item["finding"], str) and isinstance(item["path"], str)
-        and not item["path"].startswith("/") and ".." not in Path(item["path"]).parts
-        and type(item["line"]) is int and item["line"] >= 1 for item in inline), "invalid-inline")
-    if inline:
-        # The marker lives in the PR review body, so a rerun with identical findings does not
-        # post the same inline comments again. Only the workflow's own reviews count.
-        location = hashlib.sha256(json.dumps(inline, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
-        marker = f"<!-- tanomu-final-inline head={head} digest={location} -->"
-        seen = set()
-        for page in reviews or []:
-            for item in page:
-                user = item.get("user") or {}
-                match = INLINE_MARKER.fullmatch((item.get("body") or "").split("\n", 1)[0])
-                if match and user.get("login") == "github-actions[bot]" and user.get("type") == "Bot":
-                    seen.add((match[1], match[2]))
-        comments = []
-        if (head, location) not in seen:
-            for item in inline:
-                body = (f"**{item['axis']} · {'blocking' if item['blocking'] else 'advisory'}** — "
-                        f"{item['finding']}").replace("@", "@" + chr(0x200b))
-                # Oversized findings stay in the losslessly split summary instead.
-                if len(body.encode()) <= COMMENT_BYTES:
-                    comments.append({"path": item["path"], "line": item["line"], "side": "RIGHT", "body": body})
-        if comments:
-            (target / "inline.json").write_text(json.dumps({
-                "commit_id": head, "event": "COMMENT", "comments": comments,
-                "body": f"{marker}\n{len(comments)} inline findings from "
-                        f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{run}. "
-                        "The summary comment has the full report; nothing was changed."}, ensure_ascii=False))
-    for part, chunk in enumerate(chunks, 1):
-        if (head, digest, part, len(chunks)) in posted:
-            continue
-        body = (f"<!-- tanomu-final-review head={head} digest={digest} part={part}/{len(chunks)} -->\n"
-                f"{preface}Part {part}/{len(chunks)}\n\n{chunk}")
-        require(len(body.encode()) <= COMMENT_BYTES, "comment-too-large")
-        (target / f"{part:04d}.md").write_text(body)
+    for name, body in files.items():
+        (target / name).write_text(body)
     return True
 
 def recovery_artifact(repo, run):
@@ -630,7 +559,7 @@ def final_resume(number, event, directory, output):
             candidates.setdefault((run[1], marker[2]), []).append((int(marker[3]), int(marker[4])))
     for (run, digest), parts in reversed(list(candidates.items())):
         totals, seen = {total for _, total in parts}, {part for part, _ in parts}
-        if len(totals) != 1 or max(seen) > parts[0][1] or len(seen) >= parts[0][1]:
+        if len(totals) != 1 or max(seen) > parts[0][1] or len(seen) > parts[0][1]:
             continue
         try:
             files = recovery_artifact(repo, run)
@@ -646,7 +575,9 @@ def final_resume(number, event, directory, output):
                     scan(root / name, public=True, limit=None)
                 (root / "current.json").write_text(json.dumps({"pr": current["pr"], "head": current["head"],
                                                               "eligible": True, "posted": []}))
-                reviews = [api(f"repos/{repo}/pulls/{number}/reviews?per_page=100")]
+                reviews = json.loads(subprocess.check_output([
+                    "gh", "api", "--paginate", "--slurp",
+                    f"repos/{repo}/pulls/{number}/reviews?per_page=100"]))
                 final_comments(root, root / "identity.json", root / "current.json", root / "comments",
                                reviews=reviews)
                 bodies = sorted((root / "comments").glob("*.md"))
