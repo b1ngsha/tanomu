@@ -196,6 +196,7 @@ export function createProviderStore(db: Db, cipher: KeyCipher): ProviderStore {
         if (deleted.length === 0) throw new ProviderStoreError("provider-not-found");
       } catch (error) {
         if (error instanceof ProviderStoreError) throw error;
+        // PostgreSQL 18 reports ON DELETE RESTRICT as restrict_violation (23001).
         if (databaseErrorCode(error) === "23001") {
           throw new ProviderStoreError("provider-in-use");
         }

@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { deleteCookie, getSignedCookie, setSignedCookie } from "hono/cookie";
 import { z } from "zod";
+import { providerProtocol } from "./db/schema.ts";
 import { ProviderStoreError } from "./provider-store.ts";
 import type { ProviderStore } from "./provider-store.ts";
 
@@ -19,14 +20,17 @@ type HttpDeps = {
 const User = z.object({ openId: z.string().min(1), name: z.string().min(1) });
 const Session = User.extend({ exp: z.number() });
 const State = z.object({ state: z.string(), exp: z.number() });
-const ProviderProtocol = z.enum(["openai", "anthropic", "google"]);
+const ProviderProtocol = z.enum(providerProtocol.enumValues);
+const ProviderKey = z.string().refine((value) => value.trim().length > 0);
 const ProviderCreate = z.object({
   name: z.string().trim().min(1),
   protocol: ProviderProtocol,
   baseUrl: z.url().refine((value) => ["http:", "https:"].includes(new URL(value).protocol)),
-  apiKey: z.string().min(1),
+  apiKey: ProviderKey,
 });
-const ProviderUpdate = ProviderCreate.partial().extend({ apiKey: z.string().optional() });
+const ProviderUpdate = ProviderCreate.partial().extend({
+  apiKey: z.union([z.literal(""), ProviderKey]).optional(),
+});
 const ProviderId = z.uuid();
 const cookieOptions = { httpOnly: true, sameSite: "Lax", path: "/" } as const;
 
@@ -38,11 +42,17 @@ function parseCookie(value: string | false | undefined): unknown {
   }
 }
 
-function providerError(error: unknown): Response | undefined {
-  if (!(error instanceof ProviderStoreError)) return undefined;
-  if (error.code === "provider-not-found")
-    return Response.json({ error: error.code }, { status: 404 });
-  return Response.json({ error: error.code }, { status: 409 });
+function providerError(error: unknown): Response {
+  if (error instanceof ProviderStoreError) {
+    switch (error.code) {
+      case "provider-not-found":
+        return Response.json({ error: error.code }, { status: 404 });
+      case "duplicate-provider-name":
+      case "provider-in-use":
+        return Response.json({ error: error.code }, { status: 409 });
+    }
+  }
+  return Response.json({ error: "internal-error" }, { status: 500 });
 }
 
 function invalidRequest(): Response {
@@ -117,8 +127,8 @@ export function createHttpApp({ oauth, sessionSecret, providerStore }: HttpDeps)
   app.get("/api/providers", async (c) => {
     try {
       return c.json(await providerStore.listProviders());
-    } catch {
-      return c.json({ error: "internal-error" }, 500);
+    } catch (error) {
+      return providerError(error);
     }
   });
   app.post("/api/providers", async (c) => {
@@ -127,7 +137,7 @@ export function createHttpApp({ oauth, sessionSecret, providerStore }: HttpDeps)
     try {
       return c.json(await providerStore.createProvider(input), 201);
     } catch (error) {
-      return providerError(error) ?? c.json({ error: "internal-error" }, 500);
+      return providerError(error);
     }
   });
   app.patch("/api/providers/:id", async (c) => {
@@ -143,7 +153,7 @@ export function createHttpApp({ oauth, sessionSecret, providerStore }: HttpDeps)
     try {
       return c.json(await providerStore.updateProvider(id.data, update));
     } catch (error) {
-      return providerError(error) ?? c.json({ error: "internal-error" }, 500);
+      return providerError(error);
     }
   });
   app.delete("/api/providers/:id", async (c) => {
@@ -153,7 +163,7 @@ export function createHttpApp({ oauth, sessionSecret, providerStore }: HttpDeps)
       await providerStore.deleteProvider(id.data);
       return c.body(null, 204);
     } catch (error) {
-      return providerError(error) ?? c.json({ error: "internal-error" }, 500);
+      return providerError(error);
     }
   });
   if (process.env.NODE_ENV === "production") {

@@ -108,6 +108,44 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
     expect(cipher.decrypt(stored!.apiKey)).toBe("sk-abcdefghijklmnop");
   });
 
+  it("rejects whitespace-only keys without trimming valid key contents", async () => {
+    const input = { name: "Whitespace", protocol: "openai", baseUrl: "https://api.example.com" };
+    for (const apiKey of ["   ", "\t\n"]) {
+      const response = await request("/api/providers", {
+        method: "POST",
+        body: JSON.stringify({ ...input, apiKey }),
+      });
+      expect(response.status).toBe(400);
+    }
+    const originalKey = "  original-key-1234  ";
+    const created = await request("/api/providers", {
+      method: "POST",
+      body: JSON.stringify({ ...input, apiKey: originalKey }),
+    });
+    expect(created.status).toBe(201);
+    const { id } = await created.json();
+    for (const apiKey of ["   ", "\t\n"]) {
+      const response = await request(`/api/providers/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ apiKey }),
+      });
+      expect(response.status).toBe(400);
+      const [stored] = await db.select().from(providers);
+      expect(cipher.decrypt(stored!.apiKey)).toBe(originalKey);
+    }
+    const replacementKey = "  replacement-key-5678  ";
+    expect(
+      (
+        await request(`/api/providers/${id}`, {
+          method: "PATCH",
+          body: JSON.stringify({ apiKey: replacementKey }),
+        })
+      ).status,
+    ).toBe(200);
+    const [stored] = await db.select().from(providers);
+    expect(cipher.decrypt(stored!.apiKey)).toBe(replacementKey);
+  });
+
   it("validates Provider input and rejects case-insensitive duplicate names", async () => {
     const invalid = [
       { name: "", protocol: "openai", baseUrl: "https://api.example.com", apiKey: "key" },
@@ -217,7 +255,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
   });
 
   it("rejects malformed requests, missing Providers and conflicting edits", async () => {
-    const input = {
+    const providerValues = {
       protocol: "openai" as const,
       baseUrl: "https://api.example.com",
       apiKey: cipher.encrypt("key"),
@@ -225,8 +263,8 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
     const rows = await db
       .insert(providers)
       .values([
-        { ...input, name: "First" },
-        { ...input, name: "Second" },
+        { ...providerValues, name: "First" },
+        { ...providerValues, name: "Second" },
       ])
       .returning();
     const cases = [
