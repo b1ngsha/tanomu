@@ -9,10 +9,13 @@ const Env = z.object({
   MASTER_KEY: z
     .string()
     .regex(/^[0-9a-f]{64}$/i, "32 random bytes as 64 hex chars (openssl rand -hex 32)"),
-  CHAT_PROVIDER_PROTOCOL: z.enum(["openai", "anthropic", "google"]),
-  CHAT_PROVIDER_BASE_URL: z.url(),
-  CHAT_PROVIDER_API_KEY: z.string().min(1),
-  CHAT_MODEL: z.string().min(1),
+  // Only read by the one-time import of the chat Binding (provider-store.ts), which
+  // names any that are missing when there is nothing to import from. An existing Binding
+  // ignores unset vars, but blank values are still rejected.
+  CHAT_PROVIDER_PROTOCOL: z.enum(["openai", "anthropic", "google"]).optional(),
+  CHAT_PROVIDER_BASE_URL: z.url().optional(),
+  CHAT_PROVIDER_API_KEY: z.string().min(1).optional(),
+  CHAT_MODEL: z.string().min(1).optional(),
   CHAT_MODEL_VISION: z.stringbool().default(false),
 });
 

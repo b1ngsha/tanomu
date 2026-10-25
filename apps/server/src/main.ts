@@ -5,7 +5,7 @@ import {
   replyToPrivateMessages,
   type RecordedMessage,
 } from "@tanomu/core";
-import { createChatModel } from "./chat-model.ts";
+import { createChatModelResolver } from "./chat-model.ts";
 import { loadConfig } from "./config.ts";
 import { createConversationStore } from "./conversation-store.ts";
 import { createDb, runMigrations } from "./db/client.ts";
@@ -19,14 +19,14 @@ import { importChatBinding } from "./provider-store.ts";
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL);
 await runMigrations(db);
-await importChatBinding(db, createKeyCipher(config.MASTER_KEY), config);
+const cipher = createKeyCipher(config.MASTER_KEY);
+await importChatBinding(db, cipher, config);
 
 const feishu = createFeishu(config);
 const deps = {
   store: createConversationStore(db),
   llmCallLog: createLlmCallLog(db),
-  model: createChatModel(config),
-  vision: config.CHAT_MODEL_VISION,
+  resolveChatModel: createChatModelResolver(db, cipher),
   send: feishu.send,
   downloadImage: feishu.downloadImage,
 };
