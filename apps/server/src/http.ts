@@ -3,16 +3,31 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { deleteCookie, getSignedCookie, setSignedCookie } from "hono/cookie";
 import { z } from "zod";
+import { ProviderStoreError } from "./provider-store.ts";
+import type { ProviderStore } from "./provider-store.ts";
 
 export interface FeishuOAuth {
   authorizeUrl(state: string): string;
   exchange(code: string): Promise<{ openId: string; name: string }>;
 }
 
-type HttpDeps = { oauth: FeishuOAuth; sessionSecret: string };
+type HttpDeps = {
+  oauth: FeishuOAuth;
+  sessionSecret: string;
+  providerStore: ProviderStore;
+};
 const User = z.object({ openId: z.string().min(1), name: z.string().min(1) });
 const Session = User.extend({ exp: z.number() });
 const State = z.object({ state: z.string(), exp: z.number() });
+const ProviderProtocol = z.enum(["openai", "anthropic", "google"]);
+const ProviderCreate = z.object({
+  name: z.string().trim().min(1),
+  protocol: ProviderProtocol,
+  baseUrl: z.url().refine((value) => ["http:", "https:"].includes(new URL(value).protocol)),
+  apiKey: z.string().min(1),
+});
+const ProviderUpdate = ProviderCreate.partial().extend({ apiKey: z.string().optional() });
+const ProviderId = z.uuid();
 const cookieOptions = { httpOnly: true, sameSite: "Lax", path: "/" } as const;
 
 function parseCookie(value: string | false | undefined): unknown {
@@ -23,7 +38,27 @@ function parseCookie(value: string | false | undefined): unknown {
   }
 }
 
-export function createHttpApp({ oauth, sessionSecret }: HttpDeps) {
+function providerError(error: unknown): Response | undefined {
+  if (!(error instanceof ProviderStoreError)) return undefined;
+  if (error.code === "provider-not-found")
+    return Response.json({ error: error.code }, { status: 404 });
+  return Response.json({ error: error.code }, { status: 409 });
+}
+
+function invalidRequest(): Response {
+  return Response.json({ error: "invalid-request" }, { status: 400 });
+}
+
+async function jsonBody<T>(request: Request, schema: z.ZodType<T>): Promise<T | Response> {
+  try {
+    const parsed = schema.safeParse(await request.json());
+    return parsed.success ? parsed.data : invalidRequest();
+  } catch {
+    return invalidRequest();
+  }
+}
+
+export function createHttpApp({ oauth, sessionSecret, providerStore }: HttpDeps) {
   const app = new Hono<{ Variables: { user: z.infer<typeof User> } }>();
   app.get("/healthz", (c) => c.text("ok"));
   app.get("/auth/feishu/login", async (c) => {
@@ -79,6 +114,48 @@ export function createHttpApp({ oauth, sessionSecret }: HttpDeps) {
     return next();
   });
   app.get("/api/me", (c) => c.json(c.get("user")));
+  app.get("/api/providers", async (c) => {
+    try {
+      return c.json(await providerStore.listProviders());
+    } catch {
+      return c.json({ error: "internal-error" }, 500);
+    }
+  });
+  app.post("/api/providers", async (c) => {
+    const input = await jsonBody(c.req.raw, ProviderCreate);
+    if (input instanceof Response) return input;
+    try {
+      return c.json(await providerStore.createProvider(input), 201);
+    } catch (error) {
+      return providerError(error) ?? c.json({ error: "internal-error" }, 500);
+    }
+  });
+  app.patch("/api/providers/:id", async (c) => {
+    const id = ProviderId.safeParse(c.req.param("id"));
+    const input = await jsonBody(c.req.raw, ProviderUpdate);
+    if (!id.success || input instanceof Response) return invalidRequest();
+    const update = {
+      ...(input.name === undefined ? {} : { name: input.name }),
+      ...(input.protocol === undefined ? {} : { protocol: input.protocol }),
+      ...(input.baseUrl === undefined ? {} : { baseUrl: input.baseUrl }),
+      ...(input.apiKey === undefined ? {} : { apiKey: input.apiKey }),
+    };
+    try {
+      return c.json(await providerStore.updateProvider(id.data, update));
+    } catch (error) {
+      return providerError(error) ?? c.json({ error: "internal-error" }, 500);
+    }
+  });
+  app.delete("/api/providers/:id", async (c) => {
+    const id = ProviderId.safeParse(c.req.param("id"));
+    if (!id.success) return invalidRequest();
+    try {
+      await providerStore.deleteProvider(id.data);
+      return c.body(null, 204);
+    } catch (error) {
+      return providerError(error) ?? c.json({ error: "internal-error" }, 500);
+    }
+  });
   if (process.env.NODE_ENV === "production") {
     const root = fileURLToPath(new URL("../../admin/dist", import.meta.url));
     app.get("/api/*", (c) => c.notFound());
