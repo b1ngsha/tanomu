@@ -29,7 +29,8 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: python3 -I -m unittest discover -s .github/software-factory -p 'test_*.py'
+      - run: pnpm test:factory
+      - run: python3 -I .claude/skills/advance-pr-stack/scripts/test_advance.py
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck

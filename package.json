@@ -11,6 +11,7 @@
     "format:check": "oxfmt --check",
     "typecheck": "pnpm -r typecheck",
     "test": "vitest run --no-file-parallelism",
+    "test:factory": "python3 -I -m unittest discover -s .github/software-factory -p 'test_*.py'",
     "test:db": "TEST_DATABASE_URL=postgres://tanomu:tanomu@localhost:54329/tanomu_test pnpm test",
     "db:generate": "pnpm --filter @tanomu/server db:generate",
     "db:migrate": "pnpm --filter @tanomu/server db:migrate"

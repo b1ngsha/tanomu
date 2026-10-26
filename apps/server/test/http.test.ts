@@ -1,5 +1,7 @@
 import { expect, test, vi } from "vitest";
 import { createHttpApp } from "../src/http.ts";
+import type { ProviderStore } from "../src/provider-store.ts";
+import type { ChatBindingStore } from "../src/chat-binding-store.ts";
 
 const secret = "test-only-session-secret-with-32-characters";
 const user = { openId: "ou_test", name: "Ada" };
@@ -10,7 +12,25 @@ const oauth = {
     return user;
   },
 };
-const app = createHttpApp({ oauth, sessionSecret: secret });
+const chatBindingStore: ChatBindingStore = {
+  getChatBinding: async () => null,
+  putChatBinding: async () => {
+    throw new Error("not used");
+  },
+};
+const providerStore: ProviderStore = {
+  listProviders: async () => [],
+  createProvider: async () => {
+    throw new Error("not used");
+  },
+  updateProvider: async () => {
+    throw new Error("not used");
+  },
+  deleteProvider: async () => {
+    throw new Error("not used");
+  },
+};
+const app = createHttpApp({ oauth, sessionSecret: secret, providerStore, chatBindingStore });
 
 function cookieOf(response: Response, name: string) {
   return response.headers
@@ -34,6 +54,7 @@ test("login redirects to Feishu with a short-lived signed state cookie", async (
 
 test("callback rejects missing or mismatched state without a session", async () => {
   const login = await app.request("/auth/feishu/login");
+
   for (const cookie of ["", cookieOf(login, "tanomu_oauth_state")]) {
     const response = await app.request("/auth/feishu/callback?state=wrong&code=valid-code", {
       headers: { cookie },
@@ -46,12 +67,14 @@ test("callback rejects missing or mismatched state without a session", async () 
 test("valid callback signs in the User and exposes their name", async () => {
   const login = await app.request("/auth/feishu/login");
   const state = new URL(login.headers.get("location")!).searchParams.get("state");
+
   const callback = await app.request(`/auth/feishu/callback?state=${state}&code=valid-code`, {
     headers: { cookie: cookieOf(login, "tanomu_oauth_state") },
   });
   expect(callback.status).toBe(302);
   expect(callback.headers.get("location")).toBe("/");
   expect(callback.headers.get("set-cookie")).toContain("Max-Age=604800");
+
   const response = await app.request("/api/me", {
     headers: { cookie: cookieOf(callback, "tanomu_session") },
   });
@@ -62,12 +85,15 @@ test("valid callback signs in the User and exposes their name", async () => {
 test("sessions expire after seven days even if the cookie is retained", async () => {
   const login = await app.request("/auth/feishu/login");
   const state = new URL(login.headers.get("location")!).searchParams.get("state");
+
   const callback = await app.request(`/auth/feishu/callback?state=${state}&code=valid-code`, {
     headers: { cookie: cookieOf(login, "tanomu_oauth_state") },
   });
+
   vi.useFakeTimers();
   try {
     vi.setSystemTime(Date.now() + 8 * 86400_000);
+
     const response = await app.request("/api/me", {
       headers: { cookie: cookieOf(callback, "tanomu_session") },
     });
@@ -81,13 +107,16 @@ test("callback rejects an expired state and a denied authorization", async () =>
   const login = await app.request("/auth/feishu/login");
   const state = new URL(login.headers.get("location")!).searchParams.get("state");
   const headers = { cookie: cookieOf(login, "tanomu_oauth_state") };
+
   expect(
     (await app.request(`/auth/feishu/callback?state=${state}&error=access_denied`, { headers }))
       .status,
   ).toBe(400);
+
   vi.useFakeTimers();
   try {
     vi.setSystemTime(Date.now() + 601_000);
+
     expect(
       (await app.request(`/auth/feishu/callback?state=${state}&code=valid-code`, { headers }))
         .status,
@@ -106,9 +135,12 @@ test("failed OAuth exchange does not leak upstream errors or create a session", 
         throw new Error("sensitive upstream details");
       },
     },
+    providerStore,
+    chatBindingStore,
   });
   const login = await failing.request("/auth/feishu/login");
   const state = new URL(login.headers.get("location")!).searchParams.get("state");
+
   const response = await failing.request(`/auth/feishu/callback?state=${state}&code=valid-code`, {
     headers: { cookie: cookieOf(login, "tanomu_oauth_state") },
   });
