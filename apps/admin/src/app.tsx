@@ -1,14 +1,14 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button } from "./components/ui/button.tsx";
-import { ChatBinding } from "./binding.tsx";
-import { api } from "./lib/api.ts";
-import { adminQueries, errorMessage } from "./lib/queries.ts";
-import { Providers } from "./providers.tsx";
+import { ChatBinding } from "./features/chat-binding/chat-binding-section.tsx";
+import { Providers } from "./features/providers/providers-section.tsx";
+import { sessionApi, sessionQueries } from "./features/session/session.ts";
+import { errorMessage } from "./lib/http.ts";
 
 export function App() {
-  const user = useQuery(adminQueries.user());
+  const user = useQuery(sessionQueries.user());
   const logout = useMutation({
-    mutationFn: api.logout,
+    mutationFn: sessionApi.logout,
     onSuccess: () => window.location.replace("/auth/feishu/login"),
   });
   const error = logout.error ?? user.error;

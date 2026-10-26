@@ -15,12 +15,5 @@ export const providerView = providerFields.omit({ apiKey: true }).extend({
   id: z.uuid(),
   apiKeyMask: z.string().min(1),
 });
-export const chatBinding = z.object({
-  providerId: z.uuid({ error: "请选择 Provider" }),
-  model: nonempty,
-  vision: z.boolean(),
-});
-export const userView = z.object({ openId: z.string().min(1), name: z.string().min(1) });
 export type Provider = z.infer<typeof providerView>;
 export type ProviderInput = z.infer<typeof providerFields>;
-export type Binding = z.infer<typeof chatBinding>;

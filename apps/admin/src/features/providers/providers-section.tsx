@@ -2,20 +2,10 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useIsMutating, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
-import { Button } from "./components/ui/button.tsx";
-import {
-  providerCreate,
-  providerFields,
-  type Provider,
-  type ProviderInput,
-} from "./lib/contracts.ts";
-import {
-  adminQueries,
-  errorMessage,
-  needsReconciliation,
-  useDeleteProvider,
-  useSaveProvider,
-} from "./lib/queries.ts";
+import { Button } from "../../components/ui/button.tsx";
+import { errorMessage, needsReconciliation } from "../../lib/http.ts";
+import { providerCreate, providerFields, type Provider, type ProviderInput } from "./contracts.ts";
+import { providerQueries, useDeleteProvider, useSaveProvider } from "./queries.ts";
 
 const fieldClass =
   "mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50";
@@ -127,7 +117,7 @@ function ProviderForm({
 }
 
 export function Providers() {
-  const providers = useQuery(adminQueries.providers());
+  const providers = useQuery(providerQueries.list());
   const remove = useDeleteProvider();
   const [editingId, setEditingId] = useState<string | null>(null);
   const writing = useIsMutating({ mutationKey: ["admin-write"] }) > 0;

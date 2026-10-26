@@ -4,8 +4,8 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatBinding } from "../src/binding.tsx";
-import { createQueryClient } from "../src/lib/queries.ts";
+import { ChatBinding } from "../../../src/features/chat-binding/chat-binding-section.tsx";
+import { createQueryClient } from "../../../src/lib/query-client.ts";
 
 const provider = {
   id: "2b1e3b7d-bcb5-44a9-bb15-dbbd10d9fbb3",

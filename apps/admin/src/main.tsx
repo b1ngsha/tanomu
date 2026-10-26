@@ -3,7 +3,7 @@ import { StrictMode, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./app.tsx";
 import "./index.css";
-import { createQueryClient } from "./lib/queries.ts";
+import { createQueryClient } from "./lib/query-client.ts";
 
 function Root() {
   const [client] = useState(createQueryClient);
