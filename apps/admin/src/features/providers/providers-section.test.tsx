@@ -1,40 +1,14 @@
 // @vitest-environment jsdom
-import "@testing-library/jest-dom/vitest";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { Providers } from "../../../src/features/providers/providers-section.tsx";
-import { createQueryClient } from "../../../src/lib/query-client.ts";
+import { describe, expect, it, vi } from "vitest";
+import { provider } from "../../../test/fixtures.ts";
+import { fetchMock, json, renderWithQuery } from "../../../test/test-utils.tsx";
+import { Providers } from "./providers-section.tsx";
 
-const provider = {
-  id: "2b1e3b7d-bcb5-44a9-bb15-dbbd10d9fbb3",
-  name: "OpenAI",
-  protocol: "openai" as const,
-  baseUrl: "https://api.openai.com/v1",
-  apiKeyMask: "sk-••••",
-};
-const fetchMock = vi.fn();
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
 function setup() {
-  return render(
-    <QueryClientProvider client={createQueryClient()}>
-      <Providers />
-    </QueryClientProvider>,
-  );
+  return renderWithQuery(<Providers />);
 }
-beforeEach(() => vi.stubGlobal("fetch", fetchMock));
-afterEach(() => {
-  cleanup();
-  vi.unstubAllGlobals();
-  vi.restoreAllMocks();
-  fetchMock.mockReset();
-});
 
 describe("Providers", () => {
   it("validates a new Provider with the shared schema before writing", async () => {
@@ -64,7 +38,11 @@ describe("Providers", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Provider 已保存");
     expect(screen.getByRole("heading", { name: "OpenAI" })).toBeInTheDocument();
     expect(screen.getByLabelText("API Key")).toHaveValue("");
-    expect(fetchMock.mock.calls[1][0].method).toBe("POST");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ method: "POST" }),
+      expect.anything(),
+    );
   });
 
   it("keeps edits and the saved key after a rejected update", async () => {
@@ -85,7 +63,11 @@ describe("Providers", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("Provider 名称已存在");
     expect(name).toHaveValue("Changed");
-    expect(fetchMock.mock.calls[1][0].method).toBe("PATCH");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ method: "PATCH" }),
+      expect.anything(),
+    );
   });
 
   it("refreshes before allowing a repeat after an uncertain write", async () => {
