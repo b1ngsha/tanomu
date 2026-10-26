@@ -3,9 +3,10 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { deleteCookie, getSignedCookie, setSignedCookie } from "hono/cookie";
 import { z } from "zod";
+import type { ChatBindingStore } from "./chat-binding-store.ts";
 import { providerProtocol } from "./db/schema.ts";
-import { ProviderStoreError } from "./provider-store.ts";
 import type { ProviderStore } from "./provider-store.ts";
+import { StoreError } from "./store-error.ts";
 
 export interface FeishuOAuth {
   authorizeUrl(state: string): string;
@@ -16,6 +17,7 @@ type HttpDeps = {
   oauth: FeishuOAuth;
   sessionSecret: string;
   providerStore: ProviderStore;
+  chatBindingStore: ChatBindingStore;
 };
 const User = z.object({ openId: z.string().min(1), name: z.string().min(1) });
 const Session = User.extend({ exp: z.number() });
@@ -47,8 +49,8 @@ function parseCookie(value: string | false | undefined): unknown {
   }
 }
 
-function providerError(error: unknown): Response {
-  if (error instanceof ProviderStoreError) {
+function storeError(error: unknown): Response {
+  if (error instanceof StoreError) {
     switch (error.code) {
       case "provider-not-found":
         return Response.json({ error: error.code }, { status: 404 });
@@ -73,7 +75,7 @@ async function jsonBody<T>(request: Request, schema: z.ZodType<T>): Promise<T | 
   }
 }
 
-export function createHttpApp({ oauth, sessionSecret, providerStore }: HttpDeps) {
+export function createHttpApp({ oauth, sessionSecret, providerStore, chatBindingStore }: HttpDeps) {
   const app = new Hono<{ Variables: { user: z.infer<typeof User> } }>();
   app.get("/healthz", (c) => c.text("ok"));
   app.get("/auth/feishu/login", async (c) => {
@@ -133,7 +135,7 @@ export function createHttpApp({ oauth, sessionSecret, providerStore }: HttpDeps)
     try {
       return c.json(await providerStore.listProviders());
     } catch (error) {
-      return providerError(error);
+      return storeError(error);
     }
   });
   app.post("/api/providers", async (c) => {
@@ -142,7 +144,7 @@ export function createHttpApp({ oauth, sessionSecret, providerStore }: HttpDeps)
     try {
       return c.json(await providerStore.createProvider(input), 201);
     } catch (error) {
-      return providerError(error);
+      return storeError(error);
     }
   });
   app.patch("/api/providers/:id", async (c) => {
@@ -158,7 +160,7 @@ export function createHttpApp({ oauth, sessionSecret, providerStore }: HttpDeps)
     try {
       return c.json(await providerStore.updateProvider(id.data, update));
     } catch (error) {
-      return providerError(error);
+      return storeError(error);
     }
   });
   app.delete("/api/providers/:id", async (c) => {
@@ -168,23 +170,23 @@ export function createHttpApp({ oauth, sessionSecret, providerStore }: HttpDeps)
       await providerStore.deleteProvider(id.data);
       return c.body(null, 204);
     } catch (error) {
-      return providerError(error);
+      return storeError(error);
     }
   });
   app.get("/api/capabilities", async (c) => {
     try {
-      return c.json({ chat: await providerStore.getChatBinding() });
+      return c.json({ chat: await chatBindingStore.getChatBinding() });
     } catch (error) {
-      return providerError(error);
+      return storeError(error);
     }
   });
   app.put("/api/capabilities/chat", async (c) => {
     const input = await jsonBody(c.req.raw, ChatBindingInput);
     if (input instanceof Response) return input;
     try {
-      return c.json(await providerStore.putChatBinding(input));
+      return c.json(await chatBindingStore.putChatBinding(input));
     } catch (error) {
-      return providerError(error);
+      return storeError(error);
     }
   });
   if (process.env.NODE_ENV === "production") {

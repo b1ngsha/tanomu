@@ -3,6 +3,7 @@ import type { Config } from "./config.ts";
 import type { Db } from "./db/client.ts";
 import { capabilityBindings, providers } from "./db/schema.ts";
 import type { KeyCipher } from "./key-cipher.ts";
+import { StoreError } from "./store-error.ts";
 
 type ChatEnv = Partial<
   Pick<
@@ -39,29 +40,7 @@ export interface UpdateProviderInput {
   apiKey?: string;
 }
 
-export type ProviderStoreErrorCode =
-  | "provider-not-found"
-  | "duplicate-provider-name"
-  | "provider-in-use";
-
-export class ProviderStoreError extends Error {
-  readonly code: ProviderStoreErrorCode;
-
-  constructor(code: ProviderStoreErrorCode) {
-    super(code);
-    this.code = code;
-  }
-}
-
-export interface ChatBinding {
-  providerId: string;
-  model: string;
-  vision: boolean;
-}
-
 export interface ProviderStore {
-  getChatBinding(): Promise<ChatBinding | null>;
-  putChatBinding(input: ChatBinding): Promise<ChatBinding>;
   listProviders(): Promise<ProviderView[]>;
   createProvider(input: CreateProviderInput): Promise<ProviderView>;
   updateProvider(id: string, input: UpdateProviderInput): Promise<ProviderView>;
@@ -144,45 +123,6 @@ export async function importChatBinding(db: Db, cipher: KeyCipher, env: ChatEnv)
 
 export function createProviderStore(db: Db, cipher: KeyCipher): ProviderStore {
   return {
-    async getChatBinding() {
-      const [binding] = await db
-        .select({
-          providerId: capabilityBindings.providerId,
-          model: capabilityBindings.model,
-          vision: capabilityBindings.vision,
-        })
-        .from(capabilityBindings)
-        .where(eq(capabilityBindings.capability, "chat"));
-      return binding ?? null;
-    },
-
-    async putChatBinding(input) {
-      return db.transaction(async (tx) => {
-        const [provider] = await tx
-          .select({ id: providers.id })
-          .from(providers)
-          .where(eq(providers.id, input.providerId))
-          .for("key share");
-        if (!provider) throw new ProviderStoreError("provider-not-found");
-        const [binding] = await tx
-          .insert(capabilityBindings)
-          .values({
-            capability: "chat",
-            ...input,
-          })
-          .onConflictDoUpdate({
-            target: capabilityBindings.capability,
-            set: { ...input, updatedAt: new Date() },
-          })
-          .returning({
-            providerId: capabilityBindings.providerId,
-            model: capabilityBindings.model,
-            vision: capabilityBindings.vision,
-          });
-        return binding!;
-      });
-    },
-
     async listProviders() {
       const rows = await db.select().from(providers);
       return rows.map((provider) => providerView(provider, cipher));
@@ -202,7 +142,7 @@ export function createProviderStore(db: Db, cipher: KeyCipher): ProviderStore {
         return providerView(provider!, cipher);
       } catch (error) {
         if (databaseErrorCode(error) === "23505") {
-          throw new ProviderStoreError("duplicate-provider-name");
+          throw new StoreError("duplicate-provider-name");
         }
         throw error;
       }
@@ -223,12 +163,12 @@ export function createProviderStore(db: Db, cipher: KeyCipher): ProviderStore {
           .set(values)
           .where(eq(providers.id, id))
           .returning();
-        if (!provider) throw new ProviderStoreError("provider-not-found");
+        if (!provider) throw new StoreError("provider-not-found");
         return providerView(provider, cipher);
       } catch (error) {
-        if (error instanceof ProviderStoreError) throw error;
+        if (error instanceof StoreError) throw error;
         if (databaseErrorCode(error) === "23505") {
-          throw new ProviderStoreError("duplicate-provider-name");
+          throw new StoreError("duplicate-provider-name");
         }
         throw error;
       }
@@ -240,12 +180,12 @@ export function createProviderStore(db: Db, cipher: KeyCipher): ProviderStore {
           .delete(providers)
           .where(eq(providers.id, id))
           .returning({ id: providers.id });
-        if (deleted.length === 0) throw new ProviderStoreError("provider-not-found");
+        if (deleted.length === 0) throw new StoreError("provider-not-found");
       } catch (error) {
-        if (error instanceof ProviderStoreError) throw error;
+        if (error instanceof StoreError) throw error;
         // PostgreSQL 18 reports ON DELETE RESTRICT as restrict_violation (23001).
         if (databaseErrorCode(error) === "23001") {
-          throw new ProviderStoreError("provider-in-use");
+          throw new StoreError("provider-in-use");
         }
         throw error;
       }

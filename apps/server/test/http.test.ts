@@ -1,6 +1,7 @@
 import { expect, test, vi } from "vitest";
 import { createHttpApp } from "../src/http.ts";
 import type { ProviderStore } from "../src/provider-store.ts";
+import type { ChatBindingStore } from "../src/chat-binding-store.ts";
 
 const secret = "test-only-session-secret-with-32-characters";
 const user = { openId: "ou_test", name: "Ada" };
@@ -11,11 +12,13 @@ const oauth = {
     return user;
   },
 };
-const providerStore: ProviderStore = {
+const chatBindingStore: ChatBindingStore = {
   getChatBinding: async () => null,
   putChatBinding: async () => {
     throw new Error("not used");
   },
+};
+const providerStore: ProviderStore = {
   listProviders: async () => [],
   createProvider: async () => {
     throw new Error("not used");
@@ -27,7 +30,7 @@ const providerStore: ProviderStore = {
     throw new Error("not used");
   },
 };
-const app = createHttpApp({ oauth, sessionSecret: secret, providerStore });
+const app = createHttpApp({ oauth, sessionSecret: secret, providerStore, chatBindingStore });
 
 function cookieOf(response: Response, name: string) {
   return response.headers
@@ -105,21 +108,19 @@ test("callback rejects an expired state and a denied authorization", async () =>
   const state = new URL(login.headers.get("location")!).searchParams.get("state");
   const headers = { cookie: cookieOf(login, "tanomu_oauth_state") };
 
-  const deniedResponse = await app.request(
-    `/auth/feishu/callback?state=${state}&error=access_denied`,
-    { headers },
-  );
-  expect(deniedResponse.status).toBe(400);
+  expect(
+    (await app.request(`/auth/feishu/callback?state=${state}&error=access_denied`, { headers }))
+      .status,
+  ).toBe(400);
 
   vi.useFakeTimers();
   try {
     vi.setSystemTime(Date.now() + 601_000);
 
-    const expiredResponse = await app.request(
-      `/auth/feishu/callback?state=${state}&code=valid-code`,
-      { headers },
-    );
-    expect(expiredResponse.status).toBe(400);
+    expect(
+      (await app.request(`/auth/feishu/callback?state=${state}&code=valid-code`, { headers }))
+        .status,
+    ).toBe(400);
   } finally {
     vi.useRealTimers();
   }
@@ -135,6 +136,7 @@ test("failed OAuth exchange does not leak upstream errors or create a session", 
       },
     },
     providerStore,
+    chatBindingStore,
   });
   const login = await failing.request("/auth/feishu/login");
   const state = new URL(login.headers.get("location")!).searchParams.get("state");
