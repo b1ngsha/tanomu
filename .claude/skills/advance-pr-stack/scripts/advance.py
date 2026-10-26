@@ -31,7 +31,7 @@ class Stack:
                 stream.flush()
                 os.fsync(stream.fileno())
 
-    def write(self, label, *args):
+    def run_recorded_action(self, label, *args):
         self.state["actions"].append({"action": label, "status": "pending"})
         self.record()
         output = command(*args)
@@ -42,19 +42,19 @@ class Stack:
     def git(self, *args, cwd=None):
         return command("git", *args, cwd=cwd).strip()
 
-    def api(self, suffix, *args):
-        return json.loads(command("gh", "api", f"repos/{self.repo}/pulls{suffix}",
-                                  "--hostname", "github.com", *args))
+    def api(self, path, *args, action=None):
+        args = ("gh", "api", f"repos/{self.repo}/{path}", "--hostname", "github.com", *args)
+        return json.loads(command(*args) if action is None else self.run_recorded_action(action, *args))
 
     def search(self, **query):
-        pages = self.api("?" + urlencode(dict(state="all", per_page=100, **query)),
+        pages = self.api("pulls?" + urlencode(dict(state="all", per_page=100, **query)),
                          "--paginate", "--slurp")
         if not isinstance(pages, list):
             raise Stop("Unexpected GitHub list response")
         return [item for page in pages for item in (page if isinstance(page, list) else [page])]
 
     def load(self, number):
-        pr = self.api(f"/{number}")
+        pr = self.api(f"pulls/{number}")
         if not isinstance(pr, dict) or pr.get("state") not in ("open", "closed"):
             raise Stop("Unexpected GitHub PR response")
         for side in ("head", "base"):
@@ -67,8 +67,7 @@ class Stack:
         return pr
 
     def base_deleted_closure(self, number):
-        pages = json.loads(command("gh", "api", f"repos/{self.repo}/issues/{number}/timeline?per_page=100",
-                                   "--hostname", "github.com", "--paginate", "--slurp"))
+        pages = self.api(f"issues/{number}/timeline?per_page=100", "--paginate", "--slurp")
         if not isinstance(pages, list):
             raise Stop("Unexpected GitHub timeline response")
         events = [item for page in pages for item in page if isinstance(item, dict)
@@ -79,7 +78,7 @@ class Stack:
     def merged(self, pr):
         return bool(pr.get("merged") or pr.get("merged_at"))
 
-    def available(self, branches):
+    def require_unchecked_out_branches(self, branches):
         checked = {line.removeprefix("branch refs/heads/")
                    for line in self.git("worktree", "list", "--porcelain").splitlines()
                    if line.startswith("branch refs/heads/")}
@@ -125,7 +124,7 @@ class Stack:
             if len(children) > 1:
                 raise Stop(f"Multiple child candidates for {branch}")
             target = self.load(children[0]["number"]) if children else None
-        self.available(p["head"]["ref"] for p in chain)
+        self.require_unchecked_out_branches(p["head"]["ref"] for p in chain)
         return parent, chain
 
     def diff(self, base, head):
@@ -133,20 +132,18 @@ class Stack:
                        "--no-textconv", "--no-renames", "--src-prefix=a/", "--dst-prefix=b/",
                        "--no-color", f"{base}...{head}", "--")
 
-    def size(self, base, head):
+    def check_size(self, base, head):
         stats = self.git("diff", "--numstat", "-z", f"{base}...{head}", "--", ".",
                          ":(exclude)pnpm-lock.yaml", ":(exclude)apps/server/drizzle/meta/**")
         total = 0
-        entries = iter(stats.split("\0"))
+        entries = iter(filter(None, stats.split("\0")))
         for entry in entries:
-            if not entry:
-                continue
             added, deleted, name = entry.split("\t", 2)
             total += sum(int(n) for n in (added, deleted) if n != "-")
             if not name:  # Rename paths follow as two NUL-separated entries.
                 next(entries)
                 next(entries)
-        if total > 600:
+        if total > 600:  # Inclusive limit and exclusions match AGENTS.md and CI.
             raise Stop(f"PR exceeds 600 changed lines: {total}")
 
     def snapshot(self, parent, chain):
@@ -159,12 +156,12 @@ class Stack:
                 raise Stop(f"Missing commits in {pr['head']['ref']}")
             if self.git("rev-list", "--merges", f"{base}..{head}"):
                 raise Stop("Only linear commit chains are supported")
-            self.size(base, head)
+            self.check_size(base, head)
             rows.append(dict(branch=pr["head"]["ref"], pr=pr["number"], old=head, old_base=base, patch=self.diff(base, head)))
             base = head
         return rows
 
-    def failure(self):
+    def record_failure_observations(self):
         observations = []
         for row in self.state["branches"]:
             branch = row["branch"]
@@ -212,17 +209,15 @@ class Stack:
             if remote and remote.split()[0] != parent["head"]["sha"]:
                 raise Stop("Parent branch moved since merge")
             if not remote:
-                self.write(f"recreate {branch}", "git", "push", "--atomic", "--no-follow-tags",
+                self.run_recorded_action(f"recreate {branch}", "git", "push", "--atomic", "--no-follow-tags",
                            f"--force-with-lease=refs/heads/{branch}:", "origin",
                            f"{parent['head']['sha']}:refs/heads/{branch}")
-            reopened = json.loads(self.write(f"reopen #{first['number']}", "gh", "api",
-                       f"repos/{self.repo}/pulls/{first['number']}", "--hostname", "github.com",
-                       "--method", "PATCH", "-f", "state=open"))
+            reopened = self.api(f"pulls/{first['number']}", "--method", "PATCH", "-f", "state=open",
+                                action=f"reopen #{first['number']}")
             if reopened.get("state") != "open":
                 raise Stop("GitHub did not reopen the direct child")
-        retargeted = json.loads(self.write(f"retarget #{first['number']} to main", "gh", "api",
-                   f"repos/{self.repo}/pulls/{first['number']}", "--hostname", "github.com",
-                   "--method", "PATCH", "-f", "base=main"))
+        retargeted = self.api(f"pulls/{first['number']}", "--method", "PATCH", "-f", "base=main",
+                              action=f"retarget #{first['number']} to main")
         if retargeted.get("base", {}).get("ref") != "main":
             raise Stop("GitHub did not retarget the direct child")
         work = run / "worktree"
@@ -239,7 +234,7 @@ class Stack:
                 head = self.git("rev-parse", "HEAD", cwd=work)
             if self.diff(new_base, head) != row["patch"]:
                 raise Stop(f"PR diff changed: {row['branch']}")
-            self.size(new_base, head)
+            self.check_size(new_base, head)
             row["new"] = head
             self.state["branches"][index].update(new=head, lease=row["lease"])
             self.record()
@@ -248,7 +243,7 @@ class Stack:
         expected = {"refs/heads/main": self.state["main"], **{f"refs/heads/{r['branch']}": r["lease"] for r in rows}}
         if any(remote.get(ref) != sha for ref, sha in expected.items()):
             raise Stop("Remote main or stack head moved before publication")
-        self.available(r["branch"] for r in rows)
+        self.require_unchecked_out_branches(r["branch"] for r in rows)
         for index, (pr, row) in enumerate(zip(chain, rows)):
             current = self.load(pr["number"])
             expected_base = "main" if index == 0 else chain[index - 1]["head"]["ref"]
@@ -259,13 +254,13 @@ class Stack:
                 raise Stop(f"PR or local branch moved: {row['branch']}")
         changed = [row for row in rows if row["new"] != row["old"]]
         if changed:
-            self.write("atomic push: " + ", ".join(r["branch"] for r in changed), "git", "push",
+            self.run_recorded_action("atomic push: " + ", ".join(r["branch"] for r in changed), "git", "push",
                        "--atomic", "--no-follow-tags", *[f"--force-with-lease=refs/heads/{r['branch']}:{r['lease']}"
                                      for r in changed], "origin",
                        *[f"{r['new']}:refs/heads/{r['branch']}" for r in changed])
-        self.available(r["branch"] for r in rows)
+        self.require_unchecked_out_branches(r["branch"] for r in rows)
         for row in changed:
-            self.write(f"local {row['branch']}", "git", "update-ref",
+            self.run_recorded_action(f"local {row['branch']}", "git", "update-ref",
                        f"refs/heads/{row['branch']}", row["new"], row["old"])
         self.record(complete=True)
         print("Advanced: " + (", ".join(r["branch"] for r in changed) or "branches unchanged"))
@@ -294,7 +289,7 @@ def main(argv=None):
         print(f"Stopped: {error}")
         if stack.journal:
             stack.record(error=str(error))
-            stack.failure()
+            stack.record_failure_observations()
             print(f"Recovery journal: {stack.journal}")
             print("Completed writes: " + ("; ".join(a["action"] for a in stack.state["actions"]
                                                       if a["status"] == "done") or "none"))

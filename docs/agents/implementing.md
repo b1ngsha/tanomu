@@ -8,7 +8,7 @@ Only `ready-for-agent` tickets are detailed enough to implement directly (Contex
 
 1. Read the ticket body and its comments in full (`gh issue view <n> --comments`). The **Context** section records decisions made in conversations you weren't part of; don't relitigate them. Factory runs use the issue body captured at gate as their task specification for implementation and review; put required decisions in that body before authorization. If the ticket contradicts an ADR, stop and ask.
 2. Read `GLOSSARY.md` and use its terms in code, tests, commits, and PRs (Private Conversation, Capability, Provider, Digest Rule…).
-3. Check the ticket's **PR plan**. Each PR stays under 600 changed lines (CI `pr-size`) and must be mergeable and deployable alone: merging to `main` deploys to production immediately.
+3. Check the ticket's **PR plan**. Each PR changes at most 600 lines (CI `pr-size`) and must be mergeable and deployable alone: merging to `main` deploys to production immediately.
 4. Create a branch per PR: `<type>/<ticket>-<slug>`, e.g. `feat/7-llm-call-log`.
 
 ## While writing code

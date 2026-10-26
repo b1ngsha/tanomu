@@ -106,6 +106,9 @@ class AdvanceTest(unittest.TestCase):
             os.chdir(previous)
         return result, output.getvalue()
 
+    def assert_no_writes(self):
+        self.assertFalse(any("PATCH" in c or c[:2] == ("git", "push") for c in self.calls))
+
     def test_auth_failure_and_default_dry_run_do_not_write(self):
         before = self.git("show-ref")
         self.auth = False
@@ -164,7 +167,7 @@ class AdvanceTest(unittest.TestCase):
                     self.prs[0]["merged"] = False
                 result, output = self.invoke("--apply")
                 self.assertEqual(result, 1, output)
-                self.assertFalse(any("PATCH" in c or c[:2] == ("git", "push") for c in self.calls))
+                self.assert_no_writes()
                 self.prs = original
                 self.base_deleted = True
 
@@ -179,7 +182,7 @@ class AdvanceTest(unittest.TestCase):
             result, output = self.invoke("--apply")
         self.assertEqual(result, 1, output)
         self.assertEqual(self.prs[1]["base"]["ref"], "another-base")
-        self.assertFalse(any("PATCH" in c or c[:2] == ("git", "push") for c in self.calls))
+        self.assert_no_writes()
 
     def test_over_limit_stops_but_generated_paths_are_excluded(self):
         self.git("checkout", "child")
@@ -234,7 +237,7 @@ class AdvanceTest(unittest.TestCase):
                     self.git("checkout", "child")
                 result, output = self.invoke("--apply")
                 self.assertEqual(result, 1, output)
-                self.assertFalse(any("PATCH" in c or c[:2] == ("git", "push") for c in self.calls))
+                self.assert_no_writes()
                 self.prs = original
                 (self.repo / "root").write_text("root\n")
                 self.git("checkout", "main")
