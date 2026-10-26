@@ -147,7 +147,7 @@ class FinalReviewStatusWorkflowTest(unittest.TestCase):
         self.assertEqual(triggers["types"], ["opened", "synchronize", "reopened", "ready_for_review"])
         self.assertEqual(set(workflow["jobs"]), {"status"})
         job = workflow["jobs"]["status"]
-        self.assertEqual(job["permissions"], {"contents": "read", "issues": "write", "pull-requests": "write"})
+        self.assertEqual(job["permissions"], {"contents": "read", "pull-requests": "write"})
         self.assertNotIn("environment", job)
         text = json.dumps(workflow)
         self.assertNotIn("secrets.", text)

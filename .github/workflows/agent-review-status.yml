@@ -27,7 +27,6 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: read
-      issues: write
       # PR conversation comments need PR write access, even through the Issues API.
       pull-requests: write
     steps:
