@@ -42,7 +42,9 @@ class ExecutionTests(unittest.TestCase):
         fixtures = {
             'actions/runs/10': run,
             'actions/workflows/software-factory-implement.yml': {'id': 1, 'path': run['path']},
-            'actions/workflows/final-review.yml': {'id': 2, 'path': '.github/workflows/final-review.yml'},
+            'actions/workflows/agent-review.yml': {'id': 2, 'path': '.github/workflows/agent-review.yml'},
+            'actions/workflows/final-review.yml': {'id': 4, 'path': '.github/workflows/final-review.yml'},
+            'workflow-4-runs': {'workflow_runs': []},
             'workflow-1-runs': {'workflow_runs': [run]}, 'workflow-2-runs': {'workflow_runs': []},
             'issues/7': {'user': {'login': 'owner'}, 'labels': []},
             'actions/runs/10/attempts/2/jobs?per_page=100&page=1': {'jobs': [
@@ -77,6 +79,7 @@ if '--method' in args and args[args.index('--method') + 1] != 'GET':
 else:
     if path.startswith('actions/workflows/1/runs?'): path = 'workflow-1-runs'
     if path.startswith('actions/workflows/2/runs?'): path = 'workflow-2-runs'
+    if path.startswith('actions/workflows/4/runs?'): path = 'workflow-4-runs'
     print(json.dumps(json.loads(Path(os.environ['API_FIXTURE']).read_text())[path]))
 ''')
             gh.chmod(0o755)

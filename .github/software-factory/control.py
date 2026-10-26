@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 from authorization import (claimed, claim_identity, dependencies, gate, metadata,  # noqa: E402
                           record_claim, revalidate, snapshot, validate_issue)
 from common import api, require  # noqa: E402
+from execution import WORKFLOWS  # noqa: E402
 from artifacts import MAX_ARTIFACT_BYTES, git, scan, scope  # noqa: E402
 import publication  # noqa: E402
 from publication import COMMENT_BYTES, FINAL_MARKER, INLINE_MARKER, split  # noqa: E402
@@ -536,7 +537,7 @@ def agent_status_comment(number, filename):
     else:
         body = f"No complete agent review has been published for `{head}`."
     body += ("\n\nAdvisory only: this does not block merging. Request a fresh review with "
-             "`gh workflow run final-review.yml --ref main -f pr=" + number + "`.")
+             "`gh workflow run agent-review.yml --ref main -f pr=" + number + "`.")
     write_bot_comment(number, FINAL_STATUS_MARKER, body, existing)
     return True
 
@@ -588,9 +589,12 @@ def final_comments(directory, identity, current, output, reviews=None):
 def recovery_artifact(repo, run):
     """Read only allowlisted regular files from a validated run; never extract archive paths."""
     record = api(f"repos/{repo}/actions/runs/{run}")
-    workflow = api(f"repos/{repo}/actions/workflows/final-review.yml")
+    path = record.get("path")
+    require(path in {f".github/workflows/{name}" for name in WORKFLOWS["final-review"]},
+            "untrusted-review-run")
+    workflow = api(f"repos/{repo}/actions/workflows/{path.rsplit('/', 1)[-1]}")
     require(record["workflow_id"] == workflow["id"]
-            and record["path"] == ".github/workflows/final-review.yml"
+            and workflow.get("path") == path
             and record["head_branch"] == "main"
             and record["event"] in ("pull_request_target", "workflow_dispatch")
             and record["repository"]["full_name"] == repo

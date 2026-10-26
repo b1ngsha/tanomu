@@ -239,7 +239,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo '::warning::invalid-pr-number'; exit 1; }
-          gh workflow run final-review.yml --ref main -f pr="$PR" -f parent="$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT"
+          gh workflow run agent-review.yml --ref main -f pr="$PR" -f parent="$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT"
   publish-reviews:
     needs: [claim, round1, round2, round3, handoff]
     if: always() && !cancelled() && needs.claim.result == 'success'

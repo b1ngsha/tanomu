@@ -230,4 +230,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR: ${{ needs.identify.outputs.pr }}
-        run: gh workflow run final-review-status.yml --ref main -f pr="$PR"
+        run: gh workflow run agent-review-status.yml --ref main -f pr="$PR"

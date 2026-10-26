@@ -7,13 +7,14 @@ import unittest
 spec = importlib.util.spec_from_file_location("reconcile", Path(__file__).with_name("reconcile.py"))
 r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
+from execution import FILES
 NOW = datetime(2026, 10, 23, 12, tzinfo=timezone.utc)
 REPO = "owner/repo"
 
 
 def run(kind="implementation", **changes):
     return {"id": 10 if kind == "implementation" else 20, "run_attempt": 2, "workflow_id": 1 if kind == "implementation" else 2,
-            "path": f".github/workflows/{r.FILES[kind]}", "head_repository": {"full_name": REPO},
+            "path": f".github/workflows/{FILES[kind]}", "head_repository": {"full_name": REPO},
             "head_branch": "main", "event": "workflow_dispatch", "actor": {"login": "owner"},
             "triggering_actor": {"login": "owner"}, "created_at": "2026-10-23T08:00:00Z",
             "updated_at": "2026-10-23T10:00:00Z", "status": "completed", "conclusion": "success",
@@ -34,12 +35,16 @@ class Fake:
             if isinstance(value, Exception):
                 raise value
             return copy.deepcopy(value)
-        for kind, name in r.FILES.items():
+        for kind, name in FILES.items():
             number = 1 if kind == "implementation" else 2
             if short == f"actions/workflows/{name}":
                 return {"id": number, "path": f".github/workflows/{name}"}
             if short.startswith(f"actions/workflows/{number}/runs?"):
                 return {"workflow_runs": self.runs.get(kind, [])}
+        if short == "actions/workflows/final-review.yml":
+            return {"id": 4, "path": ".github/workflows/final-review.yml"}
+        if short.startswith("actions/workflows/4/runs?"):
+            return {"workflow_runs": self.runs.get("legacy-review", [])}
         if "/jobs?" in short:
             return {"jobs": [{"name": "handoff" if "/10/" in short else "publish", "conclusion": "success"}]}
         if "/artifacts?" in short:
@@ -83,6 +88,17 @@ class ReconcileTests(unittest.TestCase):
         self.assertEqual(parent["final_review"], "observed")
         self.assertEqual(child["parent"], "observed")
         self.assertIsNotNone(r.STANDALONE.fullmatch("Agent PR #9 · parent none"))
+
+    def test_merges_legacy_and_current_review_runs(self):
+        legacy = run("final-review", id=21, workflow_id=4, path=".github/workflows/final-review.yml",
+                     display_title="Final PR #9 · parent 10.2")
+        current = run("final-review", display_title="Agent PR #9 · parent 10.2")
+        report = r.reconcile(Fake({"implementation": [run()], "legacy-review": [legacy, legacy],
+                                   "final-review": [current, legacy]}), REPO, NOW)
+
+        self.assertEqual([record["run"] for record in report["runs"]], [10, 21, 20])
+        self.assertEqual(report["runs"][0]["final_review"], "observed")
+        self.assertTrue(all(record["parent"] == "observed" for record in report["runs"][1:]))
 
     def test_trust_fields_and_unrelated_events(self):
         for changes in ({"head_repository": {"full_name": "fork/repo"}}, {"workflow_id": 8}, {"path": "evil"},

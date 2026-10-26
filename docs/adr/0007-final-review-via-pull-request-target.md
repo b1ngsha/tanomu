@@ -27,10 +27,11 @@ on main. Manual dispatch also forces a new review. Pushes do not trigger it. Run
 are serialized per PR without cancelling the previous run; stale heads are not
 published.
 
-The independent review is named **Agent review**. A separate advisory status workflow
-also listens to synchronize events and cancels superseded status runs in its own group.
-It never calls a model or cancels a paid review. Historical workflow filenames, receipt
-markers, artifact names and metadata keys retain their `final-*` identifiers for recovery.
+The independent review is named **Agent review** and its active workflows use
+`agent-review*.yml` filenames. A separate advisory status workflow also listens to
+synchronize events and cancels superseded status runs in its own group. It never calls
+a model or cancels a paid review. Recovery accepts historical `final-review.yml` runs;
+receipt markers, artifact names and metadata keys retain their `final-*` identifiers.
 
 Standards always runs; Spec uses captured linked same-repository issues. Reports preserve
 all structured findings, split into credential-scanned comments with

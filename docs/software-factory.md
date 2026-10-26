@@ -202,16 +202,16 @@ Never blindly rerun a claimed or partially published task.
 
 ## Agent PR review
 
-Agent review retains the historical `final-*` workflow filenames, CLI commands, receipt markers,
-artifact names and metadata keys for compatibility with existing runs and publication recovery.
-New report identities freeze the Agent review title; old identities retain their original title
-and digest when recovered.
+Agent review uses `agent-review.yml` and `agent-review-status.yml`. Historical
+`final-review.yml` runs remain eligible for recovery; `final-*` CLI commands, receipt
+markers, artifact names and metadata keys stay unchanged. New report identities freeze
+the Agent review title; old identities retain their original title and digest when recovered.
 
-`final-review.yml` starts a fresh read-only review when a same-repository PR is
+`agent-review.yml` starts a fresh read-only review when a same-repository PR is
 opened, reopened or marked Ready for review. Automatic entry skips Bot authors and
 forks. The factory explicitly dispatches it after creating its draft PR, because
 `GITHUB_TOKEN` creation does not fire PR workflows. Maintainers can force another
-review with `gh workflow run final-review.yml --ref main -f pr=N`. Pushes alone do
+review with `gh workflow run agent-review.yml --ref main -f pr=N`. Pushes alone do
 not start another review.
 
 Workflow code, prompts and `control.py` come from main. The candidate is checked
@@ -248,7 +248,7 @@ Rerunning the publisher also fills missing parts from its existing report. A mov
 head makes the report stale and prevents publication. Manual dispatch always
 requests a fresh review.
 
-`final-review-status.yml` separately checks the current PR head on open, synchronize,
+`agent-review-status.yml` separately checks the current PR head on open, synchronize,
 reopen and Ready for review. It reuses the bot-owned summary and inline receipts to
 report `current`, `stale` (including incomplete publication) or `missing`; a public
 comment cannot forge these receipts. A stale result updates one bot-owned advisory

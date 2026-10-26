@@ -12,7 +12,7 @@ import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import control  # noqa: E402
-from test_final_review import BASE, BOT, HEAD, OTHER  # noqa: E402
+from test_agent_review import BASE, BOT, HEAD, OTHER  # noqa: E402
 from test_control import REPO, SECRET  # noqa: E402
 
 
@@ -49,8 +49,8 @@ class FinalRecoveryTest(unittest.TestCase):
         self.api_calls.append(path)
         if path.endswith("/actions/runs/100"):
             return self.record
-        if path.endswith("/actions/workflows/final-review.yml"):
-            return {"id": 9}
+        if path.endswith(("/actions/workflows/final-review.yml", "/actions/workflows/agent-review.yml")):
+            return {"id": 10 if path.endswith("/agent-review.yml") else 9, "path": self.record["path"]}
         if path.endswith("/reviews?per_page=100"):
             return []
         if path.endswith("/artifacts?name=final-review&per_page=100"):
@@ -135,6 +135,10 @@ class FinalRecoveryTest(unittest.TestCase):
         match = control.FINAL_MARKER.fullmatch(receipt.split("\n", 1)[0])
         markers.append([match[1], match[2], int(match[3]), int(match[4]), match[5]])
         self.assertTrue(control.publication.complete(HEAD, markers, set()))
+
+    def test_recovers_from_renamed_workflow(self):
+        self.record.update(workflow_id=10, path=".github/workflows/agent-review.yml")
+        self.assertTrue(self.resume())
 
     def test_ignores_forged_malformed_and_wrong_head_markers(self):
         for comments in (

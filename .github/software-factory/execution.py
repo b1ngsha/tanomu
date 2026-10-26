@@ -1,7 +1,9 @@
 """Shared metadata vocabulary and observations; never authorizes GitHub writes."""
 import re
 
-FILES = {"implementation": "software-factory-implement.yml", "final-review": "final-review.yml"}
+WORKFLOWS = {"implementation": ("software-factory-implement.yml",),
+             "final-review": ("agent-review.yml", "final-review.yml")}
+FILES = {kind: filenames[0] for kind, filenames in WORKFLOWS.items()}
 STATES = {"queued", "in_progress", "completed", "waiting", "pending", "requested"}
 RESULTS = {"success", "failure", "cancelled", "skipped", "timed_out", "neutral", "action_required", "stale"}
 SHA = re.compile(r"[0-9a-f]{40}")

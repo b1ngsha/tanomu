@@ -66,7 +66,7 @@ class FinalReviewStatusTest(unittest.TestCase):
         payload = json.loads(run.call_args.kwargs["input"])["body"]
         self.assertIn(HEAD, payload)
         self.assertIn(OLD, payload)
-        self.assertIn("gh workflow run final-review.yml", payload)
+        self.assertIn("gh workflow run agent-review.yml", payload)
         self.assertIn("Advisory only", payload)
         self.assertIn("Agent review is stale", payload)
 
@@ -78,17 +78,14 @@ class FinalReviewStatusTest(unittest.TestCase):
         self.assertIn("incomplete", payload)
         self.assertNotIn("latest published review belongs", payload)
 
-    def test_current_report_does_not_create_a_comment(self):
-        current = {"pr": 17, "head": HEAD, "status": "current", "reviewed_head": HEAD}
-        result, run = self.report(current, current)
-        self.assertTrue(result)
-        run.assert_not_called()
+    def test_initial_current_or_missing_report_does_not_create_a_comment(self):
+        for status, reviewed in (("current", HEAD), ("missing", None)):
+            with self.subTest(status=status):
+                current = {"pr": 17, "head": HEAD, "status": status, "reviewed_head": reviewed}
+                result, run = self.report(current, current)
 
-    def test_missing_report_does_not_create_a_comment(self):
-        current = {"pr": 17, "head": HEAD, "status": "missing", "reviewed_head": None}
-        result, run = self.report(current, current)
-        self.assertTrue(result)
-        run.assert_not_called()
+                self.assertTrue(result)
+                run.assert_not_called()
 
     def test_missing_report_updates_an_existing_status_comment(self):
         current = {"pr": 17, "head": HEAD, "status": "missing", "reviewed_head": None}
@@ -145,7 +142,7 @@ class FinalReviewStatusTest(unittest.TestCase):
 
 class FinalReviewStatusWorkflowTest(unittest.TestCase):
     def test_status_is_separate_from_the_paid_review(self):
-        workflow = base.WorkflowContractTest.load("final-review-status.yml")
+        workflow = base.WorkflowContractTest.load("agent-review-status.yml")
         triggers = workflow[True]["pull_request_target"]
         self.assertEqual(triggers["types"], ["opened", "synchronize", "reopened", "ready_for_review"])
         self.assertEqual(set(workflow["jobs"]), {"status"})
@@ -162,7 +159,7 @@ class FinalReviewStatusWorkflowTest(unittest.TestCase):
         self.assertTrue(all(step["env"]["PR"] == "${{ github.event.pull_request.number || inputs.pr }}" for step in job["steps"][1:]))
         self.assertIn("final-review-status", job["steps"][1]["run"])
         self.assertIn("agent-status-comment", job["steps"][2]["run"])
-        review = base.WorkflowContractTest.load("final-review.yml")
+        review = base.WorkflowContractTest.load("agent-review.yml")
         self.assertEqual(workflow["name"], "Agent PR review status")
         self.assertEqual(review["name"], "Agent PR review")
         observer = base.WorkflowContractTest.load("software-factory-observe.yml")
@@ -174,11 +171,11 @@ class FinalReviewStatusWorkflowTest(unittest.TestCase):
         self.assertIn("github.ref == 'refs/heads/main'", job["if"])
 
     def test_publisher_refreshes_status_after_inline_publication(self):
-        workflow = base.WorkflowContractTest.load("final-review.yml")
+        workflow = base.WorkflowContractTest.load("agent-review.yml")
         steps = workflow["jobs"]["publish"]["steps"]
         refresh = steps[-1]
         self.assertEqual(refresh["name"], "Refresh advisory status")
-        self.assertEqual(refresh["run"], 'gh workflow run final-review-status.yml --ref main -f pr="$PR"')
+        self.assertEqual(refresh["run"], 'gh workflow run agent-review-status.yml --ref main -f pr="$PR"')
         self.assertTrue(refresh["continue-on-error"])
         self.assertEqual(workflow["jobs"]["publish"]["permissions"]["actions"], "write")
         comment = next(step for step in steps if step.get("name") == "Comment on the PR")

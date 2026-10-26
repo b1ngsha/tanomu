@@ -10,9 +10,8 @@ import time
 
 # -I excludes the script directory; import only from this trusted checkout.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from execution import FILES, JOBS, RESULTS, SHA, STATES as RUN_STATES, job_states, publication_findings
+from execution import FILES, JOBS, RESULTS, SHA, STATES as RUN_STATES, WORKFLOWS, job_states, publication_findings
 
-PATHS = {"implement": FILES["implementation"], "final-review": FILES["final-review"]}
 STATES = (RUN_STATES - {"completed"}) | RESULTS
 
 
@@ -35,10 +34,11 @@ def identity(run, repo):
     if (run.get("head_repository", {}).get("full_name") != repo or run.get("head_branch") != "main"):
         return None
     actors = [run.get(key, {}).get("login") for key in ("actor", "triggering_actor")]
-    for kind, filename in PATHS.items():
-        if run.get("path") != f".github/workflows/{filename}":
+    for kind, filenames in WORKFLOWS.items():
+        if run.get("path") not in {f".github/workflows/{filename}" for filename in filenames}:
             continue
-        if kind == "implement":
+        if kind == "implementation":
+            kind = "implement"
             match = re.fullmatch(r"Factory issue #([1-9][0-9]*) · attempt [1-9][0-9]*", run.get("display_title", ""))
             if match and actors == [owner, owner] and run.get("event") in ("issues", "workflow_dispatch"):
                 return kind, match[1], None
@@ -67,8 +67,8 @@ def snapshot(api, repo, run_id):
     if not ident:
         return None
     kind, number, parent = ident
-    workflow = api(f"{prefix}/actions/workflows/{PATHS[kind]}")
-    if run.get("workflow_id") != workflow["id"]:
+    workflow = api(f"{prefix}/actions/workflows/{run['path'].rsplit('/', 1)[-1]}")
+    if run.get("workflow_id") != workflow["id"] or workflow.get("path") != run["path"]:
         return None
     target = api(f"{prefix}/{'issues' if kind == 'implement' else 'pulls'}/{number}")
     owner = repo.split('/')[0]
@@ -90,7 +90,7 @@ def snapshot(api, repo, run_id):
             source = api(f"{prefix}/actions/runs/{parent_id}/attempts/{attempt}")
             current = api(f"{prefix}/actions/runs/{parent_id}")
             source_identity = identity(source, repo)
-            source_workflow = api(f"{prefix}/actions/workflows/{PATHS['implement']}")
+            source_workflow = api(f"{prefix}/actions/workflows/{FILES['implementation']}")
             if (not source_identity or source_identity[0] != "implement"
                     or source.get("workflow_id") != source_workflow["id"]
                     or source.get("run_attempt") != int(attempt)
