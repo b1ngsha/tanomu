@@ -41,7 +41,10 @@ class ObservationTest(unittest.TestCase):
                "triggering_actor": {"login": "owner"}, "head_repository": {"full_name": "owner/repo"},
                "path": ".github/workflows/final-review.yml",
                "display_title": "Final PR #12 · parent 123.2"}
-        self.assertEqual(observe.identity(run, "owner/repo"), ("final-review", "12", "123.2"))
+        for label in ("Final", "Agent"):
+            run["display_title"] = f"{label} PR #12 · parent 123.2"
+
+            self.assertEqual(observe.identity(run, "owner/repo"), ("final-review", "12", "123.2"))
     def test_snapshot_uses_trusted_jobs_and_never_candidate_artifacts(self):
         run = {"head_branch": "main", "event": "issues", "actor": {"login": "owner"},
                "triggering_actor": {"login": "owner"}, "head_repository": {"full_name": "owner/repo"},

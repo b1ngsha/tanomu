@@ -1,5 +1,5 @@
-name: Final PR review
-run-name: "Final PR #${{ github.event.pull_request.number || inputs.pr }} · parent ${{ inputs.parent || 'none' }}"
+name: Agent PR review
+run-name: "Agent PR #${{ github.event.pull_request.number || inputs.pr }} · parent ${{ inputs.parent || 'none' }}"
 on:
   # Runs this workflow and control.py from main; the PR head is only ever read as data.
   pull_request_target:

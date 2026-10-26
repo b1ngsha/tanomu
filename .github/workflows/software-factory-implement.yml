@@ -230,7 +230,7 @@ jobs:
           printf 'pr=%s\n' "${url##*/}" >> "$GITHUB_OUTPUT"
       # A GITHUB_TOKEN PR fires no pull_request event. The review is advisory, so failing to
       # start it leaves the handoff successful.
-      - name: Start final review
+      - name: Start agent review
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}

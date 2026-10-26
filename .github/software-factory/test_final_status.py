@@ -52,7 +52,7 @@ class FinalReviewStatusTest(unittest.TestCase):
         with mock.patch.object(control, "final_review_status", return_value=current), \
                 mock.patch.object(control.subprocess, "check_output", return_value=json.dumps(pages)), \
                 mock.patch.object(control.subprocess, "run") as run:
-            result = control.final_review_report("17", status)
+            result = control.agent_status_comment("17", status)
         return result, run
 
     def test_stale_report_updates_only_the_bot_status_comment(self):
@@ -68,6 +68,7 @@ class FinalReviewStatusTest(unittest.TestCase):
         self.assertIn(OLD, payload)
         self.assertIn("gh workflow run final-review.yml", payload)
         self.assertIn("Advisory only", payload)
+        self.assertIn("Agent review is stale", payload)
 
     def test_incomplete_report_does_not_claim_an_older_head(self):
         current = {"pr": 17, "head": HEAD, "status": "stale", "reviewed_head": HEAD}
@@ -89,6 +90,14 @@ class FinalReviewStatusTest(unittest.TestCase):
         self.assertTrue(result)
         run.assert_not_called()
 
+    def test_missing_report_updates_an_existing_status_comment(self):
+        current = {"pr": 17, "head": HEAD, "status": "missing", "reviewed_head": None}
+        result, run = self.report(current, current, ["<!-- tanomu-final-review-status -->\ncurrent"])
+
+        self.assertTrue(result)
+        self.assertEqual(run.call_args.args[0][3:5], ["PATCH", f"repos/{REPO}/issues/comments/8"])
+        self.assertIn("No complete agent review", json.loads(run.call_args.kwargs["input"])["body"])
+
     def test_rechecks_after_reading_status_comments(self):
         expected = {"pr": 17, "head": OLD, "status": "stale", "reviewed_head": OLD}
         status = self.directory / "expected.json"
@@ -104,7 +113,7 @@ class FinalReviewStatusTest(unittest.TestCase):
                 with mock.patch.object(control, "final_review_status", side_effect=lambda number: dict(live)), \
                         mock.patch.object(control.subprocess, "check_output", side_effect=comments_changed), \
                         mock.patch.object(control.subprocess, "run") as run:
-                    control.final_review_report("17", status)
+                    control.agent_status_comment("17", status)
                 run.assert_not_called()
 
     def test_current_report_retires_an_existing_stale_comment(self):
@@ -130,7 +139,7 @@ class FinalReviewStatusTest(unittest.TestCase):
         with mock.patch.object(control, "final_review_status", return_value=expected), \
                 mock.patch.object(control.subprocess, "check_output", return_value=json.dumps([comments])), \
                 mock.patch.object(control.subprocess, "run") as run:
-            control.final_review_report("17", status)
+            control.agent_status_comment("17", status)
         self.assertEqual(run.call_args.args[0][3], "POST")
 
 
@@ -152,8 +161,13 @@ class FinalReviewStatusWorkflowTest(unittest.TestCase):
         self.assertEqual(job["steps"][0]["with"], {"ref": "${{ github.sha }}", "persist-credentials": False})
         self.assertTrue(all(step["env"]["PR"] == "${{ github.event.pull_request.number || inputs.pr }}" for step in job["steps"][1:]))
         self.assertIn("final-review-status", job["steps"][1]["run"])
-        self.assertIn("final-review-report", job["steps"][2]["run"])
+        self.assertIn("agent-status-comment", job["steps"][2]["run"])
         review = base.WorkflowContractTest.load("final-review.yml")
+        self.assertEqual(workflow["name"], "Agent PR review status")
+        self.assertEqual(review["name"], "Agent PR review")
+        observer = base.WorkflowContractTest.load("software-factory-observe.yml")
+        self.assertEqual(observer[True]["workflow_run"]["workflows"],
+                         ["Software factory implement", "Agent PR review", "Final PR review"])
         self.assertNotEqual(workflow["concurrency"]["group"], review["concurrency"]["group"])
         self.assertTrue(workflow["concurrency"]["cancel-in-progress"])
         self.assertIn("workflow_dispatch", workflow[True])

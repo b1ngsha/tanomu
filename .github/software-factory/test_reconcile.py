@@ -74,6 +74,16 @@ class ReconcileTests(unittest.TestCase):
         self.assertNotIn("final-review-not-observed", parent["findings"])
         self.assertFalse(any("download" in call or "comments" in call for call in api.calls))
 
+    def test_agent_run_titles_keep_parent_correlation(self):
+        api = Fake({"implementation": [run()], "final-review": [
+            run("final-review", display_title="Agent PR #9 · parent 10.2")]})
+
+        parent, child = r.reconcile(api, REPO, NOW)["runs"]
+
+        self.assertEqual(parent["final_review"], "observed")
+        self.assertEqual(child["parent"], "observed")
+        self.assertIsNotNone(r.STANDALONE.fullmatch("Agent PR #9 · parent none"))
+
     def test_trust_fields_and_unrelated_events(self):
         for changes in ({"head_repository": {"full_name": "fork/repo"}}, {"workflow_id": 8}, {"path": "evil"},
                         {"actor": {"login": "other"}}, {"triggering_actor": {"login": "other"}},
