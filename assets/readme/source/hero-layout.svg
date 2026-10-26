@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520" role="img" aria-labelledby="title desc">
+  <title id="title">tanomu — a personal agent living in Feishu</title>
+  <desc id="desc">Private messages settle into one reply through a swappable model binding.</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d192b"/>
+      <stop offset="1" stop-color="#142946"/>
+    </linearGradient>
+    <pattern id="quiet-grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#9db7df" stroke-opacity=".045"/>
+    </pattern>
+  </defs>
+  <rect width="1200" height="520" rx="28" fill="url(#background)"/>
+  <rect width="1200" height="520" rx="28" fill="url(#quiet-grid)"/>
+  <path d="M64 382H1136" stroke="#304663"/>
+
+  <g id="title-block" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif">
+    <text x="64" y="70" fill="#9bbcf5" font-size="17" font-weight="650" letter-spacing="2.5">PERSONAL AGENT · FEISHU</text>
+    <text x="60" y="170" fill="#f7faff" font-size="94" font-weight="750" letter-spacing="-4">tanomu</text>
+    <text x="64" y="226" fill="#f7faff" font-size="34" font-weight="600">A personal agent living in Feishu.</text>
+    <text x="64" y="274" fill="#b7c5d9" font-size="21">Private chats, image-aware replies, and model</text>
+    <text x="64" y="305" fill="#b7c5d9" font-size="21">bindings that change without a restart.</text>
+    <g font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16" fill="#a9bad2">
+      <text x="64" y="350">NODE 24</text>
+      <circle cx="160" cy="344" r="2.5" fill="#52719e"/>
+      <text x="178" y="350">TYPESCRIPT</text>
+      <circle cx="300" cy="344" r="2.5" fill="#52719e"/>
+      <text x="318" y="350">POSTGRES</text>
+    </g>
+  </g>
+
+  <g id="proof-frame">
+    <rect x="620" y="44" width="524" height="316" rx="26" fill="#152b49" fill-opacity=".76" stroke="#355171"/>
+    <text x="652" y="80" fill="#a8c5ef" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16" letter-spacing="1.4">PRIVATE CHAT / MESSAGE BATCH</text>
+  </g>
+
+  <g id="reply-path" font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif">
+    <g transform="translate(64 421)">
+      <text y="0" fill="#7faefb" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16">01</text>
+      <text y="32" fill="#f2f6fc" font-size="20" font-weight="650">Receive</text>
+      <text y="58" fill="#91a5c0" font-size="17">Feishu event</text>
+    </g>
+    <path d="M220 451H254m-7-7 7 7-7 7" stroke="#5477a8" stroke-width="2" fill="none"/>
+    <g transform="translate(278 421)">
+      <text y="0" fill="#7faefb" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16">02</text>
+      <text y="32" fill="#f2f6fc" font-size="20" font-weight="650">Record</text>
+      <text y="58" fill="#91a5c0" font-size="17">Deduplicate</text>
+    </g>
+    <path d="M434 451H468m-7-7 7 7-7 7" stroke="#5477a8" stroke-width="2" fill="none"/>
+    <g transform="translate(492 421)">
+      <text y="0" fill="#7faefb" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16">03</text>
+      <text y="32" fill="#f2f6fc" font-size="20" font-weight="650">Settle</text>
+      <text y="58" fill="#91a5c0" font-size="17">2.5 s quiet window</text>
+    </g>
+    <path d="M648 451H682m-7-7 7 7-7 7" stroke="#5477a8" stroke-width="2" fill="none"/>
+    <g transform="translate(706 421)">
+      <text y="0" fill="#7faefb" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16">04</text>
+      <text y="32" fill="#f2f6fc" font-size="20" font-weight="650">Resolve</text>
+      <text y="58" fill="#91a5c0" font-size="17">Current chat Binding</text>
+    </g>
+    <path d="M862 451H896m-7-7 7 7-7 7" stroke="#5477a8" stroke-width="2" fill="none"/>
+    <g transform="translate(920 421)">
+      <text y="0" fill="#7faefb" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16">05</text>
+      <text y="32" fill="#f2f6fc" font-size="20" font-weight="650">Reply</text>
+      <text y="58" fill="#91a5c0" font-size="17">Send, persist, log</text>
+    </g>
+  </g>
+</svg>
