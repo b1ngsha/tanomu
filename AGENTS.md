@@ -1,6 +1,7 @@
 # tanomu
 
 A personal agent living in Feishu. Domain language: `GLOSSARY.md`. Decisions: `docs/adr/`.
+For code review, read [CODING_STANDARDS.md](CODING_STANDARDS.md) for engineering standards on changed code.
 
 ## Layout
 
