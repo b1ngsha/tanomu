@@ -1,37 +1,11 @@
 // @vitest-environment jsdom
-import "@testing-library/jest-dom/vitest";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { providerApi } from "../../../src/features/providers/api.ts";
-import { errorMessage, needsReconciliation } from "../../../src/lib/http.ts";
-
-const provider = {
-  id: "2b1e3b7d-bcb5-44a9-bb15-dbbd10d9fbb3",
-  name: "OpenAI",
-  protocol: "openai",
-  baseUrl: "https://api.openai.com/v1",
-  apiKeyMask: "sk-••••",
-};
-const input = {
-  name: "OpenAI",
-  protocol: "openai",
-  baseUrl: "https://api.openai.com/v1",
-  apiKey: "secret",
-};
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
+import { describe, expect, it } from "vitest";
+import { provider, providerInput } from "../../../test/fixtures.ts";
+import { fetchMock, json } from "../../../test/test-utils.tsx";
+import { errorMessage, needsReconciliation } from "../../lib/http.ts";
+import { providerApi } from "./api.ts";
 
 describe("Provider API", () => {
-  const fetchMock = vi.fn();
-  beforeEach(() => vi.stubGlobal("fetch", fetchMock));
-  afterEach(() => {
-    vi.unstubAllGlobals();
-    fetchMock.mockReset();
-  });
-
   it("loads Providers with same-origin requests and validates their contract", async () => {
     fetchMock.mockResolvedValue(json([provider]));
 
@@ -50,11 +24,11 @@ describe("Provider API", () => {
       return json(provider);
     });
 
-    await providerApi.save(provider.id, { ...input, apiKey: "" });
+    await providerApi.save(provider.id, { ...providerInput, apiKey: "" });
 
     expect(bodies[0]).not.toHaveProperty("apiKey");
 
-    await providerApi.save(null, input);
+    await providerApi.save(null, providerInput);
 
     expect(bodies[1]).toMatchObject({ apiKey: "secret" });
   });
@@ -64,7 +38,7 @@ describe("Provider API", () => {
       json({ error: "duplicate-provider-name", message: "secret upstream detail" }, 409),
     );
 
-    const error = await providerApi.save(null, input).catch((failure: unknown) => failure);
+    const error = await providerApi.save(null, providerInput).catch((failure: unknown) => failure);
 
     expect(errorMessage(error)).toBe("Provider 名称已存在，请更换名称。");
     expect(needsReconciliation(error)).toBe(false);
@@ -73,7 +47,7 @@ describe("Provider API", () => {
   it("does not replay a failed write and marks its outcome for reconciliation", async () => {
     fetchMock.mockRejectedValue(new TypeError("connection lost"));
 
-    const error = await providerApi.save(null, input).catch((failure: unknown) => failure);
+    const error = await providerApi.save(null, providerInput).catch((failure: unknown) => failure);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(needsReconciliation(error)).toBe(true);
