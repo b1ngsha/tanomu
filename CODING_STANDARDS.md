@@ -10,8 +10,9 @@ architecture decisions with first-party guidance for its stack. Sources were rev
   Existing code is not a claim of compliance; unrelated cleanup belongs in a separate change.
 - **MUST** identifies a required correctness, privacy, or reliability boundary. **SHOULD** identifies
   a default that may be replaced by a documented, tested alternative appropriate to the change.
-- Preserve [AGENTS.md](AGENTS.md), the [glossary](GLOSSARY.md), and accepted [ADRs](docs/adr/).
-  Resolve conflicts explicitly rather than silently replacing a documented decision.
+- [ARCHITECTURE.md](ARCHITECTURE.md) owns module placement and dependency direction; this document
+  owns engineering rules. [AGENTS.md](AGENTS.md) routes tasks and owns repository workflow conventions.
+  Preserve the [glossary](GLOSSARY.md) and accepted [ADRs](docs/adr/); resolve conflicts explicitly.
 - Compiler, formatter, and lint configuration own mechanical rules. Use their results rather than
   debating whitespace, quotes, or import ordering in review. This document explains design choices
   and runtime consequences that those checks cannot establish.
@@ -29,7 +30,8 @@ architecture decisions with first-party guidance for its stack. Sources were rev
   complexity or establish one owner for an invariant, rather than to meet a line-count target.
 - Explain reasons, constraints, and non-obvious failure behavior in comments. Public contracts should
   clarify side effects, ownership, expected absence, and errors when types alone cannot express them.
-- For server/core execution, honor Node's type-stripping constraints documented in AGENTS.md.
+- Server and core TypeScript run directly under Node type stripping, without a build step. Use
+  `.ts` extensions in relative imports and only erasable syntax (no enums or parameter properties).
   Node does not type-check code, read TypeScript path aliases, or downlevel JavaScript. Verify APIs
   against the deployed Node version; newer `@types/node` declarations are not runtime evidence. [Node TS][node-ts]
 - Treat external data and caught exceptions as `unknown` until validated or narrowed. A type assertion
@@ -44,20 +46,24 @@ architecture decisions with first-party guidance for its stack. Sources were rev
 
 ## Modules, interfaces, and dependencies
 
-- Core owns domain decisions; server adapters translate Feishu, database, HTTP, and Provider details.
-  Dependencies enter through contracts; `apps/server/src/main.ts` assembles the running application.
-  The AI SDK abstraction in core is intentional: see [ADR 0001](docs/adr/0001-typescript-vercel-ai-sdk.md).
+- Follow [the architecture's module ownership and dependency direction](ARCHITECTURE.md) when
+  placing code or choosing a seam.
+- Design deep modules: a small interface should hide the implementation's complexity and keep
+  invariants local. The interface includes ordering, errors, configuration, and side effects as well
+  as types; callers and tests should exercise the same seam.
 - Design interfaces around the caller's required behavior. Keep SQL rows, SDK response envelopes,
   transport status codes, and credentials inside the adapter that understands them.
-- Use `ConversationStore`, `LlmCallLog`, and `ReplyDeps` in
-  [private-conversation.ts](packages/core/src/private-conversation.ts) as existing boundary examples.
-  Reuse an appropriate seam before introducing a parallel service or repository abstraction.
+- Reuse an existing interface before introducing a parallel abstraction. Add a seam for demonstrated
+  variation, such as production and test adapters, rather than a hypothetical future implementation.
 - Keep invariants with their owning module. A caller should not need to repeat internal lookup,
   validation, and state-transition steps to use a module correctly.
 - Prefer explicit dependencies over hidden mutable globals. Read environment configuration at the
   application boundary; pass validated values or narrow interfaces into reusable code.
 - Extract shared logic when its semantics are shared. Similar-looking code with different failure,
   security, or lifecycle requirements need not share an abstraction. [Design review][review]
+- Verify third-party behavior against official documentation and installed types before coding.
+  For Feishu endpoints, use the `lark-openapi-explorer` skill when available or the official docs;
+  for the AI SDK, inspect `node_modules/ai/dist/index.d.ts` rather than assuming a training-era API.
 - Before adding a library, compare native APIs, existing direct dependencies, maintenance activity,
   runtime compatibility, license, security exposure, and the complexity actually removed.
   A transitive package must become a declared direct dependency before application code imports it.
@@ -159,8 +165,8 @@ architecture decisions with first-party guidance for its stack. Sources were rev
   access through an SSH tunnel. [Session guidance][sessions]
 - Client-controlled URLs, paths, identifiers, or model output must not expand network, filesystem,
   or data access authority. Constrain them at the adapter that performs the operation.
-- Follow the existing [environment-variable procedure](docs/agents/implementing.md#traps) when changing
-  configuration. Validate required values before admitting work; never log secret validation inputs.
+- Follow the [configuration change procedure](docs/deployment.md#configuration-changes) when adding
+  environment variables. Validate required values before admitting work; never log secret validation inputs.
 
 ## Persistence, transactions, and migrations
 
@@ -181,8 +187,9 @@ architecture decisions with first-party guidance for its stack. Sources were rev
 - Bound list queries, use stable ordering for pagination, and select only required data. Add indexes
   for demonstrated access patterns; measure a slow query before changing the storage design.
 - Review generated migrations as executable changes: existing rows, locks, duration, compatibility
-  with running code, and recovery matter as much as the target schema. Follow the existing migration
-  generation procedure and preserve applied migration history.
+  with running code, and recovery matter as much as the target schema. Edit
+  `apps/server/src/db/schema.ts`, run `pnpm db:generate`, and commit the SQL and `drizzle/meta` snapshot.
+  Migrations run on server startup; preserve applied migrations unchanged.
 - Coordinate migration execution against one database explicitly; do not assume a migrator serializes
   concurrent starters without verifying its implementation. Destructive changes need a staged rollout
   and an explicit data-recovery plan.
@@ -197,8 +204,6 @@ architecture decisions with first-party guidance for its stack. Sources were rev
   Never claim exactly-once end-to-end delivery solely from an incoming unique constraint.
 - Parse malformed or unsupported content at the adapter boundary and preserve the defined user-facing
   decline behavior. Check attachment size/media type and model vision capability before expensive work.
-- Coordinate real local listening with production as documented in the implementation guide;
-  sharing app credentials can divert production events into the local process.
 - Verify SDK and Provider behavior against installed types and the selected protocol. In particular,
   OpenAI-compatible endpoints may implement Chat Completions without implementing Responses.
 - Keep Capability/Binding/Provider decisions explicit and preserve how the current adapter resolves
@@ -235,8 +240,10 @@ architecture decisions with first-party guidance for its stack. Sources were rev
 
 ## Tests and review evidence
 
-- Test observable contracts at public seams. Use the existing core fakes and AI SDK test models for
-  domain behavior; exercise real SQL/constraints in database adapter tests and Hono through requests.
+- For domain behavior, write tests first at the core seam. Test observable contracts at public seams.
+  Put domain tests in `packages/core/test/` with in-memory adapters and `MockLanguageModelV4` from
+  `ai/test`; use the existing private-conversation tests as examples. Put server adapter tests in
+  `apps/server/test/`, exercise real SQL/constraints for database adapters, and exercise Hono through requests.
 - Cover the changed success path and meaningful failures: duplicate delivery, malformed input,
   privacy isolation, partial side effects, timing/order, cancellation, and concurrency when relevant.
   Tests should fail when the promised behavior breaks, not when harmless implementation details move. [Testing principles][testing]
