@@ -243,6 +243,19 @@ Rerunning the publisher also fills missing parts from its existing report. A mov
 head makes the report stale and prevents publication. Manual dispatch always
 requests a fresh review.
 
+`final-review-status.yml` separately checks the current PR head on open, synchronize,
+reopen and Ready for review. It reuses the bot-owned summary and inline receipts to
+report `current`, `stale` (including incomplete publication) or `missing`; a public
+comment cannot forge these receipts. A stale result updates one bot-owned advisory
+comment with the current and reviewed heads and the manual rerun command. The
+publisher dispatches a status refresh after posting a review, including inline
+findings, so a completed manual rerun retires the stale status. Only the status
+workflow writes this comment. Its separate cancelling group supersedes older status
+runs without cancelling or replacing any paid review; every run reads live state.
+The status job has no Provider secret, never invokes the model and rechecks the head
+before writing. It does not make review a required check or start another paid review
+on every push.
+
 Findings may carry a repository-relative path and a new-file line number. Only
 locations that exist in the reviewed diff are kept; the rest stay in the summary
 text. New reviews post a brief summary with blocking/advisory counts and direct readers

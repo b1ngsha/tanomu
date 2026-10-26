@@ -278,7 +278,7 @@ class FinalWorkflowContractTest(unittest.TestCase):
         self.assertEqual({name: job["permissions"] for name, job in self.jobs.items()}, {
             "identify": {"actions": "read", "contents": "read", "issues": "read", "pull-requests": "read"},
             "review": {"contents": "read"},
-            "publish": {"contents": "read", "issues": "write", "pull-requests": "write"}})
+            "publish": {"actions": "write", "contents": "read", "issues": "write", "pull-requests": "write"}})
         text = {name: json.dumps(job) for name, job in self.jobs.items()}
         self.assertEqual([name for name in text if "secrets." in text[name]], ["review"])
         self.assertNotIn("GH_TOKEN", text["review"])

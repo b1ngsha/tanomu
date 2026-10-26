@@ -1,0 +1,47 @@
+name: Final PR review status
+
+on:
+  # This reads trusted main only; the candidate is never checked out or executed.
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Pull request number whose publication status should be refreshed
+        required: true
+        type: string
+
+permissions: {}
+concurrency:
+  group: final-review-status-${{ github.event.pull_request.number || inputs.pr }}
+  # Only superseded status runs are cancelled; paid reviews use a different group.
+  cancel-in-progress: true
+
+jobs:
+  status:
+    if: >-
+      github.event_name == 'pull_request_target' && github.event.pull_request.head.repo.full_name == github.repository ||
+      github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Classify published review receipts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+        run: python3 -I .github/software-factory/control.py final-review-status "$PR" "$RUNNER_TEMP/review-status.json"
+      - name: Refresh advisory status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number || inputs.pr }}
+        # The controller rechecks the head and publication state before writing.
+        run: python3 -I .github/software-factory/control.py final-review-report "$PR" "$RUNNER_TEMP/review-status.json"

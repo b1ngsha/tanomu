@@ -476,6 +476,67 @@ def final_head(number, filename):
     Path(filename).write_text(json.dumps({"pr": int(number), "head": pull["head"]["sha"],
                                           "eligible": not problems, "posted": posted}))
 
+def final_review_status(number, output=None):
+    """Classify the current PR head using only bot-owned publication receipts."""
+    pull, problems, posted = final_pull(number)
+    require(not problems, problems[0] if problems else "")
+    head = pull["head"]["sha"]
+    inline = posted_inline(number) if any(item[4] not in (None, "none") for item in posted) else set()
+    if publication.complete(head, posted, inline):
+        state = "current"
+    elif posted:
+        state = "stale"
+    else:
+        state = "missing"
+    result = {"pr": int(number), "head": head, "status": state,
+              "reviewed_head": posted[-1][0] if posted else None}
+    if output is not None:
+        Path(output).write_text(json.dumps(result))
+    return result
+
+
+FINAL_STATUS_MARKER = "<!-- tanomu-final-review-status -->"
+
+
+def final_review_report(number, filename):
+    """Refresh one status comment, but never publish for a head that has moved."""
+    expected = json.loads(Path(filename).read_text())
+    require(isinstance(expected, dict) and set(expected) == {"pr", "head", "status", "reviewed_head"}
+            and expected["pr"] == int(number) and expected["status"] in {"current", "stale", "missing"},
+            "invalid-status")
+    repo = os.environ["GITHUB_REPOSITORY"]
+    pages = json.loads(subprocess.check_output([
+        "gh", "api", "--paginate", "--slurp", f"repos/{repo}/issues/{number}/comments?per_page=100"]))
+    existing = next((item for page in pages for item in page
+                     if item.get("user", {}).get("login") == "github-actions[bot]"
+                     and item.get("user", {}).get("type") == "Bot"
+                     and (item.get("body") or "").splitlines()[:1] == [FINAL_STATUS_MARKER]), None)
+    current = final_review_status(number)
+    if current["head"] != expected["head"]:
+        print("::notice::final-review-status-head-moved")
+        return False
+    # Current or not-yet-published reviews need no extra comment; retire an earlier status if present.
+    if current["status"] != "stale" and not existing:
+        return True
+    head, reviewed = current["head"], current["reviewed_head"]
+    if current["status"] == "stale":
+        detail = (f"Publication is incomplete for `{head}`." if reviewed == head else
+                  f"The latest published review belongs to `{reviewed}`.")
+        body = f"Final review is stale for `{head}`.\n\n{detail}"
+    elif current["status"] == "current":
+        body = f"Final review is current for `{head}`."
+    else:
+        body = f"No complete final review has been published for `{head}`."
+    body += ("\n\nAdvisory only: this does not block merging. Request a fresh review with "
+             "`gh workflow run final-review.yml --ref main -f pr=" + number + "`.")
+    path = (f"repos/{repo}/issues/comments/{existing['id']}" if existing
+            else f"repos/{repo}/issues/{number}/comments")
+    subprocess.run(["gh", "api", "--method", "PATCH" if existing else "POST", path, "--input", "-"],
+                   input=json.dumps({"body": FINAL_STATUS_MARKER + "\n" + body}), text=True,
+                   check=True, stdout=subprocess.DEVNULL)
+    return True
+
+
 def pr_diff(head, base):
     """Write the PR diff into a fresh .factory-input before any untrusted input is copied there."""
     require(SHA.fullmatch(head) and SHA.fullmatch(base), "invalid-sha")
@@ -654,6 +715,11 @@ if __name__ == "__main__":
             print(f"resumed={json.dumps(final_resume(*args))}")
         elif command == "final-head":
             final_head(*args)
+        elif command == "final-review-status":
+            result = final_review_status(*args)
+            print(f"Final review: {result['status']} for {result['head']}")
+        elif command == "final-review-report":
+            final_review_report(*args)
         elif command == "pr-diff":
             pr_diff(*args)
         elif command == "pr-body":
