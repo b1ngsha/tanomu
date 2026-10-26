@@ -51,6 +51,7 @@ test("login redirects to Feishu with a short-lived signed state cookie", async (
 
 test("callback rejects missing or mismatched state without a session", async () => {
   const login = await app.request("/auth/feishu/login");
+
   for (const cookie of ["", cookieOf(login, "tanomu_oauth_state")]) {
     const response = await app.request("/auth/feishu/callback?state=wrong&code=valid-code", {
       headers: { cookie },
@@ -63,12 +64,14 @@ test("callback rejects missing or mismatched state without a session", async () 
 test("valid callback signs in the User and exposes their name", async () => {
   const login = await app.request("/auth/feishu/login");
   const state = new URL(login.headers.get("location")!).searchParams.get("state");
+
   const callback = await app.request(`/auth/feishu/callback?state=${state}&code=valid-code`, {
     headers: { cookie: cookieOf(login, "tanomu_oauth_state") },
   });
   expect(callback.status).toBe(302);
   expect(callback.headers.get("location")).toBe("/");
   expect(callback.headers.get("set-cookie")).toContain("Max-Age=604800");
+
   const response = await app.request("/api/me", {
     headers: { cookie: cookieOf(callback, "tanomu_session") },
   });
@@ -79,12 +82,15 @@ test("valid callback signs in the User and exposes their name", async () => {
 test("sessions expire after seven days even if the cookie is retained", async () => {
   const login = await app.request("/auth/feishu/login");
   const state = new URL(login.headers.get("location")!).searchParams.get("state");
+
   const callback = await app.request(`/auth/feishu/callback?state=${state}&code=valid-code`, {
     headers: { cookie: cookieOf(login, "tanomu_oauth_state") },
   });
+
   vi.useFakeTimers();
   try {
     vi.setSystemTime(Date.now() + 8 * 86400_000);
+
     const response = await app.request("/api/me", {
       headers: { cookie: cookieOf(callback, "tanomu_session") },
     });
@@ -98,17 +104,22 @@ test("callback rejects an expired state and a denied authorization", async () =>
   const login = await app.request("/auth/feishu/login");
   const state = new URL(login.headers.get("location")!).searchParams.get("state");
   const headers = { cookie: cookieOf(login, "tanomu_oauth_state") };
-  expect(
-    (await app.request(`/auth/feishu/callback?state=${state}&error=access_denied`, { headers }))
-      .status,
-  ).toBe(400);
+
+  const deniedResponse = await app.request(
+    `/auth/feishu/callback?state=${state}&error=access_denied`,
+    { headers },
+  );
+  expect(deniedResponse.status).toBe(400);
+
   vi.useFakeTimers();
   try {
     vi.setSystemTime(Date.now() + 601_000);
-    expect(
-      (await app.request(`/auth/feishu/callback?state=${state}&code=valid-code`, { headers }))
-        .status,
-    ).toBe(400);
+
+    const expiredResponse = await app.request(
+      `/auth/feishu/callback?state=${state}&code=valid-code`,
+      { headers },
+    );
+    expect(expiredResponse.status).toBe(400);
   } finally {
     vi.useRealTimers();
   }
@@ -127,6 +138,7 @@ test("failed OAuth exchange does not leak upstream errors or create a session", 
   });
   const login = await failing.request("/auth/feishu/login");
   const state = new URL(login.headers.get("location")!).searchParams.get("state");
+
   const response = await failing.request(`/auth/feishu/callback?state=${state}&code=valid-code`, {
     headers: { cookie: cookieOf(login, "tanomu_oauth_state") },
   });

@@ -49,10 +49,12 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       providerStore: createProviderStore(db, cipher),
     });
   });
+
   beforeEach(async () => {
     await db.delete(capabilityBindings);
     await db.delete(providers);
   });
+
   afterAll(async () => {
     await db.$client.end();
   });
@@ -66,7 +68,8 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
     ] as const;
 
     for (const [path, init] of requests) {
-      expect((await app.request(path, init)).status).toBe(401);
+      const response = await app.request(path, init);
+      expect(response.status).toBe(401);
     }
   });
 
@@ -110,6 +113,7 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
 
   it("rejects whitespace-only keys without trimming valid key contents", async () => {
     const input = { name: "Whitespace", protocol: "openai", baseUrl: "https://api.example.com" };
+
     for (const apiKey of ["   ", "\t\n"]) {
       const response = await request("/api/providers", {
         method: "POST",
@@ -117,6 +121,7 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       });
       expect(response.status).toBe(400);
     }
+
     const originalKey = "  original-key-1234  ";
     const created = await request("/api/providers", {
       method: "POST",
@@ -124,24 +129,25 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
     });
     expect(created.status).toBe(201);
     const { id } = await created.json();
+
     for (const apiKey of ["   ", "\t\n"]) {
       const response = await request(`/api/providers/${id}`, {
         method: "PATCH",
         body: JSON.stringify({ apiKey }),
       });
       expect(response.status).toBe(400);
+
       const [stored] = await db.select().from(providers);
       expect(cipher.decrypt(stored!.apiKey)).toBe(originalKey);
     }
+
     const replacementKey = "  replacement-key-5678  ";
-    expect(
-      (
-        await request(`/api/providers/${id}`, {
-          method: "PATCH",
-          body: JSON.stringify({ apiKey: replacementKey }),
-        })
-      ).status,
-    ).toBe(200);
+    const replaced = await request(`/api/providers/${id}`, {
+      method: "PATCH",
+      body: JSON.stringify({ apiKey: replacementKey }),
+    });
+    expect(replaced.status).toBe(200);
+
     const [stored] = await db.select().from(providers);
     expect(cipher.decrypt(stored!.apiKey)).toBe(replacementKey);
   });
@@ -153,16 +159,14 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       { name: "Name", protocol: "openai", baseUrl: "ftp://api.example.com", apiKey: "key" },
       { name: "Name", protocol: "openai", baseUrl: "https://api.example.com", apiKey: "" },
     ];
+
     for (const body of invalid) {
-      expect(
-        (
-          await request("/api/providers", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(body),
-          })
-        ).status,
-      ).toBe(400);
+      const response = await request("/api/providers", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status).toBe(400);
     }
 
     const created = await request("/api/providers", {
@@ -176,6 +180,7 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       }),
     });
     expect(created.status).toBe(201);
+
     const duplicate = await request("/api/providers", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -201,6 +206,7 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       }),
     });
     const provider = await created.json();
+
     const oldKey = "old-secret-key-1234";
     await db
       .update(providers)
@@ -216,9 +222,11 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       });
       expect(response.status).toBe(200);
       expect((await response.json()).apiKeyMask).toBe("ol••••1234");
+
       const [stored] = await db.select().from(providers);
       expect(cipher.decrypt(stored!.apiKey)).toBe(oldKey);
     }
+
     const [afterUpdate] = await db.select().from(providers);
     expect(afterUpdate!.updatedAt.getTime()).toBeGreaterThan(beforeUpdate!.updatedAt.getTime());
   });
@@ -233,6 +241,7 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
         apiKey: cipher.encrypt("old-secret-key-1234"),
       })
       .returning();
+
     const response = await request(`/api/providers/${provider!.id}`, {
       method: "PATCH",
       body: JSON.stringify({
@@ -249,6 +258,7 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       baseUrl: "https://new.example.com",
       apiKeyMask: "ne••••5678",
     });
+
     const [stored] = await db.select().from(providers);
     expect(stored!.apiKey).not.toBe("new-secret-key-5678");
     expect(cipher.decrypt(stored!.apiKey)).toBe("new-secret-key-5678");
@@ -267,6 +277,7 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
         { ...providerValues, name: "Second" },
       ])
       .returning();
+
     const cases = [
       ["/api/providers", "POST", "{", 400],
       [`/api/providers/${rows[0]!.id}`, "PATCH", "{", 400],
@@ -275,6 +286,7 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       [`/api/providers/${crypto.randomUUID()}`, "PATCH", "{}", 404],
       [`/api/providers/${rows[1]!.id}`, "PATCH", JSON.stringify({ name: " first " }), 409],
     ] as const;
+
     for (const [path, method, body, status] of cases) {
       const response = await request(path, { method, ...(body === undefined ? {} : { body }) });
       expect(response.status).toBe(status);
@@ -292,6 +304,7 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
         apiKey: "not-an-encrypted-key",
       })
       .returning();
+
     for (const [path, init] of [
       ["/api/providers", {}],
       [
@@ -310,8 +323,10 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       ["/api/capabilities", {}],
       ["/api/capabilities/chat", { method: "PUT", body: "{}" }],
     ] as const) {
-      expect((await app.request(path, init)).status).toBe(401);
+      const response = await app.request(path, init);
+      expect(response.status).toBe(401);
     }
+
     const response = await request("/api/capabilities");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ chat: null });
@@ -335,6 +350,7 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
         },
       ])
       .returning();
+
     const first = { providerId: rows[0]!.id, model: "model-one", vision: false };
     const create = await request("/api/capabilities/chat", {
       method: "PUT",
@@ -342,7 +358,9 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
     });
     expect(create.status).toBe(200);
     expect(await create.json()).toEqual(first);
+
     await db.update(capabilityBindings).set({ updatedAt: new Date("2000-01-01T00:00:00Z") });
+
     const second = { providerId: rows[1]!.id, model: "model-two", vision: true };
     const update = await request("/api/capabilities/chat", {
       method: "PUT",
@@ -350,14 +368,25 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
     });
     expect(update.status).toBe(200);
     expect(await update.json()).toEqual(second);
-    expect(await (await request("/api/capabilities")).json()).toEqual({ chat: second });
+
+    const listed = await request("/api/capabilities");
+    expect(await listed.json()).toEqual({ chat: second });
+
     const bindings = await db.select().from(capabilityBindings);
     expect(bindings).toHaveLength(1);
     expect(bindings[0]!.updatedAt.getTime()).toBeGreaterThan(
       new Date("2000-01-01T00:00:00Z").getTime(),
     );
-    expect((await request(`/api/providers/${rows[0]!.id}`, { method: "DELETE" })).status).toBe(204);
-    expect((await request(`/api/providers/${rows[1]!.id}`, { method: "DELETE" })).status).toBe(409);
+
+    const oldProviderDeleted = await request(`/api/providers/${rows[0]!.id}`, {
+      method: "DELETE",
+    });
+    expect(oldProviderDeleted.status).toBe(204);
+
+    const boundProviderRejected = await request(`/api/providers/${rows[1]!.id}`, {
+      method: "DELETE",
+    });
+    expect(boundProviderRejected.status).toBe(409);
   });
 
   it("rejects invalid Binding input and unknown Providers without replacing the Binding", async () => {
@@ -371,10 +400,13 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       })
       .returning();
     const binding = { providerId: provider!.id, model: "original", vision: false };
-    expect(
-      (await request("/api/capabilities/chat", { method: "PUT", body: JSON.stringify(binding) }))
-        .status,
-    ).toBe(200);
+
+    const created = await request("/api/capabilities/chat", {
+      method: "PUT",
+      body: JSON.stringify(binding),
+    });
+    expect(created.status).toBe(200);
+
     const cases = [
       ["{", 400],
       [JSON.stringify({ ...binding, model: "  " }), 400],
@@ -383,13 +415,16 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       [JSON.stringify({ providerId: provider!.id, model: "model" }), 400],
       [JSON.stringify({ ...binding, providerId: crypto.randomUUID() }), 404],
     ] as const;
+
     for (const [body, status] of cases) {
       const response = await request("/api/capabilities/chat", { method: "PUT", body });
       expect(response.status).toBe(status);
       expect(await response.json()).toEqual({
         error: status === 404 ? "provider-not-found" : "invalid-request",
       });
-      expect(await (await request("/api/capabilities")).json()).toEqual({ chat: binding });
+
+      const listed = await request("/api/capabilities");
+      expect(await listed.json()).toEqual({ chat: binding });
     }
   });
 
@@ -407,6 +442,7 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       { providerId: provider!.id, model: "first", vision: false },
       { providerId: provider!.id, model: "second", vision: true },
     ];
+
     const responses = await Promise.all(
       choices.map((binding) =>
         request("/api/capabilities/chat", {
@@ -419,9 +455,13 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual(choices[index]);
     }
-    const { chat } = await (await request("/api/capabilities")).json();
+
+    const listed = await request("/api/capabilities");
+    const { chat } = await listed.json();
     expect(choices).toContainEqual(chat);
-    expect(await db.select().from(capabilityBindings)).toHaveLength(1);
+
+    const bindings = await db.select().from(capabilityBindings);
+    expect(bindings).toHaveLength(1);
   });
 
   it("deletes unbound Providers and rejects deleting a bound Provider", async () => {
@@ -437,8 +477,12 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
         }),
       });
     const unbound = await (await create("Unbound")).json();
-    expect((await request(`/api/providers/${unbound.id}`, { method: "DELETE" })).status).toBe(204);
-    expect((await request(`/api/providers/${unbound.id}`, { method: "DELETE" })).status).toBe(404);
+
+    const deleted = await request(`/api/providers/${unbound.id}`, { method: "DELETE" });
+    expect(deleted.status).toBe(204);
+
+    const deletedAgain = await request(`/api/providers/${unbound.id}`, { method: "DELETE" });
+    expect(deletedAgain.status).toBe(404);
 
     const bound = await (await create("Bound")).json();
     await db.insert(capabilityBindings).values({
@@ -447,6 +491,8 @@ describe.skipIf(!url)("Admin API (Postgres)", () => {
       model: "model",
       vision: false,
     });
-    expect((await request(`/api/providers/${bound.id}`, { method: "DELETE" })).status).toBe(409);
+
+    const rejected = await request(`/api/providers/${bound.id}`, { method: "DELETE" });
+    expect(rejected.status).toBe(409);
   });
 });
