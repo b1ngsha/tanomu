@@ -12,6 +12,10 @@ const oauth = {
   },
 };
 const providerStore: ProviderStore = {
+  getChatBinding: async () => null,
+  putChatBinding: async () => {
+    throw new Error("not used");
+  },
   listProviders: async () => [],
   createProvider: async () => {
     throw new Error("not used");

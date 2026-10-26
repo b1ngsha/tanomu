@@ -32,6 +32,11 @@ const ProviderUpdate = ProviderCreate.partial().extend({
   apiKey: z.union([z.literal(""), ProviderKey]).optional(),
 });
 const ProviderId = z.uuid();
+const ChatBindingInput = z.object({
+  providerId: ProviderId,
+  model: z.string().trim().min(1),
+  vision: z.boolean(),
+});
 const cookieOptions = { httpOnly: true, sameSite: "Lax", path: "/" } as const;
 
 function parseCookie(value: string | false | undefined): unknown {
@@ -162,6 +167,22 @@ export function createHttpApp({ oauth, sessionSecret, providerStore }: HttpDeps)
     try {
       await providerStore.deleteProvider(id.data);
       return c.body(null, 204);
+    } catch (error) {
+      return providerError(error);
+    }
+  });
+  app.get("/api/capabilities", async (c) => {
+    try {
+      return c.json({ chat: await providerStore.getChatBinding() });
+    } catch (error) {
+      return providerError(error);
+    }
+  });
+  app.put("/api/capabilities/chat", async (c) => {
+    const input = await jsonBody(c.req.raw, ChatBindingInput);
+    if (input instanceof Response) return input;
+    try {
+      return c.json(await providerStore.putChatBinding(input));
     } catch (error) {
       return providerError(error);
     }
