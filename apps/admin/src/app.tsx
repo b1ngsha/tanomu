@@ -2,6 +2,7 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button } from "./components/ui/button.tsx";
 import { api } from "./lib/api.ts";
 import { adminQueries, errorMessage } from "./lib/queries.ts";
+import { Providers } from "./providers.tsx";
 
 export function App() {
   const user = useQuery(adminQueries.user());
@@ -36,6 +37,7 @@ export function App() {
             {logout.isError ? "退出登录失败，请重试。" : errorMessage(error)}
           </p>
         )}
+        {user.data && <Providers />}
       </main>
     </div>
   );

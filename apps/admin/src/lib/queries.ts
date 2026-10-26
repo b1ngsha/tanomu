@@ -63,13 +63,19 @@ export function needsReconciliation(error: unknown): boolean {
   );
 }
 
+async function reconcileProviders(client: QueryClient) {
+  // Mutation callbacks must not reject. The query's error state disables writes until a later reload succeeds.
+  await client.fetchQuery(adminQueries.providers()).catch(() => undefined);
+}
+
 export function useSaveProvider() {
   const client = useQueryClient();
   return useMutation({
     mutationKey: ["admin-write"],
     mutationFn: ({ id, input }: { id: string | null; input: ProviderInput }) =>
       api.saveProvider(id, input),
-    onSuccess: () => client.invalidateQueries({ queryKey: adminQueries.providers().queryKey }),
+    onSuccess: () => reconcileProviders(client),
+    onError: (error) => (needsReconciliation(error) ? reconcileProviders(client) : undefined),
   });
 }
 export function useDeleteProvider() {
@@ -77,7 +83,8 @@ export function useDeleteProvider() {
   return useMutation({
     mutationKey: ["admin-write"],
     mutationFn: api.removeProvider,
-    onSuccess: () => client.invalidateQueries({ queryKey: adminQueries.providers().queryKey }),
+    onSuccess: () => reconcileProviders(client),
+    onError: (error) => (needsReconciliation(error) ? reconcileProviders(client) : undefined),
   });
 }
 export function useSaveBinding() {
