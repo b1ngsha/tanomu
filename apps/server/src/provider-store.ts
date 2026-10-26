@@ -3,6 +3,7 @@ import type { Config } from "./config.ts";
 import type { Db } from "./db/client.ts";
 import { capabilityBindings, providers } from "./db/schema.ts";
 import type { KeyCipher } from "./key-cipher.ts";
+import { StoreError } from "./store-error.ts";
 
 type ChatEnv = Partial<
   Pick<
@@ -37,20 +38,6 @@ export interface UpdateProviderInput {
   protocol?: ProviderProtocol;
   baseUrl?: string;
   apiKey?: string;
-}
-
-export type ProviderStoreErrorCode =
-  | "provider-not-found"
-  | "duplicate-provider-name"
-  | "provider-in-use";
-
-export class ProviderStoreError extends Error {
-  readonly code: ProviderStoreErrorCode;
-
-  constructor(code: ProviderStoreErrorCode) {
-    super(code);
-    this.code = code;
-  }
 }
 
 export interface ProviderStore {
@@ -155,7 +142,7 @@ export function createProviderStore(db: Db, cipher: KeyCipher): ProviderStore {
         return providerView(provider!, cipher);
       } catch (error) {
         if (databaseErrorCode(error) === "23505") {
-          throw new ProviderStoreError("duplicate-provider-name");
+          throw new StoreError("duplicate-provider-name");
         }
         throw error;
       }
@@ -176,12 +163,12 @@ export function createProviderStore(db: Db, cipher: KeyCipher): ProviderStore {
           .set(values)
           .where(eq(providers.id, id))
           .returning();
-        if (!provider) throw new ProviderStoreError("provider-not-found");
+        if (!provider) throw new StoreError("provider-not-found");
         return providerView(provider, cipher);
       } catch (error) {
-        if (error instanceof ProviderStoreError) throw error;
+        if (error instanceof StoreError) throw error;
         if (databaseErrorCode(error) === "23505") {
-          throw new ProviderStoreError("duplicate-provider-name");
+          throw new StoreError("duplicate-provider-name");
         }
         throw error;
       }
@@ -193,12 +180,12 @@ export function createProviderStore(db: Db, cipher: KeyCipher): ProviderStore {
           .delete(providers)
           .where(eq(providers.id, id))
           .returning({ id: providers.id });
-        if (deleted.length === 0) throw new ProviderStoreError("provider-not-found");
+        if (deleted.length === 0) throw new StoreError("provider-not-found");
       } catch (error) {
-        if (error instanceof ProviderStoreError) throw error;
+        if (error instanceof StoreError) throw error;
         // PostgreSQL 18 reports ON DELETE RESTRICT as restrict_violation (23001).
         if (databaseErrorCode(error) === "23001") {
-          throw new ProviderStoreError("provider-in-use");
+          throw new StoreError("provider-in-use");
         }
         throw error;
       }

@@ -5,6 +5,7 @@ import {
   replyToPrivateMessages,
   type RecordedMessage,
 } from "@tanomu/core";
+import { createChatBindingStore } from "./chat-binding-store.ts";
 import { createChatModelResolver } from "./chat-model.ts";
 import { loadConfig } from "./config.ts";
 import { createConversationStore } from "./conversation-store.ts";
@@ -40,6 +41,7 @@ const http = createHttpApp({
   oauth: createFeishuOAuth(config),
   sessionSecret: config.SESSION_SECRET,
   providerStore: createProviderStore(db, cipher),
+  chatBindingStore: createChatBindingStore(db),
 });
 serve({ fetch: http.fetch, port: config.HTTP_PORT });
 
