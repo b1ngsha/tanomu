@@ -1,8 +1,8 @@
 // @vitest-environment jsdom
 import "@testing-library/jest-dom/vitest";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "../src/lib/api.ts";
-import { errorMessage, needsReconciliation } from "../src/lib/queries.ts";
+import { providerApi } from "../../../src/features/providers/api.ts";
+import { errorMessage, needsReconciliation } from "../../../src/lib/http.ts";
 
 const provider = {
   id: "2b1e3b7d-bcb5-44a9-bb15-dbbd10d9fbb3",
@@ -24,7 +24,7 @@ function json(body: unknown, status = 200) {
   });
 }
 
-describe("Admin API", () => {
+describe("Provider API", () => {
   const fetchMock = vi.fn();
   beforeEach(() => vi.stubGlobal("fetch", fetchMock));
   afterEach(() => {
@@ -35,7 +35,7 @@ describe("Admin API", () => {
   it("loads Providers with same-origin requests and validates their contract", async () => {
     fetchMock.mockResolvedValue(json([provider]));
 
-    await expect(api.providers()).resolves.toEqual([provider]);
+    await expect(providerApi.list()).resolves.toEqual([provider]);
 
     expect(fetchMock).toHaveBeenCalledWith(
       expect.objectContaining({ url: "http://localhost:3000/api/providers" }),
@@ -50,11 +50,11 @@ describe("Admin API", () => {
       return json(provider);
     });
 
-    await api.saveProvider(provider.id, { ...input, apiKey: "" });
+    await providerApi.save(provider.id, { ...input, apiKey: "" });
 
     expect(bodies[0]).not.toHaveProperty("apiKey");
 
-    await api.saveProvider(null, input);
+    await providerApi.save(null, input);
 
     expect(bodies[1]).toMatchObject({ apiKey: "secret" });
   });
@@ -64,7 +64,7 @@ describe("Admin API", () => {
       json({ error: "duplicate-provider-name", message: "secret upstream detail" }, 409),
     );
 
-    const error = await api.saveProvider(null, input).catch((failure: unknown) => failure);
+    const error = await providerApi.save(null, input).catch((failure: unknown) => failure);
 
     expect(errorMessage(error)).toBe("Provider 名称已存在，请更换名称。");
     expect(needsReconciliation(error)).toBe(false);
@@ -73,7 +73,7 @@ describe("Admin API", () => {
   it("does not replay a failed write and marks its outcome for reconciliation", async () => {
     fetchMock.mockRejectedValue(new TypeError("connection lost"));
 
-    const error = await api.saveProvider(null, input).catch((failure: unknown) => failure);
+    const error = await providerApi.save(null, input).catch((failure: unknown) => failure);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(needsReconciliation(error)).toBe(true);
@@ -83,16 +83,10 @@ describe("Admin API", () => {
   it("rejects malformed responses and never returns an unvalidated secret", async () => {
     fetchMock.mockResolvedValue(json([{ ...provider, apiKey: "secret" }]));
 
-    await expect(api.providers()).resolves.toEqual([provider]);
+    await expect(providerApi.list()).resolves.toEqual([provider]);
 
     fetchMock.mockResolvedValue(json({ id: "not-a-uuid" }));
 
-    await expect(api.providers()).rejects.toThrow();
-  });
-
-  it("accepts an absent chat Binding", async () => {
-    fetchMock.mockResolvedValue(json({ chat: null }));
-
-    await expect(api.capabilities()).resolves.toEqual({ chat: null });
+    await expect(providerApi.list()).rejects.toThrow();
   });
 });
