@@ -1,9 +1,0 @@
-Raster subject brief for tanomu's README hero
-
-Communication job: make rapid-message batching tangible through layered message sheets and a single send gesture; do not depict a generic AI robot or invent a model response.
-
-Subject: three translucent acrylic message sheets, staggered and gently rotated, converging behind one folded-paper send plane. Cool navy and Feishu-like blue palette, soft light from the upper left, crisp pale edges, subtle depth, isolated object, generous transparent padding.
-
-Composition: reserve the right side of a dark navy 1200 × 520 hero; message sheets sit behind two deterministic SVG chat bubbles. No words, letters, numbers, logos, watermarks, UI labels, or recognizable brand marks in the raster layer.
-
-Implementation note: ImageGen was not available in the local environment. This brief was implemented deterministically with Pillow in generate_hero.py; no external generation service or downloaded artwork was used.
