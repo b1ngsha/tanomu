@@ -9,7 +9,10 @@ first for repository commands, conventions, and documentation entry points.
    ticket needs Context, Design, PR plan, Tests, and Acceptance criteria; write up a `needs-triage`
    ticket before implementing it. Preserve recorded decisions; resolve ADR conflicts with the human.
    Factory runs use the issue body captured at gate as their specification; required decisions must
-   be in that body before authorization.
+   be in that body before authorization. After any scope or acceptance decision in a discussion,
+   update the issue body and acceptance criteria before authorizing implementation or requesting
+   another Spec review. Comments remain discussion and evidence; they do not replace the issue-body
+   specification.
 2. Read [GLOSSARY.md](../../GLOSSARY.md), then the standards and architecture sections relevant to
    the change through AGENTS.md. Use the glossary's terms in code, tests, commits, and PRs.
 3. Check the ticket's PR plan against AGENTS.md's size and independent-deployment requirements.

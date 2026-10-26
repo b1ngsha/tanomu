@@ -12,6 +12,7 @@ Adding or moving modules, changing dependencies, or locating extension seams: re
 - `pnpm dev:admin`: run Vite on `localhost:3000`; set `HTTP_PORT=3001` in `.env` for the server and run both commands in separate terminals. Before starting a real Feishu listener, follow the [listener coordination procedure](docs/deployment.md#4-local-development-shares-the-production-feishu-app).
 - `pnpm build:admin`: build `apps/admin/dist`; Docker runs this during the image build
 - `pnpm test` / `pnpm test:db`: unit tests / unit tests plus Postgres-backed tests against the `tanomu_test` database in the local compose DB
+- `pnpm test:factory`: software-factory controller and workflow tests
 - `pnpm lint` (oxlint, type-aware), `pnpm format` (oxfmt), `pnpm typecheck`
 - `pnpm db:generate`: generate a migration after editing `apps/server/src/db/schema.ts`
 
