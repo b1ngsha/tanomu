@@ -1,22 +1,15 @@
 # tanomu
 
 A personal agent living in Feishu. Domain language: `GLOSSARY.md`. Decisions: `docs/adr/`.
-
-## Layout
-
-- `packages/core`: domain logic (Conversations, agent loop). No Feishu or database imports; dependencies come in as interfaces.
-- `apps/server`: the single Node process. Adapters for Feishu (long connection), Postgres (Drizzle), and model Providers, wired together in `src/main.ts`.
-- `apps/admin`: React + Vite + shadcn/ui admin console; its production bundle is served by `apps/server`.
-- `deploy/`: production compose file and backup script, copied to the server by the deploy job.
-
-Server and core TypeScript run directly on Node via type stripping, no build step. `apps/admin` is the exception: Vite builds its browser bundle. Use `.ts` extensions in relative imports and only erasable syntax (no enums, no parameter properties).
+Writing or reviewing code: read [CODING_STANDARDS.md](CODING_STANDARDS.md).
+Adding or moving modules, changing dependencies, or locating extension seams: read [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Commands
 
 - `cp .env.example .env` and fill it in (never commit `.env`, never print it)
 - `docker compose up -d db`: local Postgres with pgvector on `localhost:54329`
 - `pnpm dev`: run the server with watch mode (applies migrations on start)
-- `pnpm dev:admin`: run Vite on `localhost:3000`; set `HTTP_PORT=3001` in `.env` for the server and run both commands in separate terminals. Observe the Feishu listener warning in `docs/agents/implementing.md`.
+- `pnpm dev:admin`: run Vite on `localhost:3000`; set `HTTP_PORT=3001` in `.env` for the server and run both commands in separate terminals. Before starting a real Feishu listener, follow the [listener coordination procedure](docs/deployment.md#4-local-development-shares-the-production-feishu-app).
 - `pnpm build:admin`: build `apps/admin/dist`; Docker runs this during the image build
 - `pnpm test` / `pnpm test:db`: unit tests / unit tests plus Postgres-backed tests against the `tanomu_test` database in the local compose DB
 - `pnpm lint` (oxlint, type-aware), `pnpm format` (oxfmt), `pnpm typecheck`
@@ -43,7 +36,7 @@ Small steps: each PR changes **at most 600 lines** (additions + deletions), excl
 
 ## Implementing tickets
 
-Follow `docs/agents/implementing.md`: workflow, test seams, and known traps (adding env vars, migrations, Feishu long connection).
+Picking up a ticket: follow [docs/agents/implementing.md](docs/agents/implementing.md) for task preparation, verification, and handoff.
 
 ## Agent skills
 
