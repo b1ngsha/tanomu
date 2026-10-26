@@ -51,6 +51,7 @@ describe("Admin application", () => {
       .fn()
       .mockResolvedValueOnce(json({ openId: "ou_123", name: "Ada" }))
       .mockResolvedValueOnce(json([]))
+      .mockResolvedValueOnce(json({ chat: null }))
       .mockImplementationOnce(() => logoutResponse);
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();

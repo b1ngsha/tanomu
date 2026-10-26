@@ -89,9 +89,13 @@ export function useDeleteProvider() {
 }
 export function useSaveBinding() {
   const client = useQueryClient();
+  async function reconcile() {
+    await client.fetchQuery(adminQueries.capabilities()).catch(() => undefined);
+  }
   return useMutation({
     mutationKey: ["admin-write"],
     mutationFn: api.saveBinding,
-    onSuccess: () => client.invalidateQueries({ queryKey: adminQueries.capabilities().queryKey }),
+    onSuccess: reconcile,
+    onError: (error) => (needsReconciliation(error) ? reconcile() : undefined),
   });
 }
