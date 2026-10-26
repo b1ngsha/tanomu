@@ -5,6 +5,7 @@ import { capabilityBindings, providers } from "../src/db/schema.ts";
 import { createKeyCipher } from "../src/key-cipher.ts";
 import { createHttpApp } from "../src/http.ts";
 import { createProviderStore } from "../src/provider-store.ts";
+import { createChatBindingStore } from "../src/chat-binding-store.ts";
 
 const url = process.env.TEST_DATABASE_URL;
 const sessionSecret = "test-only-session-secret-with-32-characters";
@@ -21,7 +22,7 @@ function cookieOf(response: Response, name: string): string {
     .split(";")[0]!;
 }
 
-describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
+describe.skipIf(!url)("Admin API (Postgres)", () => {
   let db: Db;
   let app: ReturnType<typeof createHttpApp>;
 
@@ -47,12 +48,15 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
       oauth,
       sessionSecret,
       providerStore: createProviderStore(db, cipher),
+      chatBindingStore: createChatBindingStore(db),
     });
   });
+
   beforeEach(async () => {
     await db.delete(capabilityBindings);
     await db.delete(providers);
   });
+
   afterAll(async () => {
     await db.$client.end();
   });
@@ -110,6 +114,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
 
   it("rejects whitespace-only keys without trimming valid key contents", async () => {
     const input = { name: "Whitespace", protocol: "openai", baseUrl: "https://api.example.com" };
+
     for (const apiKey of ["   ", "\t\n"]) {
       const response = await request("/api/providers", {
         method: "POST",
@@ -117,6 +122,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
       });
       expect(response.status).toBe(400);
     }
+
     const originalKey = "  original-key-1234  ";
     const created = await request("/api/providers", {
       method: "POST",
@@ -124,15 +130,18 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
     });
     expect(created.status).toBe(201);
     const { id } = await created.json();
+
     for (const apiKey of ["   ", "\t\n"]) {
       const response = await request(`/api/providers/${id}`, {
         method: "PATCH",
         body: JSON.stringify({ apiKey }),
       });
       expect(response.status).toBe(400);
+
       const [stored] = await db.select().from(providers);
       expect(cipher.decrypt(stored!.apiKey)).toBe(originalKey);
     }
+
     const replacementKey = "  replacement-key-5678  ";
     expect(
       (
@@ -142,6 +151,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
         })
       ).status,
     ).toBe(200);
+
     const [stored] = await db.select().from(providers);
     expect(cipher.decrypt(stored!.apiKey)).toBe(replacementKey);
   });
@@ -153,6 +163,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
       { name: "Name", protocol: "openai", baseUrl: "ftp://api.example.com", apiKey: "key" },
       { name: "Name", protocol: "openai", baseUrl: "https://api.example.com", apiKey: "" },
     ];
+
     for (const body of invalid) {
       expect(
         (
@@ -176,6 +187,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
       }),
     });
     expect(created.status).toBe(201);
+
     const duplicate = await request("/api/providers", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -201,6 +213,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
       }),
     });
     const provider = await created.json();
+
     const oldKey = "old-secret-key-1234";
     await db
       .update(providers)
@@ -216,9 +229,11 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
       });
       expect(response.status).toBe(200);
       expect((await response.json()).apiKeyMask).toBe("ol••••1234");
+
       const [stored] = await db.select().from(providers);
       expect(cipher.decrypt(stored!.apiKey)).toBe(oldKey);
     }
+
     const [afterUpdate] = await db.select().from(providers);
     expect(afterUpdate!.updatedAt.getTime()).toBeGreaterThan(beforeUpdate!.updatedAt.getTime());
   });
@@ -233,6 +248,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
         apiKey: cipher.encrypt("old-secret-key-1234"),
       })
       .returning();
+
     const response = await request(`/api/providers/${provider!.id}`, {
       method: "PATCH",
       body: JSON.stringify({
@@ -249,6 +265,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
       baseUrl: "https://new.example.com",
       apiKeyMask: "ne••••5678",
     });
+
     const [stored] = await db.select().from(providers);
     expect(stored!.apiKey).not.toBe("new-secret-key-5678");
     expect(cipher.decrypt(stored!.apiKey)).toBe("new-secret-key-5678");
@@ -267,6 +284,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
         { ...providerValues, name: "Second" },
       ])
       .returning();
+
     const cases = [
       ["/api/providers", "POST", "{", 400],
       [`/api/providers/${rows[0]!.id}`, "PATCH", "{", 400],
@@ -275,6 +293,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
       [`/api/providers/${crypto.randomUUID()}`, "PATCH", "{}", 404],
       [`/api/providers/${rows[1]!.id}`, "PATCH", JSON.stringify({ name: " first " }), 409],
     ] as const;
+
     for (const [path, method, body, status] of cases) {
       const response = await request(path, { method, ...(body === undefined ? {} : { body }) });
       expect(response.status).toBe(status);
@@ -292,6 +311,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
         apiKey: "not-an-encrypted-key",
       })
       .returning();
+
     for (const [path, init] of [
       ["/api/providers", {}],
       [
@@ -303,6 +323,140 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
       expect(response.status).toBe(500);
       expect(await response.json()).toEqual({ error: "internal-error" });
     }
+  });
+
+  it("reads an unbound chat Capability and requires a session for Binding routes", async () => {
+    for (const [path, init] of [
+      ["/api/capabilities", {}],
+      ["/api/capabilities/chat", { method: "PUT", body: "{}" }],
+    ] as const) {
+      expect((await app.request(path, init)).status).toBe(401);
+    }
+
+    const response = await request("/api/capabilities");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ chat: null });
+  });
+
+  it("creates and replaces the chat Binding without exposing Provider keys", async () => {
+    const rows = await db
+      .insert(providers)
+      .values([
+        {
+          name: "First",
+          protocol: "openai",
+          baseUrl: "https://api.example.com",
+          apiKey: cipher.encrypt("first-secret-key-1234"),
+        },
+        {
+          name: "Second",
+          protocol: "anthropic",
+          baseUrl: "https://api.example.com",
+          apiKey: cipher.encrypt("second-secret-key-5678"),
+        },
+      ])
+      .returning();
+
+    const first = { providerId: rows[0]!.id, model: "model-one", vision: false };
+    const create = await request("/api/capabilities/chat", {
+      method: "PUT",
+      body: JSON.stringify(first),
+    });
+    expect(create.status).toBe(200);
+    expect(await create.json()).toEqual(first);
+
+    await db.update(capabilityBindings).set({ updatedAt: new Date("2000-01-01T00:00:00Z") });
+
+    const second = { providerId: rows[1]!.id, model: "model-two", vision: true };
+    const update = await request("/api/capabilities/chat", {
+      method: "PUT",
+      body: JSON.stringify({ ...second, model: " model-two " }),
+    });
+    expect(update.status).toBe(200);
+    expect(await update.json()).toEqual(second);
+
+    expect(await (await request("/api/capabilities")).json()).toEqual({ chat: second });
+
+    const bindings = await db.select().from(capabilityBindings);
+    expect(bindings).toHaveLength(1);
+    expect(bindings[0]!.updatedAt.getTime()).toBeGreaterThan(
+      new Date("2000-01-01T00:00:00Z").getTime(),
+    );
+
+    expect((await request(`/api/providers/${rows[0]!.id}`, { method: "DELETE" })).status).toBe(204);
+
+    expect((await request(`/api/providers/${rows[1]!.id}`, { method: "DELETE" })).status).toBe(409);
+  });
+
+  it("rejects invalid Binding input and unknown Providers without replacing the Binding", async () => {
+    const [provider] = await db
+      .insert(providers)
+      .values({
+        name: "Bound",
+        protocol: "openai",
+        baseUrl: "https://api.example.com",
+        apiKey: cipher.encrypt("key"),
+      })
+      .returning();
+    const binding = { providerId: provider!.id, model: "original", vision: false };
+
+    expect(
+      (await request("/api/capabilities/chat", { method: "PUT", body: JSON.stringify(binding) }))
+        .status,
+    ).toBe(200);
+
+    const cases = [
+      ["{", 400],
+      [JSON.stringify({ ...binding, model: "  " }), 400],
+      [JSON.stringify({ ...binding, providerId: "invalid" }), 400],
+      [JSON.stringify({ ...binding, vision: "true" }), 400],
+      [JSON.stringify({ providerId: provider!.id, model: "model" }), 400],
+      [JSON.stringify({ ...binding, providerId: crypto.randomUUID() }), 404],
+    ] as const;
+
+    for (const [body, status] of cases) {
+      const response = await request("/api/capabilities/chat", { method: "PUT", body });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual({
+        error: status === 404 ? "provider-not-found" : "invalid-request",
+      });
+
+      expect(await (await request("/api/capabilities")).json()).toEqual({ chat: binding });
+    }
+  });
+
+  it("serializes concurrent Binding creation into one complete Binding", async () => {
+    const [provider] = await db
+      .insert(providers)
+      .values({
+        name: "Concurrent",
+        protocol: "openai",
+        baseUrl: "https://api.example.com",
+        apiKey: cipher.encrypt("key"),
+      })
+      .returning();
+    const choices = [
+      { providerId: provider!.id, model: "first", vision: false },
+      { providerId: provider!.id, model: "second", vision: true },
+    ];
+
+    const responses = await Promise.all(
+      choices.map((binding) =>
+        request("/api/capabilities/chat", {
+          method: "PUT",
+          body: JSON.stringify(binding),
+        }),
+      ),
+    );
+    for (const [index, response] of responses.entries()) {
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual(choices[index]);
+    }
+
+    const { chat } = await (await request("/api/capabilities")).json();
+    expect(choices).toContainEqual(chat);
+
+    expect(await db.select().from(capabilityBindings)).toHaveLength(1);
   });
 
   it("deletes unbound Providers and rejects deleting a bound Provider", async () => {
@@ -318,7 +472,9 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
         }),
       });
     const unbound = await (await create("Unbound")).json();
+
     expect((await request(`/api/providers/${unbound.id}`, { method: "DELETE" })).status).toBe(204);
+
     expect((await request(`/api/providers/${unbound.id}`, { method: "DELETE" })).status).toBe(404);
 
     const bound = await (await create("Bound")).json();
@@ -328,6 +484,7 @@ describe.skipIf(!url)("Provider Admin API (Postgres)", () => {
       model: "model",
       vision: false,
     });
+
     expect((await request(`/api/providers/${bound.id}`, { method: "DELETE" })).status).toBe(409);
   });
 });
