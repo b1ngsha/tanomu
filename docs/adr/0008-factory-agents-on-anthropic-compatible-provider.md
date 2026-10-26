@@ -9,7 +9,7 @@ and parsed them as strict JSON with no retry. Formatting noise from the free mod
 could fail whole runs, and the adapters also rendered provider-specific session
 transcripts for retro. Automatic retro has since been removed; retained Run Evidence
 serves human diagnosis. All remaining Factory Agent roles use one pinned Claude Code CLI:
-implement produces the candidate patch, both round-review axes and final review
+implement produces the candidate patch, both round-review axes and agent review
 consume native `structured_output`. A provider failure, timeout or invalid result
 fails the job without publishing a partial result; the job does not retry the whole role.
 
@@ -32,7 +32,7 @@ Anthropic's support boundary; each selected role requires live Provider Prefligh
 
 The official Claude Code Action is not used: it posts to GitHub itself and manages
 its own permissions, which conflicts with the separate publisher. ADR 0007's
-boundaries are unchanged: trusted main code, a read-only final-review model job,
+boundaries are unchanged: trusted main code, a read-only agent-review model job,
 a publisher without the model secret, and stale-head handling. Every role uses
 `--bare --restricted`, isolated settings, an empty strict MCP configuration and
 explicit tools. Review has only Read, Glob and Grep. Implement also has
@@ -49,7 +49,7 @@ handoff.
 
 Implement and round review keep native session JSONL unchanged as
 credential-scanned Run Evidence. Its internal schema is not an adapter contract.
-Final review remains sessionless. The obsolete manual OpenCode smoke workflow is removed: Provider Preflight is an
+Agent review remains sessionless. The obsolete manual OpenCode smoke workflow is removed: Provider Preflight is an
 operational check, not a task-lifecycle stage. Round findings are published from
 `review.json`, eliminating the duplicate review-Markdown response.
 

@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 from authorization import (claimed, claim_identity, dependencies, gate, metadata,  # noqa: E402
                           record_claim, revalidate, snapshot, validate_issue)
 from common import api, require  # noqa: E402
+from execution import WORKFLOWS  # noqa: E402
 from artifacts import MAX_ARTIFACT_BYTES, git, scan, scope  # noqa: E402
 import publication  # noqa: E402
 from publication import COMMENT_BYTES, FINAL_MARKER, INLINE_MARKER, split  # noqa: E402
@@ -140,21 +141,32 @@ def gate_attempt(number, directory):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
             summary.write(f"Factory gate: {reason}. Inspect this run before authorizing work.\n")
 
-def status_comment(number, body):
-    """One bot-owned status comment per run, updated on rerun; never trust public markers."""
-    repo, run = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_RUN_ID"]
-    require(re.fullmatch(r"[0-9]+", run), "invalid-run")
-    marker = f"<!-- factory-status:{run} -->"
+def bot_comment(number, marker):
+    """Find only the workflow bot's exact first-line marker across all pages."""
+    repo = os.environ["GITHUB_REPOSITORY"]
     pages = json.loads(subprocess.check_output([
         "gh", "api", "--paginate", "--slurp", f"repos/{repo}/issues/{number}/comments?per_page=100"]))
-    existing = next((item for page in pages for item in page
-                     if item.get("user", {}).get("login") == "github-actions[bot]"
-                     and item.get("body", "").splitlines()[:1] == [marker]), None)
+    return next((item for page in pages for item in page
+                 if item.get("user", {}).get("login") == "github-actions[bot]"
+                 and item.get("user", {}).get("type") == "Bot"
+                 and (item.get("body") or "").splitlines()[:1] == [marker]), None)
+
+
+def write_bot_comment(number, marker, body, existing):
+    repo = os.environ["GITHUB_REPOSITORY"]
     path = (f"repos/{repo}/issues/comments/{existing['id']}" if existing
             else f"repos/{repo}/issues/{number}/comments")
     subprocess.run(["gh", "api", "--method", "PATCH" if existing else "POST", path,
                     "--input", "-"], input=json.dumps({"body": marker + "\n" + body}),
                    text=True, check=True, stdout=subprocess.DEVNULL)
+
+
+def status_comment(number, body):
+    """One bot-owned status comment per run, updated on rerun; never trust public markers."""
+    run = os.environ["GITHUB_RUN_ID"]
+    require(re.fullmatch(r"[0-9]+", run), "invalid-run")
+    marker = f"<!-- factory-status:{run} -->"
+    write_bot_comment(number, marker, body, bot_comment(number, marker))
 
 def gate_feedback(number, result, reason):
     reason = reason if reason in GATE_REASONS else "diagnostics-unavailable"
@@ -441,6 +453,11 @@ def final_pull(number):
             posted.append([match[1], match[2], int(match[3]), int(match[4]), match[5]])
     return pull, problems, posted
 
+def complete_review(number, head, posted):
+    inline = posted_inline(number) if any(item[4] not in (None, "none") for item in posted) else set()
+    return publication.complete(head, posted, inline)
+
+
 def final_identify(number, event, directory):
     require(event in ("pull_request_target", "workflow_dispatch"), "invalid-event")
     pull, problems, posted = final_pull(number)
@@ -448,8 +465,7 @@ def final_identify(number, event, directory):
     repo, head = os.environ["GITHUB_REPOSITORY"], pull["head"]["sha"]
     base = api(f"repos/{repo}/compare/{pull['base']['sha']}...{head}")["merge_base_commit"]["sha"]
     require(SHA.fullmatch(base), "invalid-sha")
-    inline = posted_inline(number) if any(item[4] not in (None, "none") for item in posted) else set()
-    complete = publication.complete(head, posted, inline)
+    complete = complete_review(number, head, posted)
     # Only the automatic entry skips; a manual dispatch always reviews again. A skipped PR's
     # issue references are never fetched.
     skip = event == "pull_request_target" and (pull["user"]["type"] == "Bot" or complete)
@@ -467,7 +483,7 @@ def final_identify(number, event, directory):
         issues.append(issue_number)
     (output / "identity.json").write_text(json.dumps(
         {"pr": int(number), "head": head, "base": base, "issues": issues,
-         "run": os.environ["GITHUB_RUN_ID"], "summary_format": "compact"}))
+         "run": os.environ["GITHUB_RUN_ID"], "summary_format": "compact", "review_name": "Agent review"}))
     return {"pr": number, "head": head, "base": base, "skip": json.dumps(skip),
             "spec": json.dumps(bool(issues))}
 
@@ -475,6 +491,56 @@ def final_head(number, filename):
     pull, problems, posted = final_pull(number)
     Path(filename).write_text(json.dumps({"pr": int(number), "head": pull["head"]["sha"],
                                           "eligible": not problems, "posted": posted}))
+
+def final_review_status(number, output=None):
+    """Classify the current PR head using only bot-owned publication receipts."""
+    pull, problems, posted = final_pull(number)
+    require(not problems, problems[0] if problems else "")
+    head = pull["head"]["sha"]
+    if complete_review(number, head, posted):
+        state = "current"
+    elif posted:
+        state = "stale"
+    else:
+        state = "missing"
+    result = {"pr": int(number), "head": head, "status": state,
+              "reviewed_head": posted[-1][0] if posted else None}
+    if output is not None:
+        Path(output).write_text(json.dumps(result))
+    return result
+
+
+FINAL_STATUS_MARKER = "<!-- tanomu-final-review-status -->"
+
+
+def agent_status_comment(number, filename):
+    """Refresh one status comment, but never publish for a head that has moved."""
+    expected = json.loads(Path(filename).read_text())
+    require(isinstance(expected, dict) and set(expected) == {"pr", "head", "status", "reviewed_head"}
+            and expected["pr"] == int(number) and expected["status"] in {"current", "stale", "missing"},
+            "invalid-status")
+    existing = bot_comment(number, FINAL_STATUS_MARKER)
+    current = final_review_status(number)
+    if current["head"] != expected["head"]:
+        print("::notice::final-review-status-head-moved")
+        return False
+    # Current or not-yet-published reviews need no extra comment; retire an earlier status if present.
+    if current["status"] != "stale" and not existing:
+        return True
+    head, reviewed = current["head"], current["reviewed_head"]
+    if current["status"] == "stale":
+        detail = (f"Publication is incomplete for `{head}`." if reviewed == head else
+                  f"The latest published review belongs to `{reviewed}`.")
+        body = f"Agent review is stale for `{head}`.\n\n{detail}"
+    elif current["status"] == "current":
+        body = f"Agent review is current for `{head}`."
+    else:
+        body = f"No complete agent review has been published for `{head}`."
+    body += ("\n\nAdvisory only: this does not block merging. Request a fresh review with "
+             "`gh workflow run agent-review.yml --ref main -f pr=" + number + "`.")
+    write_bot_comment(number, FINAL_STATUS_MARKER, body, existing)
+    return True
+
 
 def pr_diff(head, base):
     """Write the PR diff into a fresh .factory-input before any untrusted input is copied there."""
@@ -523,9 +589,12 @@ def final_comments(directory, identity, current, output, reviews=None):
 def recovery_artifact(repo, run):
     """Read only allowlisted regular files from a validated run; never extract archive paths."""
     record = api(f"repos/{repo}/actions/runs/{run}")
-    workflow = api(f"repos/{repo}/actions/workflows/final-review.yml")
+    path = record.get("path")
+    require(path in {f".github/workflows/{name}" for name in WORKFLOWS["final-review"]},
+            "untrusted-review-run")
+    workflow = api(f"repos/{repo}/actions/workflows/{path.rsplit('/', 1)[-1]}")
     require(record["workflow_id"] == workflow["id"]
-            and record["path"] == ".github/workflows/final-review.yml"
+            and workflow.get("path") == path
             and record["head_branch"] == "main"
             and record["event"] in ("pull_request_target", "workflow_dispatch")
             and record["repository"]["full_name"] == repo
@@ -654,6 +723,11 @@ if __name__ == "__main__":
             print(f"resumed={json.dumps(final_resume(*args))}")
         elif command == "final-head":
             final_head(*args)
+        elif command == "final-review-status":
+            result = final_review_status(*args)
+            print(f"Agent review: {result['status']} for {result['head']}")
+        elif command == "agent-status-comment":
+            agent_status_comment(*args)
         elif command == "pr-diff":
             pr_diff(*args)
         elif command == "pr-body":

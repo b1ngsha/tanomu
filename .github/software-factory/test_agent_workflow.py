@@ -22,8 +22,8 @@ def git(cwd, *args):
 class FinalRunnerStepTest(unittest.TestCase):
     """Runs real supervised final review steps against stub `claude` and `gh`."""
 
-    jobs = {"identify": ("final-review.yml", "identify"),
-            "review": ("final-review.yml", "review"), "publish": ("final-review.yml", "publish"),
+    jobs = {"identify": ("agent-review.yml", "identify"),
+            "review": ("agent-review.yml", "review"), "publish": ("agent-review.yml", "publish"),
             "handoff": ("software-factory-implement.yml", "handoff")}
     run_step, calls, uploaded = base.RunnerStepTest.run_step, base.RunnerStepTest.calls, base.RunnerStepTest.uploaded
     reply = base.RunnerStepTest.reply
@@ -243,7 +243,7 @@ class FinalRunnerStepTest(unittest.TestCase):
             with self.subTest(pr=pr):
                 result, _ = self.run_step("handoff", select="gh workflow run", env={"PR": pr, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "2"})
                 self.assertEqual(result.returncode, 0 if started else 1)
-                self.assertEqual(self.calls("gh"), [["workflow", "run", "final-review.yml", "--ref", "main",
+                self.assertEqual(self.calls("gh"), [["workflow", "run", "agent-review.yml", "--ref", "main",
                                                      "-f", f"pr={pr}", "-f", "parent=123.2"]] if started else [])
 
 
@@ -251,7 +251,7 @@ class FinalWorkflowContractTest(unittest.TestCase):
     """The final review reads an untrusted head, so pin who runs what with which token."""
 
     def setUp(self):
-        self.workflow = base.WorkflowContractTest.load("final-review.yml")
+        self.workflow = base.WorkflowContractTest.load("agent-review.yml")
         self.jobs = self.workflow["jobs"]
 
     def test_triggers_run_trusted_main_only(self):
@@ -278,7 +278,7 @@ class FinalWorkflowContractTest(unittest.TestCase):
         self.assertEqual({name: job["permissions"] for name, job in self.jobs.items()}, {
             "identify": {"actions": "read", "contents": "read", "issues": "read", "pull-requests": "read"},
             "review": {"contents": "read"},
-            "publish": {"contents": "read", "issues": "write", "pull-requests": "write"}})
+            "publish": {"actions": "write", "contents": "read", "issues": "write", "pull-requests": "write"}})
         text = {name: json.dumps(job) for name, job in self.jobs.items()}
         self.assertEqual([name for name in text if "secrets." in text[name]], ["review"])
         self.assertNotIn("GH_TOKEN", text["review"])
@@ -427,5 +427,5 @@ class FinalWorkflowContractTest(unittest.TestCase):
         dispatch = steps[create + 1]
         self.assertTrue(dispatch["continue-on-error"])
         self.assertEqual(dispatch["env"]["PR"], "${{ steps.pr.outputs.pr }}")
-        self.assertIn('gh workflow run final-review.yml --ref main -f pr="$PR"', dispatch["run"])
+        self.assertIn('gh workflow run agent-review.yml --ref main -f pr="$PR"', dispatch["run"])
         self.assertEqual(len(steps), create + 2)

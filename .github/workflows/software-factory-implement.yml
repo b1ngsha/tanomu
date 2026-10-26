@@ -230,7 +230,7 @@ jobs:
           printf 'pr=%s\n' "${url##*/}" >> "$GITHUB_OUTPUT"
       # A GITHUB_TOKEN PR fires no pull_request event. The review is advisory, so failing to
       # start it leaves the handoff successful.
-      - name: Start final review
+      - name: Start agent review
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
@@ -239,7 +239,7 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo '::warning::invalid-pr-number'; exit 1; }
-          gh workflow run final-review.yml --ref main -f pr="$PR" -f parent="$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT"
+          gh workflow run agent-review.yml --ref main -f pr="$PR" -f parent="$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT"
   publish-reviews:
     needs: [claim, round1, round2, round3, handoff]
     if: always() && !cancelled() && needs.claim.result == 'success'

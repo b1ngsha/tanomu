@@ -1,5 +1,5 @@
-name: Final PR review
-run-name: "Final PR #${{ github.event.pull_request.number || inputs.pr }} · parent ${{ inputs.parent || 'none' }}"
+name: Agent PR review
+run-name: "Agent PR #${{ github.event.pull_request.number || inputs.pr }} · parent ${{ inputs.parent || 'none' }}"
 on:
   # Runs this workflow and control.py from main; the PR head is only ever read as data.
   pull_request_target:
@@ -186,6 +186,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
+      actions: write
       contents: read
       issues: write
       pull-requests: write
@@ -224,3 +225,9 @@ jobs:
           if [ -f "$RUNNER_TEMP/comments/inline.json" ]; then
             gh api --method POST "repos/$GH_REPO/pulls/$PR/reviews" --input "$RUNNER_TEMP/comments/inline.json" > /dev/null
           fi
+      - name: Refresh advisory status
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ needs.identify.outputs.pr }}
+        run: gh workflow run agent-review-status.yml --ref main -f pr="$PR"

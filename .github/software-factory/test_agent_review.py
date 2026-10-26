@@ -87,7 +87,7 @@ class FinalIdentifyTest(TaskDirectory):
         self.assertEqual((self.output / "issue-3.md").read_text(), "# Issue #3: Other\n\n\n")
         self.assertEqual(json.loads((self.output / "identity.json").read_text()),
                          {"pr": 2, "head": HEAD, "base": BASE, "issues": [1, 3], "run": "123",
-                          "summary_format": "compact"})
+                          "summary_format": "compact", "review_name": "Agent review"})
 
     def test_no_linked_issue_runs_standards_only(self):
         self.pull["body"] = None

@@ -104,6 +104,21 @@ class PublicationTest(unittest.TestCase):
         self.assertTrue(p.complete(head, [legacy, modern], set()))
         self.assertEqual(p.plan(result, identity, {"posted": [legacy, modern]}, "owner/repo"), {})
 
+    def test_agent_review_title_preserves_legacy_publication_identity(self):
+        identity = {"run": "1", "head": "a" * 40, "base": "b" * 40, "issues": [],
+                    "summary_format": "compact"}
+        result = {"findings": [], "advisory": []}
+        legacy = p.plan(result, identity, {"posted": []}, "owner/repo")["0001.md"]
+        renamed = p.plan(result, identity | {"review_name": "Agent review"},
+                         {"posted": []}, "owner/repo")["0001.md"]
+
+        self.assertIn("## Final review", legacy)
+        self.assertIn("## Agent review", renamed)
+        marker = p.FINAL_MARKER.fullmatch(legacy.split("\n", 1)[0])
+        self.assertEqual(marker[2], "6c42f65c4a50cbaf")
+        posted = [[marker[1], marker[2], 1, 1, marker[5]]]
+        self.assertEqual(p.plan(result, identity, {"posted": posted}, "owner/repo"), {})
+
     def test_completion_requires_every_part_and_matching_bot_inline(self):
         head, digest, inline = "a" * 40, "d" * 16, "e" * 16
         records = [[head, digest, part, 2, inline] for part in (1, 2)]

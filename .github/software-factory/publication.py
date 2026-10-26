@@ -119,7 +119,9 @@ def plan(result, reviewed, current, repository, reviews=None):
     run, head = reviewed["run"], reviewed["head"]
     spec = (f"Spec: {', '.join(f'#{issue}' for issue in reviewed['issues'])}." if reviewed["issues"] else
             "No issue is linked with Closes/Fixes/Resolves/Refs #N, so only the Standards axis ran.")
-    preface = (f"## Final review — head {head[:12]}\n\n"
+    # The title participates in the digest; old identities keep their original rendering.
+    name = "Agent review" if reviewed.get("review_name") == "Agent review" else "Final review"
+    preface = (f"## {name} — head {head[:12]}\n\n"
                f"Merge base {reviewed['base']}. Run: https://github.com/{repository}"
                f"/actions/runs/{run}\n\n{spec} Advisory only: this does not "
                "block merging and nothing was changed.\n\n")

@@ -459,7 +459,7 @@ class FeedbackTest(GateTest):
     def test_status_comment_updates_only_bot_marker(self):
         marker = "<!-- factory-status:123 -->"
         public = {"id": 5, "user": {"login": "intruder"}, "body": marker}
-        bot = {"id": 6, "user": {"login": "github-actions[bot]"}, "body": marker + "\nold"}
+        bot = {"id": 6, "user": {"login": "github-actions[bot]", "type": "Bot"}, "body": marker + "\nold"}
         for pages, method, path in (([[public]], "POST", f"issues/1/comments"),
                                     ([[public, bot]], "PATCH", "issues/comments/6")):
             with mock.patch.object(control.subprocess, "check_output", return_value=json.dumps(pages).encode()), mock.patch.object(control.subprocess, "run") as run:

@@ -1,7 +1,7 @@
 name: Software factory observation
 on:
   workflow_run:
-    workflows: [Software factory implement, Final PR review]
+    workflows: [Software factory implement, Agent PR review, Final PR review]
     types: [in_progress, completed]
 permissions: {}
 concurrency:

@@ -10,16 +10,16 @@ from pathlib import Path
 
 # -I excludes the script directory; import only from this trusted checkout.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from execution import ARTIFACTS, FILES, RESULTS, SHA, STATES, job_states, publication_findings, state
+from execution import ARTIFACTS, RESULTS, SHA, STATES, WORKFLOWS, job_states, publication_findings, state
 
 NUMBER = r"[1-9][0-9]{0,19}"
 ISSUE = re.compile(rf"Factory issue #({NUMBER}) · attempt ({NUMBER})")
-CHILD = re.compile(rf"Final PR #({NUMBER}) · parent ({NUMBER})\.({NUMBER})")
-STANDALONE = re.compile(rf"Final PR #({NUMBER}) · parent none")
+CHILD = re.compile(rf"(?:Final|Agent) PR #({NUMBER}) · parent ({NUMBER})\.({NUMBER})")
+STANDALONE = re.compile(rf"(?:Final|Agent) PR #({NUMBER}) · parent none")
 ACTIONS = {"stale-implementation": "Inspect queued/running jobs; owner may cancel or rerun after diagnosis.",
            "stale-implementing-label": "Owner should inspect delivery before manually correcting the issue state.",
-           "final-review-not-observed": "Owner should inspect the handoff and dispatch a final review if needed.",
-           "final-review-not-delivered": "Owner should inspect final review publish before manually rerunning it.",
+           "final-review-not-observed": "Owner should inspect the handoff and dispatch a agent review if needed.",
+           "final-review-not-delivered": "Owner should inspect agent review publish before manually rerunning it.",
            "round-reviews-not-delivered": "Owner should inspect round review publication before manually rerunning it.",
            "evidence-expired": "Recorded evidence expired; inspect retained job metadata and request a fresh run if needed."}
 
@@ -74,7 +74,8 @@ def trusted(run, workflow, repo, kind):
     actors = {owner} if kind == "implementation" else {owner, "github-actions[bot]"}
     return (integer(run.get("id")) is not None and integer(run.get("run_attempt")) is not None
             and run.get("workflow_id") == workflow.get("id")
-            and run.get("path") == f".github/workflows/{FILES[kind]}"
+            and run.get("path") == workflow.get("path")
+            and run.get("path") in {f".github/workflows/{name}" for name in WORKFLOWS[kind]}
             and run.get("head_repository", {}).get("full_name") == repo
             and run.get("head_branch") == "main"
             and run.get("event") in ({"workflow_dispatch", "issues"} if kind == "implementation"
@@ -165,15 +166,24 @@ def reconcile(api, repo, now=None):
     now = now or datetime.now(timezone.utc)
     reader, pools = Reader(api, repo), {}
     cutoff = now - timedelta(days=90)
-    for kind, filename in FILES.items():
-        workflow = reader.get(f"actions/workflows/{filename}")
-        if not isinstance(workflow, dict) or not integer(workflow.get("id")) or workflow.get("path") != f".github/workflows/{filename}":
-            reader.notices.add("workflow-unavailable")
-            pools[kind] = []
-            continue
-        rows, _ = reader.pages(f"actions/workflows/{workflow['id']}/runs?created=%3E%3D{cutoff.date()}", "workflow_runs")
-        pools[kind] = [run for run in rows if trusted(run, workflow, repo, kind)
-                       and instant(run.get("created_at")) and cutoff <= instant(run["created_at"]) <= now]
+    for kind, filenames in WORKFLOWS.items():
+        pools[kind] = []
+        for filename in filenames:
+            workflow = reader.get(f"actions/workflows/{filename}")
+            if (not isinstance(workflow, dict) or not integer(workflow.get("id"))
+                    or workflow.get("path") != f".github/workflows/{filename}"):
+                reader.notices.add("workflow-unavailable")
+                continue
+            rows, _ = reader.pages(f"actions/workflows/{workflow['id']}/runs?created=%3E%3D{cutoff.date()}", "workflow_runs")
+            seen = {(run["id"], run["run_attempt"]) for run in pools[kind]}
+            for run in rows:
+                key = run.get("id"), run.get("run_attempt")
+                created = instant(run.get("created_at"))
+                if trusted(run, workflow, repo, kind) and created and cutoff <= created <= now and key not in seen:
+                    pools[kind].append(run)
+                    seen.add(key)
+        if kind == "final-review":
+            pools[kind].sort(key=lambda run: (int(run["id"]), int(run["run_attempt"])), reverse=True)
         if len(pools[kind]) > 20:
             reader.notices.add("run-detail-limited")
     parent_keys = {(int(run["id"]), int(run["run_attempt"])) for run in pools["implementation"]}
@@ -263,7 +273,7 @@ def reconcile(api, repo, now=None):
 
 
 def render(report):
-    lines = ["## Factory reconciliation (read-only)", "", "Run | State | Findings | CI / deploy | Final review / parent | Artifacts", "--- | --- | --- | --- | --- | ---"]
+    lines = ["## Factory reconciliation (read-only)", "", "Run | State | Findings | CI / deploy | Agent review / parent | Artifacts", "--- | --- | --- | --- | --- | ---"]
     for run in report["runs"]:
         artifact_states = sorted({value for values in run["artifacts"].values() for value in values})
         lines.append(f"[{run['run']}.{run['attempt']}]({run['url']}) | {run['status']} / {run['conclusion']} | "

@@ -27,6 +27,12 @@ on main. Manual dispatch also forces a new review. Pushes do not trigger it. Run
 are serialized per PR without cancelling the previous run; stale heads are not
 published.
 
+The independent review is named **Agent review** and its active workflows use
+`agent-review*.yml` filenames. A separate advisory status workflow also listens to
+synchronize events and cancels superseded status runs in its own group. It never calls
+a model or cancels a paid review. Recovery accepts historical `final-review.yml` runs;
+receipt markers, artifact names and metadata keys retain their `final-*` identifiers.
+
 Standards always runs; Spec uses captured linked same-repository issues. Reports preserve
 all structured findings, split into credential-scanned comments with
 invisible head/digest/part markers. Only the Actions bot's markers count for
@@ -35,7 +41,7 @@ inline review expected by the summary marker. Automatic recovery reuses
 an earlier trusted workflow's report only after checking its PR, head and digest;
 expired artifacts fall back to a fresh review. Manual dispatch always runs a new
 review. Old reports remain visible.
-Final review does not persist native sessions; structured reports and identities
+Agent review does not persist native sessions; structured reports and identities
 expire after three days. The cost is
 an extra model review and an advisory report that can become outdated after a push;
 the maintainer can explicitly request a fresh one.

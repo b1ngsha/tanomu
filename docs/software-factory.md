@@ -19,7 +19,7 @@ ready-for-agent + agent:implement -> implementing
   -> round: implement -> format + checks -> Standards review + Spec review
        check failure or blocking finding -> next round (three rounds in total)
   -> draft PR -> ready-for-human
-       -> independent final PR review -> advisory comments
+       -> independent agent PR review -> advisory comments
   -> needs-human (authorization, patch validation, credential or infrastructure failure, or budget exhausted)
   -> publish round-review findings on the draft PR, or on the issue without one
 ```
@@ -60,7 +60,7 @@ agent does not invoke the skill or receive PR permissions.
 They require a successful native result with schema-validated `structured_output`;
 partial results and automatic whole-role retries are not accepted.
 
-All Factory Agents use the same pinned Claude Code CLI and one dedicated paid Provider configuration. Implement and both round-review jobs declare `environment: agent` directly because reusable-workflow callers cannot set a called job's environment; final review does the same. The `agent` environment has no required reviewers, accepts deployments from `main` only, and defines `AGENT_BASE_URL` (initially `https://api.deepseek.com/anthropic`), `AGENT_MODEL` (initially `deepseek-flash`), and the secret `AGENT_API_KEY`. Keep this key separate from production chat credentials and give it a provider-side spend limit. Every model alias Claude Code uses is set to the selected model, so no hidden request goes to another model. DeepSeek `deepseek-flash` passed the final-review read-only tool loop, structured findings schema and configuration canary in a manual run against PR #62; implement and round review also passed in [run 40102471987](https://github.com/b1ngsha/tanomu/actions/runs/40102471987), which created draft PR #77.
+All Factory Agents use the same pinned Claude Code CLI and one dedicated paid Provider configuration. Implement and both round-review jobs declare `environment: agent` directly because reusable-workflow callers cannot set a called job's environment; agent review does the same. The `agent` environment has no required reviewers, accepts deployments from `main` only, and defines `AGENT_BASE_URL` (initially `https://api.deepseek.com/anthropic`), `AGENT_MODEL` (initially `deepseek-flash`), and the secret `AGENT_API_KEY`. Keep this key separate from production chat credentials and give it a provider-side spend limit. Every model alias Claude Code uses is set to the selected model, so no hidden request goes to another model. DeepSeek `deepseek-flash` passed the agent-review read-only tool loop, structured findings schema and configuration canary in a manual run against PR #62; implement and round review also passed in [run 40102471987](https://github.com/b1ngsha/tanomu/actions/runs/40102471987), which created draft PR #77.
 
 ## Implementation runbook
 
@@ -137,7 +137,7 @@ read-only: they may only read, glob, grep and list inside their workspace, with 
 and `auth.json` reads denied.
 
 The shared trusted `supervisor.py` owns process-group deadlines and cleanup for implementation,
-round review and final review. Every 60 seconds it writes an allowlisted heartbeat
+round review and agent review. Every 60 seconds it writes an allowlisted heartbeat
 with phase/axis, elapsed time, native result/transcript byte counts and last observed
 file-activity age. File activity is only a liveness observation, not a provider diagnosis.
 Closed or full log pipes may drop telemetry without blocking cleanup. Normal/nonzero
@@ -158,7 +158,7 @@ Evidence for human diagnosis. Claude Code's internal event schema is not a parsi
 contract. A step
 that always runs copies each explicitly named session, scans it with `scan-session`
 (the same credential checks, without a size cap), and only then uploads it as a
-`session-*` artifact kept for three days. Final review uses `--no-session-persistence`
+`session-*` artifact kept for three days. Agent review uses `--no-session-persistence`
 and retains only its structured report and identity. A transcript that is missing or
 fails the scan is not uploaded; session recording is best effort after a failed run.
 
@@ -190,7 +190,7 @@ An axis stopped by Standards failure is `not-started`; absent metadata is `unava
 not proof that no events occurred. Review response validation runs before the next axis.
 The status links to the run and available scanned artifacts and requests human inspection,
 without guessing a provider/network root cause or starting retries. Status comments are
-updated by run ID, and only bot-authored markers count. Final PR review publication and
+updated by run ID, and only bot-authored markers count. Agent PR review publication and
 its separate deduplication/resume markers are unchanged.
 
 Diagnostics are best effort. Checkout failure, absent outputs/artifacts, API failures or
@@ -200,13 +200,18 @@ run, remove a stale `implementing` label,
 and resolve any existing branch/PR before deliberately authorizing another run.
 Never blindly rerun a claimed or partially published task.
 
-## Final PR review
+## Agent PR review
 
-`final-review.yml` starts a fresh read-only review when a same-repository PR is
+Agent review uses `agent-review.yml` and `agent-review-status.yml`. Historical
+`final-review.yml` runs remain eligible for recovery; `final-*` CLI commands, receipt
+markers, artifact names and metadata keys stay unchanged. New report identities freeze
+the Agent review title; old identities retain their original title and digest when recovered.
+
+`agent-review.yml` starts a fresh read-only review when a same-repository PR is
 opened, reopened or marked Ready for review. Automatic entry skips Bot authors and
 forks. The factory explicitly dispatches it after creating its draft PR, because
 `GITHUB_TOKEN` creation does not fire PR workflows. Maintainers can force another
-review with `gh workflow run final-review.yml --ref main -f pr=N`. Pushes alone do
+review with `gh workflow run agent-review.yml --ref main -f pr=N`. Pushes alone do
 not start another review.
 
 Workflow code, prompts and `control.py` come from main. The candidate is checked
@@ -235,13 +240,27 @@ count for deduplication. New summary markers also record the expected inline dig
 (or `none`); automatic entry skips only when every summary part and any expected
 inline review are present. Legacy summaries have unknown inline status and are
 checked through recovery. For an incomplete publication it attempts to recover the original report from an earlier
-trusted final-review run's artifacts, verifies its PR, head and digest, then posts
+trusted agent-review run's artifacts, verifies its PR, head and digest, then posts
 missing parts. Recovery of legacy markers also posts a modern first-part receipt so
 completion remains detectable after the artifacts expire. Expired or missing
 artifacts needed for recovery fall back to a fresh review.
 Rerunning the publisher also fills missing parts from its existing report. A moved
 head makes the report stale and prevents publication. Manual dispatch always
 requests a fresh review.
+
+`agent-review-status.yml` separately checks the current PR head on open, synchronize,
+reopen and Ready for review. It reuses the bot-owned summary and inline receipts to
+report `current`, `stale` (including incomplete publication) or `missing`; a public
+comment cannot forge these receipts. A stale result updates one bot-owned advisory
+comment with the current and reviewed heads and the manual rerun command. Initial `missing`
+results stay silent; an existing status comment is refreshed even when receipts disappear. The
+publisher dispatches a status refresh after posting a review, including inline
+findings, so a completed manual rerun retires the stale status. Only the status
+workflow writes this comment. Its separate cancelling group supersedes older status
+runs without cancelling or replacing any paid review; every run reads live state.
+The status job has no Provider secret, never invokes the model and rechecks the head
+before writing. It does not make review a required check or start another paid review
+on every push.
 
 Findings may carry a repository-relative path and a new-file line number. Only
 locations that exist in the reviewed diff are kept; the rest stay in the summary
@@ -271,7 +290,7 @@ Actions summaries provide aggregate views, and safe metadata artifacts last 90 d
 Sensitive session/patch/review artifacts retain their three-day lifetime and scans.
 No database, external telemetry, secret or notification integration is needed.
 
-`software-factory-observe.yml` runs trusted main code on implementation/final-review
+`software-factory-observe.yml` runs trusted main code on implementation/agent-review
 `workflow_run` in-progress and completed events. It polls orchestration metadata once per
 minute for at most five hours, updating its bot-owned comment only when phase/outcomes
 change. This is STARTED and phase progress, not a model heartbeat notification. It writes
@@ -282,10 +301,10 @@ and evidence links. `current_head/current_base` describe the live PR, never the
 reviewed revision. `reviewed_head/reviewed_base` remain unknown because observation
 reads Actions metadata only; the frozen review identity stays in the review artifact.
 Missing fields remain unavailable. Implementation delivery, independent
-round-review comment publication, final-review publication and ordinary PR CI are separate states.
+round-review comment publication, agent-review publication and ordinary PR CI are separate states.
 Observer comment lookup follows all pages before creating a new comment; a failed lookup never authorizes a duplicate.
 The existing gate rejection/round diagnostics remain detailed evidence; observer comments
-use their own marker and cannot overwrite those diagnostics or final-review report markers.
+use their own marker and cannot overwrite those diagnostics or agent-review report markers.
 
 The observer verifies workflow ID/path, repository, main, event, owner actors, issue/PR
 ownership and same-repository target before writes. Public/unrelated events are summary-only.
@@ -293,12 +312,12 @@ The observer never downloads model artifacts or executes candidate code. Final b
 must name its originating `run_id.run_attempt`; trusted parent metadata, successful handoff
 and exact task PR branch bind that identity. The dispatch API returns no child run ID:
 only an observed child supplies its own link/state. A standalone review has no parent.
-The final-review dedupe/resume protocol remains unchanged. No automatic retry follows
+The agent-review dedupe/resume protocol remains unchanged. No automatic retry follows
 failed dispatch, review publication, CI or observation.
 
 `software-factory-reconcile.yml` runs every six hours or manually on main with read-only
 permissions. Its Actions summary links recent trusted executions and reports stale running
-implementation (>3 hours), completed tasks retaining `implementing`, final review not
+implementation (>3 hours), completed tasks retaining `implementing`, agent review not
 observed >30 minutes after delivery, failed/missing final or claimed-round comment publication and recorded expired
 evidence, including session, feedback and checked-patch artifacts. It links available PR/head CI and merged-head deployment metadata; pending and
 unavailable remain explicit. It proposes concrete human inspection steps and never changes
@@ -317,7 +336,7 @@ GitHub scheduling delays, hard cancellation and a run exceeding the observation 
 leave a partial snapshot. Reruns share a source run marker and show the current attempt;
 parent/child correlation retains the explicit originating attempt. Inspect the Actions run
 and bounded recovery summary before removing stale labels, resolving existing branches/PRs
-and deliberately authorizing a new task. A green implementation is not proof of final review,
+and deliberately authorizing a new task. A green implementation is not proof of agent review,
 round-review comment delivery, ordinary CI, deployment or human acceptance.
 
 ## Human-only operations

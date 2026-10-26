@@ -41,7 +41,13 @@ class ObservationTest(unittest.TestCase):
                "triggering_actor": {"login": "owner"}, "head_repository": {"full_name": "owner/repo"},
                "path": ".github/workflows/final-review.yml",
                "display_title": "Final PR #12 · parent 123.2"}
-        self.assertEqual(observe.identity(run, "owner/repo"), ("final-review", "12", "123.2"))
+        for filename in ("final-review.yml", "agent-review.yml"):
+            run["path"] = f".github/workflows/{filename}"
+            for label in ("Final", "Agent"):
+                run["display_title"] = f"{label} PR #12 · parent 123.2"
+
+                self.assertEqual(observe.identity(run, "owner/repo"), ("final-review", "12", "123.2"))
+
     def test_snapshot_uses_trusted_jobs_and_never_candidate_artifacts(self):
         run = {"head_branch": "main", "event": "issues", "actor": {"login": "owner"},
                "triggering_actor": {"login": "owner"}, "head_repository": {"full_name": "owner/repo"},
@@ -55,7 +61,7 @@ class ObservationTest(unittest.TestCase):
             if path.endswith('/runs/123'):
                 return run
             if '/workflows/' in path:
-                return {"id": 7}
+                return {"id": 7, "path": run["path"]}
             if path.endswith('/issues/10'):
                 return {"user": {"login": "owner"}}
             if '/jobs?' in path:
@@ -93,6 +99,29 @@ class ObservationTest(unittest.TestCase):
         run['workflow_id'] = 8
         self.assertIsNone(observe.snapshot(api, "owner/repo", "123"))
 
+    def test_snapshot_validates_the_renamed_review_workflow(self):
+        run = {"head_branch": "main", "event": "pull_request_target", "actor": {"login": "owner"},
+               "triggering_actor": {"login": "owner"}, "head_repository": {"full_name": "owner/repo"},
+               "path": ".github/workflows/agent-review.yml", "workflow_id": 9,
+               "display_title": "Agent PR #12 · parent none", "run_attempt": 1,
+               "status": "completed", "conclusion": "success"}
+
+        def api(path):
+            if path.endswith('/runs/456'):
+                return run
+            if path.endswith('/workflows/agent-review.yml'):
+                return {"id": 9, "path": run["path"]}
+            if path.endswith('/pulls/12'):
+                return {"user": {"login": "owner"}, "head": {"repo": {"full_name": "owner/repo"}},
+                        "base": {"ref": "main", "repo": {"full_name": "owner/repo"}}}
+            if '/jobs?' in path:
+                return {"jobs": [{"name": "publish", "conclusion": "success"}]}
+            if '/artifacts?' in path:
+                return {"artifacts": []}
+            self.fail(path)
+
+        self.assertEqual(observe.snapshot(api, "owner/repo", "456")["pr"], 12)
+
     def test_bot_final_child_requires_successful_exact_parent_and_task_branch(self):
         child = {"head_branch": "main", "event": "workflow_dispatch", "actor": {"login": "github-actions[bot]"},
                  "triggering_actor": {"login": "github-actions[bot]"}, "head_repository": {"full_name": "owner/repo"},
@@ -114,7 +143,8 @@ class ObservationTest(unittest.TestCase):
             if path.endswith('/123/attempts/2'):
                 return parent
             if '/workflows/' in path:
-                return {"id": 7 if 'implement' in path else 8}
+                return {"id": 7 if 'implement' in path else 8,
+                        "path": parent["path"] if 'implement' in path else child["path"]}
             if path.endswith('/pulls/12'):
                 return pull
             if '/123/attempts/2/jobs?' in path:
