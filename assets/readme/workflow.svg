@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="330" viewBox="0 0 1200 330" role="img" aria-labelledby="title desc">
+  <title id="title">How tanomu turns Feishu messages into one reply</title>
+  <desc id="desc">Events are recorded and deduplicated, batched for 2.5 seconds, resolved through the current model binding, then sent, persisted, and logged.</desc>
+  <rect width="1200" height="330" rx="26" fill="#f5f7fb"/>
+  <path d="M48 48H1152" stroke="#dce3ed"/>
+  <text x="48" y="34" fill="#61708a" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16" letter-spacing="1.5">ONE MESSAGE'S PATH</text>
+  <g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',sans-serif">
+    <g transform="translate(48 82)">
+      <rect width="192" height="194" rx="20" fill="#ffffff" stroke="#dce3ed"/>
+      <circle cx="38" cy="40" r="17" fill="#eaf0fc"/>
+      <path d="M28 34h20v14H37l-6 5v-5h-3z" fill="#245bdb"/>
+      <text x="24" y="88" fill="#245bdb" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16">01 / ARRIVE</text>
+      <text x="24" y="124" fill="#172b4d" font-size="22" font-weight="650">Feishu event</text>
+      <text x="24" y="156" fill="#61708a" font-size="18">Long connection</text>
+    </g>
+    <path d="M246 179h22m-7-7 7 7-7 7" fill="none" stroke="#8ba5cc" stroke-width="2"/>
+    <g transform="translate(276 82)">
+      <rect width="192" height="194" rx="20" fill="#ffffff" stroke="#dce3ed"/>
+      <circle cx="38" cy="40" r="17" fill="#eaf0fc"/>
+      <ellipse cx="38" cy="34" rx="11" ry="5" fill="none" stroke="#245bdb" stroke-width="2"/>
+      <path d="M27 34v12c0 6 22 6 22 0V34M27 40c0 6 22 6 22 0" fill="none" stroke="#245bdb" stroke-width="2"/>
+      <text x="24" y="88" fill="#245bdb" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16">02 / RECORD</text>
+      <text x="24" y="124" fill="#172b4d" font-size="22" font-weight="650">Store once</text>
+      <text x="24" y="156" fill="#61708a" font-size="18">Message ID dedupe</text>
+    </g>
+    <path d="M474 179h22m-7-7 7 7-7 7" fill="none" stroke="#8ba5cc" stroke-width="2"/>
+    <g transform="translate(504 82)">
+      <rect width="192" height="194" rx="20" fill="#ffffff" stroke="#dce3ed"/>
+      <circle cx="38" cy="40" r="17" fill="#eaf0fc"/>
+      <circle cx="38" cy="40" r="11" fill="none" stroke="#245bdb" stroke-width="2"/>
+      <path d="M38 32v9l6 4" fill="none" stroke="#245bdb" stroke-width="2" stroke-linecap="round"/>
+      <text x="24" y="88" fill="#245bdb" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16">03 / SETTLE</text>
+      <text x="24" y="124" fill="#172b4d" font-size="22" font-weight="650">2.5 seconds</text>
+      <text x="24" y="156" fill="#61708a" font-size="18">Per-chat batching</text>
+    </g>
+    <path d="M702 179h22m-7-7 7 7-7 7" fill="none" stroke="#8ba5cc" stroke-width="2"/>
+    <g transform="translate(732 82)">
+      <rect width="192" height="194" rx="20" fill="#ffffff" stroke="#dce3ed"/>
+      <circle cx="38" cy="40" r="17" fill="#eaf0fc"/>
+      <circle cx="31" cy="35" r="4" fill="#245bdb"/>
+      <circle cx="46" cy="35" r="4" fill="#245bdb"/>
+      <circle cx="38" cy="48" r="4" fill="#245bdb"/>
+      <path d="m31 35 7 13 8-13M31 35h15" fill="none" stroke="#245bdb" stroke-width="2"/>
+      <text x="24" y="88" fill="#245bdb" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16">04 / RESOLVE</text>
+      <text x="24" y="124" fill="#172b4d" font-size="22" font-weight="650">Chat Binding</text>
+      <text x="24" y="156" fill="#61708a" font-size="18">Read on every reply</text>
+    </g>
+    <path d="M930 179h22m-7-7 7 7-7 7" fill="none" stroke="#8ba5cc" stroke-width="2"/>
+    <g transform="translate(960 82)">
+      <rect width="192" height="194" rx="20" fill="#172b4d"/>
+      <circle cx="38" cy="40" r="17" fill="#245bdb"/>
+      <path d="m28 39 22-9-8 22-5-9-9 5 3-9z" fill="#ffffff"/>
+      <text x="24" y="88" fill="#a9c5f5" font-family="ui-monospace,SFMono-Regular,Menlo,monospace" font-size="16">05 / REPLY</text>
+      <text x="24" y="124" fill="#ffffff" font-size="22" font-weight="650">Send + record</text>
+      <text x="24" y="156" fill="#b7c5d9" font-size="18">Call log included</text>
+    </g>
+  </g>
+</svg>
