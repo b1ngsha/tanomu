@@ -14,7 +14,7 @@ import { createFeishuOAuth } from "./feishu-oauth.ts";
 import { createHttpApp } from "./http.ts";
 import { createKeyCipher } from "./key-cipher.ts";
 import { createLlmCallLog } from "./llm-call-log.ts";
-import { importChatBinding } from "./provider-store.ts";
+import { importChatBinding, createProviderStore } from "./provider-store.ts";
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL);
@@ -39,6 +39,7 @@ const batcher = createMessageBatcher<RecordedMessage>({
 const http = createHttpApp({
   oauth: createFeishuOAuth(config),
   sessionSecret: config.SESSION_SECRET,
+  providerStore: createProviderStore(db, cipher),
 });
 serve({ fetch: http.fetch, port: config.HTTP_PORT });
 

@@ -1,5 +1,6 @@
 import { expect, test, vi } from "vitest";
 import { createHttpApp } from "../src/http.ts";
+import type { ProviderStore } from "../src/provider-store.ts";
 
 const secret = "test-only-session-secret-with-32-characters";
 const user = { openId: "ou_test", name: "Ada" };
@@ -10,7 +11,19 @@ const oauth = {
     return user;
   },
 };
-const app = createHttpApp({ oauth, sessionSecret: secret });
+const providerStore: ProviderStore = {
+  listProviders: async () => [],
+  createProvider: async () => {
+    throw new Error("not used");
+  },
+  updateProvider: async () => {
+    throw new Error("not used");
+  },
+  deleteProvider: async () => {
+    throw new Error("not used");
+  },
+};
+const app = createHttpApp({ oauth, sessionSecret: secret, providerStore });
 
 function cookieOf(response: Response, name: string) {
   return response.headers
@@ -106,6 +119,7 @@ test("failed OAuth exchange does not leak upstream errors or create a session", 
         throw new Error("sensitive upstream details");
       },
     },
+    providerStore,
   });
   const login = await failing.request("/auth/feishu/login");
   const state = new URL(login.headers.get("location")!).searchParams.get("state");
