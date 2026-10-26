@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Button } from "./components/ui/button.tsx";
+import { ChatBinding } from "./binding.tsx";
 import { api } from "./lib/api.ts";
 import { adminQueries, errorMessage } from "./lib/queries.ts";
 import { Providers } from "./providers.tsx";
@@ -37,7 +38,12 @@ export function App() {
             {logout.isError ? "退出登录失败，请重试。" : errorMessage(error)}
           </p>
         )}
-        {user.data && <Providers />}
+        {user.data && (
+          <>
+            <Providers />
+            <ChatBinding />
+          </>
+        )}
       </main>
     </div>
   );
