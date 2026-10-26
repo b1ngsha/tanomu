@@ -3,16 +3,42 @@ import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { deleteCookie, getSignedCookie, setSignedCookie } from "hono/cookie";
 import { z } from "zod";
+import type { ChatBindingStore } from "./chat-binding-store.ts";
+import { providerProtocol } from "./db/schema.ts";
+import type { ProviderStore } from "./provider-store.ts";
+import { StoreError } from "./store-error.ts";
 
 export interface FeishuOAuth {
   authorizeUrl(state: string): string;
   exchange(code: string): Promise<{ openId: string; name: string }>;
 }
 
-type HttpDeps = { oauth: FeishuOAuth; sessionSecret: string };
+type HttpDeps = {
+  oauth: FeishuOAuth;
+  sessionSecret: string;
+  providerStore: ProviderStore;
+  chatBindingStore: ChatBindingStore;
+};
 const User = z.object({ openId: z.string().min(1), name: z.string().min(1) });
 const Session = User.extend({ exp: z.number() });
 const State = z.object({ state: z.string(), exp: z.number() });
+const ProviderProtocol = z.enum(providerProtocol.enumValues);
+const ProviderKey = z.string().refine((value) => value.trim().length > 0);
+const ProviderCreate = z.object({
+  name: z.string().trim().min(1),
+  protocol: ProviderProtocol,
+  baseUrl: z.url().refine((value) => ["http:", "https:"].includes(new URL(value).protocol)),
+  apiKey: ProviderKey,
+});
+const ProviderUpdate = ProviderCreate.partial().extend({
+  apiKey: z.union([z.literal(""), ProviderKey]).optional(),
+});
+const ProviderId = z.uuid();
+const ChatBindingInput = z.object({
+  providerId: ProviderId,
+  model: z.string().trim().min(1),
+  vision: z.boolean(),
+});
 const cookieOptions = { httpOnly: true, sameSite: "Lax", path: "/" } as const;
 
 function parseCookie(value: string | false | undefined): unknown {
@@ -23,7 +49,33 @@ function parseCookie(value: string | false | undefined): unknown {
   }
 }
 
-export function createHttpApp({ oauth, sessionSecret }: HttpDeps) {
+function storeError(error: unknown): Response {
+  if (error instanceof StoreError) {
+    switch (error.code) {
+      case "provider-not-found":
+        return Response.json({ error: error.code }, { status: 404 });
+      case "duplicate-provider-name":
+      case "provider-in-use":
+        return Response.json({ error: error.code }, { status: 409 });
+    }
+  }
+  return Response.json({ error: "internal-error" }, { status: 500 });
+}
+
+function invalidRequest(): Response {
+  return Response.json({ error: "invalid-request" }, { status: 400 });
+}
+
+async function jsonBody<T>(request: Request, schema: z.ZodType<T>): Promise<T | Response> {
+  try {
+    const parsed = schema.safeParse(await request.json());
+    return parsed.success ? parsed.data : invalidRequest();
+  } catch {
+    return invalidRequest();
+  }
+}
+
+export function createHttpApp({ oauth, sessionSecret, providerStore, chatBindingStore }: HttpDeps) {
   const app = new Hono<{ Variables: { user: z.infer<typeof User> } }>();
   app.get("/healthz", (c) => c.text("ok"));
   app.get("/auth/feishu/login", async (c) => {
@@ -79,6 +131,64 @@ export function createHttpApp({ oauth, sessionSecret }: HttpDeps) {
     return next();
   });
   app.get("/api/me", (c) => c.json(c.get("user")));
+  app.get("/api/providers", async (c) => {
+    try {
+      return c.json(await providerStore.listProviders());
+    } catch (error) {
+      return storeError(error);
+    }
+  });
+  app.post("/api/providers", async (c) => {
+    const input = await jsonBody(c.req.raw, ProviderCreate);
+    if (input instanceof Response) return input;
+    try {
+      return c.json(await providerStore.createProvider(input), 201);
+    } catch (error) {
+      return storeError(error);
+    }
+  });
+  app.patch("/api/providers/:id", async (c) => {
+    const id = ProviderId.safeParse(c.req.param("id"));
+    const input = await jsonBody(c.req.raw, ProviderUpdate);
+    if (!id.success || input instanceof Response) return invalidRequest();
+    const update = {
+      ...(input.name === undefined ? {} : { name: input.name }),
+      ...(input.protocol === undefined ? {} : { protocol: input.protocol }),
+      ...(input.baseUrl === undefined ? {} : { baseUrl: input.baseUrl }),
+      ...(input.apiKey === undefined ? {} : { apiKey: input.apiKey }),
+    };
+    try {
+      return c.json(await providerStore.updateProvider(id.data, update));
+    } catch (error) {
+      return storeError(error);
+    }
+  });
+  app.delete("/api/providers/:id", async (c) => {
+    const id = ProviderId.safeParse(c.req.param("id"));
+    if (!id.success) return invalidRequest();
+    try {
+      await providerStore.deleteProvider(id.data);
+      return c.body(null, 204);
+    } catch (error) {
+      return storeError(error);
+    }
+  });
+  app.get("/api/capabilities", async (c) => {
+    try {
+      return c.json({ chat: await chatBindingStore.getChatBinding() });
+    } catch (error) {
+      return storeError(error);
+    }
+  });
+  app.put("/api/capabilities/chat", async (c) => {
+    const input = await jsonBody(c.req.raw, ChatBindingInput);
+    if (input instanceof Response) return input;
+    try {
+      return c.json(await chatBindingStore.putChatBinding(input));
+    } catch (error) {
+      return storeError(error);
+    }
+  });
   if (process.env.NODE_ENV === "production") {
     const root = fileURLToPath(new URL("../../admin/dist", import.meta.url));
     app.get("/api/*", (c) => c.notFound());

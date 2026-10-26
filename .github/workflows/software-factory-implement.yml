@@ -109,7 +109,7 @@ jobs:
           path: ${{ runner.temp }}/claim.json
           retention-days: 3
           if-no-files-found: error
-  # Check failures and review findings share one budget: the first attempt plus three repairs.
+  # Check failures and review findings share one budget: the first attempt plus two repairs.
   round1:
     needs: claim
     uses: ./.github/workflows/software-factory-round.yml
@@ -145,20 +145,8 @@ jobs:
       issue: ${{ github.event.issue.number || inputs.issue_number }}
       round: 3
       base: ${{ github.sha }}
-  round4:
-    needs: round3
-    if: needs.round3.outputs.outcome == 'checks_failed' || needs.round3.outputs.outcome == 'request_changes'
-    uses: ./.github/workflows/software-factory-round.yml
-    secrets:
-      AGENT_API_KEY: ${{ secrets.AGENT_API_KEY }}
-    permissions:
-      contents: read
-    with:
-      issue: ${{ github.event.issue.number || inputs.issue_number }}
-      round: 4
-      base: ${{ github.sha }}
   handoff:
-    needs: [round1, round2, round3, round4]
+    needs: [round1, round2, round3]
     # Rounds stop at the first approval, so at most one round approves and none may have failed.
     if: >-
       always() && !cancelled() && contains(needs.*.outputs.outcome, 'approve') &&
@@ -189,10 +177,9 @@ jobs:
           ROUND1: ${{ needs.round1.outputs.outcome }}
           ROUND2: ${{ needs.round2.outputs.outcome }}
           ROUND3: ${{ needs.round3.outputs.outcome }}
-          ROUND4: ${{ needs.round4.outputs.outcome }}
         run: |
           set -euo pipefail
-          for round in 1 2 3 4; do
+          for round in 1 2 3; do
             outcome="ROUND$round"
             if [ "${!outcome}" = approve ]; then printf 'round=%s\n' "$round" >> "$GITHUB_OUTPUT"; fi
           done
@@ -230,6 +217,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
+          ROUND: ${{ steps.approved.outputs.round }}
         run: |
           set -euo pipefail
           python3 -I ../trusted/.github/software-factory/control.py claimed "$ISSUE" "$RUNNER_TEMP/input" "$RUNNER_TEMP/claim/claim.json"
@@ -237,14 +225,7 @@ jobs:
           branch=$(git branch --show-current)
           git push --force-with-lease="refs/heads/$branch:" origin "HEAD:refs/heads/$branch"
           title=$(jq -r .title "$RUNNER_TEMP/input/input.json")
-          {
-            printf 'Implements the approved specification for #%s. Refs #%s.\n\n' "$ISSUE" "$ISSUE"
-            printf 'Evidence: format, lint, typecheck, admin build, database tests, scope checks and independent model review passed.\n\n'
-            printf 'Run: https://github.com/%s/actions/runs/%s\n\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
-            printf 'Merge Danger: human must mark Ready for review to trigger ordinary CI, inspect the diff, perform acceptance and decide whether to merge. Acceptance has not been performed.\n\n'
-            printf 'Acceptance: follow the frozen issue specification attached to this run (factory-input/issue.md).\n\n'
-            printf '🤖 Generated with [Claude Code](https://claude.com/claude-code)\n'
-          } > "$RUNNER_TEMP/pr.md"
+          python3 -I ../trusted/.github/software-factory/control.py pr-body "$ISSUE" "$ROUND" "$RUNNER_TEMP/pr.md"
           url=$(gh pr create --draft --base main --head "$branch" --title "$title" --body-file "$RUNNER_TEMP/pr.md" | tail -n 1)
           printf 'pr=%s\n' "${url##*/}" >> "$GITHUB_OUTPUT"
       # A GITHUB_TOKEN PR fires no pull_request event. The review is advisory, so failing to
@@ -259,120 +240,8 @@ jobs:
           set -euo pipefail
           [[ "$PR" =~ ^[1-9][0-9]*$ ]] || { echo '::warning::invalid-pr-number'; exit 1; }
           gh workflow run final-review.yml --ref main -f pr="$PR" -f parent="$GITHUB_RUN_ID.$GITHUB_RUN_ATTEMPT"
-  retro:
-    needs: [claim, round1, round2, round3, round4, handoff]
-    if: always() && !cancelled() && needs.claim.result == 'success'
-    runs-on: ubuntu-latest
-    environment: agent
-    timeout-minutes: 15
-    env:
-      ANTHROPIC_BASE_URL: ${{ vars.AGENT_BASE_URL }}
-      ANTHROPIC_API_KEY: ${{ secrets.AGENT_API_KEY }}
-      ANTHROPIC_AUTH_TOKEN: ${{ secrets.AGENT_API_KEY }}
-      ANTHROPIC_MODEL: ${{ vars.AGENT_MODEL }}
-      ANTHROPIC_DEFAULT_OPUS_MODEL: ${{ vars.AGENT_MODEL }}
-      ANTHROPIC_DEFAULT_SONNET_MODEL: ${{ vars.AGENT_MODEL }}
-      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${{ vars.AGENT_MODEL }}
-      CLAUDE_CODE_SUBAGENT_MODEL: ${{ vars.AGENT_MODEL }}
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-      DISABLE_AUTOUPDATER: "1"
-      DISABLE_AUTO_UPDATE: "1"
-      CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1"
-      CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL: "1"
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ github.sha }}
-          path: trusted
-          persist-credentials: false
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-        with:
-          ref: ${{ github.sha }}
-          path: workspace
-          persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: factory-input
-          path: workspace/.factory-input
-      # Some runs fail before producing these artifacts. Keep their original directories.
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        continue-on-error: true
-        with:
-          pattern: session-*
-          path: workspace/.factory-input/run
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        continue-on-error: true
-        with:
-          pattern: feedback-*
-          path: workspace/.factory-input/run
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        continue-on-error: true
-        with:
-          pattern: checked-*
-          path: workspace/.factory-input/run
-      - name: Record run outcome
-        env:
-          OUTCOMES: ${{ toJSON(needs) }}
-        run: |
-          mkdir -p workspace/.factory-input/run
-          jq -n --argjson jobs "$OUTCOMES" '{jobs: $jobs}' > workspace/.factory-input/run/outcome.json
-      - name: Install pinned runner
-        run: npm install --global @anthropic-ai/claude-code@2.1.304 --no-audit --no-fund && claude --version | grep -Fx '2.1.304 (Claude Code)'
-      - name: Configure read-only retro
-        run: python3 -I trusted/.github/software-factory/control.py configure-claude "$RUNNER_TEMP/claude" retro
-      - name: Propose improvements from the run
-        working-directory: workspace
-        env:
-          ISSUE: ${{ github.event.issue.number || inputs.issue_number }}
-        run: |
-          set -euo pipefail
-          PWD=$(pwd -P)
-          export PWD
-          prompt=$(python3 -I ../trusted/.github/software-factory/control.py prompt retro "$ISSUE")
-          session=$(python3 -I -c 'import uuid; print(uuid.uuid4())')
-          printf '%s' "$session" > "$RUNNER_TEMP/retro.session"
-          export CLAUDE_TRANSCRIPT="$CLAUDE_CONFIG_DIR/projects/factory/$session.jsonl"
-          status=0
-          python3 -I ../trusted/.github/software-factory/supervisor.py \
-            "$RUNNER_TEMP/retro.json" "$RUNNER_TEMP/retro-summary.txt" "retro" 600 -- \
-            claude -p --bare --restricted --output-format json --session-id "$session" \
-              --tools Read,Glob,Grep --permission-mode dontAsk --permission-prompts none \
-              --disable-slash-commands --strict-mcp-config --mcp-config '{"mcpServers":{}}' \
-              --settings "$CLAUDE_SETTINGS" --model "$ANTHROPIC_MODEL" "$prompt" || status=$?
-          if [ "$status" -ne 0 ]; then
-            echo "::error::claude-exit-$status"
-            exit "$status"
-          fi
-          mkdir "$RUNNER_TEMP/retro"
-          python3 -I ../trusted/.github/software-factory/control.py claude-text "$RUNNER_TEMP/retro.json" "$RUNNER_TEMP/retro/retro.md"
-          python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/retro/retro.md"
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: retro
-          path: ${{ runner.temp }}/retro/retro.md
-          retention-days: 3
-          if-no-files-found: error
-      - name: Record retro session
-        id: session
-        if: always()
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/session"
-          python3 -I trusted/.github/software-factory/control.py claude-transcript \
-            "$(< "$RUNNER_TEMP/retro.session")" "$RUNNER_TEMP/session/retro.jsonl"
-          python3 -I trusted/.github/software-factory/control.py scan-session "$RUNNER_TEMP/session/retro.jsonl"
-      - if: always() && steps.session.outcome == 'success'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: session-retro
-          path: ${{ runner.temp }}/session/retro.jsonl
-          retention-days: 3
-          if-no-files-found: error
-  retro-publish:
-    needs: [claim, retro]
+  publish-reviews:
+    needs: [claim, round1, round2, round3, handoff]
     if: always() && !cancelled() && needs.claim.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -390,11 +259,6 @@ jobs:
         with:
           pattern: feedback-*
           path: ${{ runner.temp }}/reports
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        if: needs.retro.result == 'success'
-        with:
-          name: retro
-          path: ${{ runner.temp }}/reports/retro
       - name: Comment on the PR or issue
         env:
           GH_TOKEN: ${{ github.token }}
@@ -416,7 +280,7 @@ jobs:
             fi
           done
   report:
-    needs: [gate, claim, round1, round2, round3, round4, handoff]
+    needs: [gate, claim, round1, round2, round3, handoff]
     if: always() && needs.gate.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 5

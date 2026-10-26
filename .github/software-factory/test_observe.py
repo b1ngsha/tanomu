@@ -12,12 +12,12 @@ class ObservationTest(unittest.TestCase):
     def test_successful_delivery_keeps_independent_review_pending(self):
         record = observe.summarize_jobs([
             {"name": "handoff", "status": "completed", "conclusion": "success"},
-            {"name": "retro", "status": "in_progress", "conclusion": None},
+            {"name": "publish-reviews", "status": "in_progress", "conclusion": None},
         ], "implement")
         self.assertEqual(record["delivery"], "success")
         self.assertEqual(record["final_review"], "pending-separate-run")
-        self.assertEqual(record["retro"], "in_progress")
-        self.assertEqual(record["phase"], "retro")
+        self.assertEqual(record["review_comments"], "in_progress")
+        self.assertEqual(record["phase"], "publish-reviews")
 
     def test_candidate_names_and_reason_text_never_enter_metadata(self):
         record = observe.summarize_jobs([
@@ -72,6 +72,24 @@ class ObservationTest(unittest.TestCase):
         self.assertEqual(result['state'], 'in_progress')
         self.assertEqual(result['evidence_state'], 'unavailable-not-proof-never-produced')
         self.assertTrue(all(path.endswith(('per_page=100&page=1', '/runs/123', '/software-factory-implement.yml', '/issues/10', 'per_page=20')) for path in calls))
+        self.assertIsNone(result['current_head'])
+        self.assertIsNone(result['reviewed_head'])
+        run.update(status='completed', conclusion='failure')
+        job_rows = [{'name': 'gate', 'conclusion': 'success'}, {'name': 'claim', 'conclusion': 'success'},
+                    {'name': 'publish-reviews', 'conclusion': 'failure'}]
+        def failed_api(path):
+            return {'jobs': job_rows} if '/jobs?' in path else api(path)
+        result = observe.snapshot(failed_api, 'owner/repo', '123')
+        self.assertEqual(result['findings'], ['round-reviews-not-delivered'])
+        self.assertEqual(result['review_comments'], 'failure')
+        self.assertEqual(result['state'], 'failure')
+        job_rows[1]['conclusion'] = 'failure'
+        self.assertEqual(observe.snapshot(failed_api, 'owner/repo', '123')['findings'], [])
+        job_rows[1]['conclusion'] = 'success'
+        job_rows += [{'name': 'round2 / review', 'conclusion': 'skipped'}] * 97
+        result = observe.snapshot(failed_api, 'owner/repo', '123')
+        self.assertFalse(result['jobs_complete'])
+        self.assertEqual(result['findings'], [])
         run['workflow_id'] = 8
         self.assertIsNone(observe.snapshot(api, "owner/repo", "123"))
 
@@ -106,7 +124,17 @@ class ObservationTest(unittest.TestCase):
             if '/artifacts?' in path:
                 return {"artifacts": []}
             self.fail(path)
-        self.assertEqual(observe.snapshot(api, 'owner/repo', '456')['parent'], '123.2')
+        before = observe.snapshot(api, 'owner/repo', '456')
+        self.assertEqual(before['parent'], '123.2')
+        self.assertEqual(before['current_head'], 'b' * 40)
+        self.assertEqual(before['current_base'], 'a' * 40)
+        pull['head']['sha'], pull['base']['sha'] = 'c' * 40, 'd' * 40
+        after = observe.snapshot(api, 'owner/repo', '456')
+        self.assertEqual((after['current_head'], after['current_base']), ('c' * 40, 'd' * 40))
+        self.assertIsNone(before['reviewed_head'])
+        self.assertIsNone(after['reviewed_head'])
+        self.assertIsNone(after['reviewed_base'])
+        self.assertIn('Reviewed head/base: unknown / unknown', observe.render(after))
         current_attempt = 3
         self.assertIsNone(observe.snapshot(api, 'owner/repo', '456'))
         current_attempt = 2
@@ -115,6 +143,22 @@ class ObservationTest(unittest.TestCase):
         handoff = 'success'
         pull['head']['ref'] = 'feat/11-implement'
         self.assertIsNone(observe.snapshot(api, 'owner/repo', '456'))
+
+    def test_existing_comment_after_300_is_updated_and_lookup_failure_never_posts(self):
+        record = {"repository": "owner/repo", "run_id": 123, "kind": "implement", "issue": 10, "pr": None}
+        marker = '<!-- factory-observation:implement:123 -->'
+        filler = [{"body": marker, "user": {"login": "public", "type": "User"}}] * 100
+        existing = {"id": 6, "body": marker + '\nold', "user": {"login": "github-actions[bot]", "type": "Bot"}}
+        with mock.patch.object(observe, 'get', side_effect=[filler] * 3 + [[existing]]), mock.patch.object(
+                observe, 'render', return_value='status'), mock.patch.object(observe.subprocess, 'run') as call:
+            observe.publish(record)
+            self.assertIn('PATCH', call.call_args.args[0])
+            self.assertIn('repos/owner/repo/issues/comments/6', call.call_args.args[0])
+        with mock.patch.object(observe, 'get', side_effect=[filler] * 3 + [RuntimeError('unavailable')]), mock.patch.object(
+                observe, 'render', return_value='status'), mock.patch.object(observe.subprocess, 'run') as call:
+            with self.assertRaises(RuntimeError):
+                observe.publish(record)
+            call.assert_not_called()
 
     def test_comment_marker_owned_by_bot_and_deduplicated(self):
         record = {"repository": "owner/repo", "run_id": 123, "kind": "implement", "issue": 10, "pr": None}

@@ -29,7 +29,8 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - run: python3 -I -m unittest discover -s .github/software-factory -p 'test_*.py'
+      - run: pnpm test:factory
+      - run: python3 -I .claude/skills/advance-pr-stack/scripts/test_advance.py
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
@@ -46,10 +47,13 @@ jobs:
         with:
           fetch-depth: 0
       - name: Check PR size (max 600 changed lines, see AGENTS.md)
+        shell: bash
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
-          changed=$(git diff --numstat "$BASE"...HEAD -- . ':(exclude)pnpm-lock.yaml' ':(exclude)apps/server/drizzle/meta/**' \
+          # Use event SHAs: the synthetic merge commit can include newer base-branch changes.
+          changed=$(git diff --numstat "$BASE"..."$PR_HEAD" -- . ':(exclude)pnpm-lock.yaml' ':(exclude)apps/server/drizzle/meta/**' \
             | awk '{ total += $1 + $2 } END { print total + 0 }')
           echo "Changed lines, excluding generated files: $changed"
           if [ "$changed" -gt 600 ]; then
@@ -85,6 +89,7 @@ jobs:
           FEISHU_APP_ID: ${{ secrets.FEISHU_APP_ID }}
           FEISHU_APP_SECRET: ${{ secrets.FEISHU_APP_SECRET }}
           SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
+          MASTER_KEY: ${{ secrets.MASTER_KEY }}
           CHAT_PROVIDER_PROTOCOL: ${{ vars.CHAT_PROVIDER_PROTOCOL }}
           CHAT_PROVIDER_BASE_URL: ${{ secrets.CHAT_PROVIDER_BASE_URL }}
           CHAT_PROVIDER_API_KEY: ${{ secrets.CHAT_PROVIDER_API_KEY }}
@@ -94,7 +99,7 @@ jobs:
         run: |
           remote() { ssh -i ~/.ssh/deploy_key "$TARGET" "$@"; }
 
-          app_vars="POSTGRES_PASSWORD FEISHU_APP_ID FEISHU_APP_SECRET SESSION_SECRET CHAT_PROVIDER_PROTOCOL CHAT_PROVIDER_BASE_URL CHAT_PROVIDER_API_KEY CHAT_MODEL CHAT_MODEL_VISION"
+          app_vars="POSTGRES_PASSWORD FEISHU_APP_ID FEISHU_APP_SECRET SESSION_SECRET MASTER_KEY CHAT_PROVIDER_PROTOCOL CHAT_PROVIDER_BASE_URL CHAT_PROVIDER_API_KEY CHAT_MODEL CHAT_MODEL_VISION"
           for name in $app_vars; do
             if [ -z "${!name}" ]; then echo "::error::$name is not set in the production environment"; exit 1; fi
           done

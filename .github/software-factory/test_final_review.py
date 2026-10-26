@@ -74,8 +74,8 @@ class FinalIdentifyTest(TaskDirectory):
                 mock.patch.object(control.subprocess, "check_output", return_value=pages):
             return function("2", event, str(self.output))
 
-    def comment(self, part, total, digest="d" * 16, head=HEAD, user=BOT, prefix=""):
-        marker = f"<!-- tanomu-final-review head={head} digest={digest} part={part}/{total} -->"
+    def comment(self, part, total, digest="d" * 16, head=HEAD, user=BOT, prefix="", inline="none"):
+        marker = f"<!-- tanomu-final-review head={head} digest={digest} part={part}/{total} inline={inline} -->"
         self.comments.append({"user": user, "body": f"{prefix}{marker}\nbody"})
 
     def test_writes_linked_issues_with_trusted_review_requirements(self):
@@ -86,7 +86,8 @@ class FinalIdentifyTest(TaskDirectory):
         self.assertEqual((self.output / "issue-1.md").read_text(), "# Issue #1: Thing\n\nDo it.\n")
         self.assertEqual((self.output / "issue-3.md").read_text(), "# Issue #3: Other\n\n\n")
         self.assertEqual(json.loads((self.output / "identity.json").read_text()),
-                         {"pr": 2, "head": HEAD, "base": BASE, "issues": [1, 3], "run": "123"})
+                         {"pr": 2, "head": HEAD, "base": BASE, "issues": [1, 3], "run": "123",
+                          "summary_format": "compact"})
 
     def test_no_linked_issue_runs_standards_only(self):
         self.pull["body"] = None
@@ -127,12 +128,26 @@ class FinalIdentifyTest(TaskDirectory):
         self.assertEqual(self.identify()["skip"], "true")
         self.assertEqual(self.identify("workflow_dispatch")["skip"], "false")
 
+    def test_complete_summary_waits_for_its_inline_review(self):
+        location = "e" * 16
+        self.comment(1, 1, inline=location)
+        self.assertEqual(self.identify()["skip"], "false")
+        with mock.patch.object(control, "posted_inline", return_value={(HEAD, location)}):
+            self.assertEqual(self.identify()["skip"], "true")
+        with mock.patch.object(control, "posted_inline", return_value=set()):
+            self.assertEqual(self.identify()["skip"], "false")
+
+    def test_legacy_summary_is_recovered_before_assuming_completion(self):
+        self.comments = [{"user": BOT, "body":
+            f"<!-- tanomu-final-review head={HEAD} digest={'d' * 16} part=1/1 -->"}]
+        self.assertEqual(self.identify()["skip"], "false")
+
     def test_final_head_records_bot_markers_only(self):
         self.comment(1, 2)
         self.comment(2, 2, user={"login": "github-actions[bot]", "type": "User"})
         self.identify(function=lambda number, _, directory: control.final_head(number, directory))
         self.assertEqual(json.loads(self.output.read_text()),
-                         {"pr": 2, "head": HEAD, "eligible": True, "posted": [[HEAD, "d" * 16, 1, 2]]})
+                         {"pr": 2, "head": HEAD, "eligible": True, "posted": [[HEAD, "d" * 16, 1, 2, "none"]]})
         # A PR closed or retargeted after its review is recorded, not rejected.
         self.pull.update(state="closed")
         self.pull["base"]["ref"] = "next"
@@ -235,7 +250,7 @@ class FinalCommentsTest(unittest.TestCase):
             preface, counter, chunk = re.fullmatch(r"(.*?)(Part \d+/\d+)\n\n(.*)", rest, re.DOTALL).groups()
             self.assertEqual(counter, f"Part {match[3]}/{match[4]}")
             self.assertIn(f"{REPO}/actions/runs/123", preface)
-            parsed.append(([match[1], match[2], int(match[3]), int(match[4])], preface, chunk))
+            parsed.append(([match[1], match[2], int(match[3]), int(match[4]), match[5]], preface, chunk))
         return parsed
 
     def test_publishes_the_structured_findings_once(self):
@@ -255,7 +270,7 @@ class FinalCommentsTest(unittest.TestCase):
         self.write({"verdict": "approve", "findings": [], "advisory": [finding]})
         parts = self.parts(self.comments())
         self.assertGreater(len(parts), 3)
-        self.assertEqual([marker[2:] for marker, _, _ in parts], [[i, len(parts)] for i in range(1, len(parts) + 1)])
+        self.assertEqual([marker[2:4] for marker, _, _ in parts], [[i, len(parts)] for i in range(1, len(parts) + 1)])
         self.assertEqual("".join(chunk for _, _, chunk in parts),
                          "### Findings\n\n- Advisory — " + finding.replace("@", "@​") + "\n")
         missing = self.parts(self.comments([marker for marker, _, _ in parts if marker[2] not in (2, 3)]))
@@ -367,14 +382,11 @@ class ClaudeResultTest(unittest.TestCase):
         path.write_text(json.dumps(event))
         return str(path)
 
-    def test_reads_native_structured_and_text_results(self):
+    def test_reads_native_structured_results(self):
         filename = self.write({"type": "result", "subtype": "success", "is_error": False,
                                "structured_output": {"findings": [{"blocking": True, "finding": "bug"}]},
                                "result": "Done."})
         self.assertEqual(control.claude_findings(filename), [{"blocking": True, "finding": "bug"}])
-        output = self.directory / "retro.md"
-        control.claude_text(filename, output)
-        self.assertEqual(output.read_text(), "Done.")
 
     def test_rejects_incomplete_or_unstructured_results(self):
         base = {"type": "result", "subtype": "success", "is_error": False}
@@ -391,7 +403,7 @@ class ClaudeResultTest(unittest.TestCase):
             with self.subTest(subtype=subtype), self.assertRaisesRegex(ValueError, f"^{reason}$"):
                 control.claude_result(self.write({"type": "result", "subtype": subtype, "is_error": True}))
 
-    def test_rejects_duplicate_keys_invalid_findings_and_empty_text(self):
+    def test_rejects_duplicate_keys_and_invalid_findings(self):
         path = self.directory / "duplicate.json"
         path.write_text('{"type":"result","subtype":"success","structured_output":{"findings":[],"findings":[]}}')
         with self.assertRaisesRegex(ValueError, "^invalid-claude-result$"):
@@ -399,9 +411,6 @@ class ClaudeResultTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "^invalid-findings$"):
             control.claude_findings(self.write({"type": "result", "subtype": "success", "is_error": False,
                 "structured_output": {"findings": [{"blocking": "yes", "finding": "x"}]}}))
-        with self.assertRaisesRegex(ValueError, "^invalid-result-text$"):
-            control.claude_text(self.write({"type": "result", "subtype": "success", "is_error": False,
-                                            "result": " \n"}), self.directory / "retro.md")
 
     def test_copies_only_a_named_native_transcript(self):
         session = "123e4567-e89b-42d3-a456-426614174000"

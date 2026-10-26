@@ -11,6 +11,8 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import artifacts  # noqa: E402
+import authorization  # noqa: E402
 import control  # noqa: E402
 
 CONTROL = Path(control.__file__).resolve()
@@ -70,18 +72,9 @@ class TaskTest(TaskDirectory):
         self.assertIn("sole spec is the gate snapshot .factory-input/issue.md", spec)
         self.assertNotIn("Check the thing.", standards)
 
-    def test_retro_prompt_inlines_skill_closure(self):
-        self.real_prompts()
-        text = control.prompt("retro", "1")
-        for name in ("prompts/retro.md", "skills/retro/SKILL.md", "skills/writing-for-agents/SKILL.md",
-                     "skills/writing-for-agents/SKILL-MECHANICS.md"):
-            with self.subTest(name=name):
-                self.assertIn((CONTROL.parent / name).read_text(), text)
-        self.assertNotIn("Build the thing.", text)
-
     def test_rejects_unknown_prompt_modes(self):
         self.real_prompts()
-        for mode in ("acceptance", "review", "review-", "review-security"):
+        for mode in ("acceptance", "review", "review-", "review-security", "retro"):
             with self.subTest(mode=mode):
                 self.assertRejects("invalid-mode", control.prompt, mode, "1")
 
@@ -104,10 +97,7 @@ class SkillPinTest(unittest.TestCase):
     files = {
         "LICENSE": "0e7ac423bf2c6e223b7c5b156f8cf72da49d748e56a1641402c31f22ad07dbb5",
         "code-review/SKILL.md": "09eb147f793e4647949edd32dbad278f0554dfb56e0d46b699cd4c2c55bf0357",
-        "retro/SKILL.md": "33fbc28568e3146f20fd908b12998bc0ab30aa4f4c87288199a40793efa94696",
-        "writing-for-agents/SKILL.md": "551adca942227b44192edba88acd4e8db911f0121ce58ad16944ccf6a896a74a",
-        "writing-for-agents/SKILL-MECHANICS.md":
-            "c768e6307c7c10728c401c213f2c4ba71c542127eeb7ad2956aabd15a0fa0059",
+        "pr/SKILL.md": "ab63f1cf78647389edcd386c9427c5dfca27ed2836930c24773ffee834c19bcd",
     }
     skills = CONTROL.parent / "skills"
 
@@ -174,7 +164,7 @@ class ScopeTest(TaskDirectory):
         return path
 
     def scope(self):
-        control.scope("1", self.base)
+        artifacts.scope("1", self.base)
 
     def test_accepts_allowed_modification(self):
         self.write("src/a.ts", "one\nthree\n")
@@ -261,11 +251,11 @@ class ScopeTest(TaskDirectory):
         self.write("src/a.ts", "one\nthree\n")
         for base in ("--output=/tmp/x", "does-not-exist", "0" * 40):
             with self.subTest(base=base):
-                self.assertRejects("invalid-base", control.scope, "1", base)
+                self.assertRejects("invalid-base", artifacts.scope, "1", base)
 
     def test_accepts_symbolic_base(self):
         self.write("src/a.ts", "one\nthree\n")
-        control.scope("1", "main")
+        artifacts.scope("1", "main")
 
 
 def issue(**overrides):
@@ -296,8 +286,8 @@ class GateTest(TaskDirectory):
                       [labeled("labeled", "intruder", "ready-for-agent"),
                        labeled("labeled", OWNER), {"event": "commented"}]]
         self.calls = []
-        self.enterContext(mock.patch.object(control, "api", self.fake_api))
-        self.enterContext(mock.patch.object(control.subprocess, "check_output", self.fake_events))
+        self.enterContext(mock.patch.object(authorization, "api", self.fake_api))
+        self.enterContext(mock.patch.object(authorization.subprocess, "check_output", self.fake_events))
 
     def fake_api(self, path):
         self.calls.append(path)
@@ -314,7 +304,7 @@ class GateTest(TaskDirectory):
         return json.dumps(self.pages).encode()
 
     def gate(self):
-        control.gate("1", str(self.out))
+        authorization.gate("1", str(self.out))
 
     def test_accepts_authorized_issue_and_writes_body(self):
         self.gate()
@@ -365,7 +355,7 @@ class GateTest(TaskDirectory):
     def test_gate_captures_any_current_body_without_manual_config(self):
         self.issue["body"] = "Implement issue ten. Refs #99. bLoCkEd By #2"
         self.gate()
-        captured = control.snapshot("1", str(self.out))
+        captured = authorization.snapshot("1", str(self.out))
         self.assertEqual(captured["blocked_by"], ["2"])
         self.assertEqual((self.out / "issue.md").read_text(), self.issue["body"])
         self.issue["body"] += " changed"
@@ -375,19 +365,19 @@ class GateTest(TaskDirectory):
         self.issue["body"] = "Feature.\r\nBlocked by: #2\r\n"
         self.issue["labels"] = [{"name": n} for n in ("ready-for-agent", "agent:implement")]
         self.pages = [[labeled("labeled", OWNER)]]
-        control.gate("1", str(self.out))
-        control.revalidate("1", str(self.out))
+        authorization.gate("1", str(self.out))
+        authorization.revalidate("1", str(self.out))
         self.issue["labels"] = [{"name": n} for n in ("ready-for-agent", "implementing")]
         self.pages = [[{**labeled("labeled", "github-actions[bot]", "implementing"), "id": 987}]]
-        control.record_claim("1", str(self.out), str(self.root / "claim.json"))
+        authorization.record_claim("1", str(self.out), str(self.root / "claim.json"))
         self.assertEqual((self.out / "issue.md").read_bytes(), self.issue["body"].encode())
 
     def test_issue_ten_needs_no_task_file(self):
-        with mock.patch.object(control, "api", side_effect=lambda path: self.issue if path.endswith("issues/10") else []), \
-                mock.patch.object(control.subprocess, "check_output", return_value=json.dumps(self.pages).encode()):
+        with mock.patch.object(authorization, "api", side_effect=lambda path: self.issue if path.endswith("issues/10") else []), \
+                mock.patch.object(authorization.subprocess, "check_output", return_value=json.dumps(self.pages).encode()):
             self.issue["body"] = "Feature without task JSON. Refs #99."
-            control.gate("10", str(self.out))
-        self.assertEqual(control.snapshot("10", str(self.out))["branch"], "feat/10-implement")
+            authorization.gate("10", str(self.out))
+        self.assertEqual(authorization.snapshot("10", str(self.out))["branch"], "feat/10-implement")
 
     def test_rejects_unfinished_dependency(self):
         for dependency in ({"state": "open", "state_reason": None},
@@ -403,7 +393,7 @@ class GateTest(TaskDirectory):
         self.assertRejects("open-dependency", self.gate)
 
     def test_only_explicit_same_repo_refs_are_dependencies(self):
-        self.assertEqual(control.dependencies(
+        self.assertEqual(authorization.dependencies(
             "Refs #3. blocked BY: #2, #7; Blocked by #4. Blocked by owner/repo#5. "
             "Blocked by https://github.com/x/y/issues/6. bLoCkEd By #2"), ["2", "7", "4"])
 
@@ -423,6 +413,7 @@ class GateTest(TaskDirectory):
 class FeedbackTest(GateTest):
     def setUp(self):
         super().setUp()
+        self.enterContext(mock.patch.object(control, "api", self.fake_api))
         self.enterContext(mock.patch.dict(os.environ, {
             "EVENT_NAME": "issues", "LABEL_NAME": "agent:implement",
             "GITHUB_STEP_SUMMARY": str(self.root / "summary"),
@@ -478,7 +469,7 @@ class FeedbackTest(GateTest):
 
     def test_terminal_report_missing_artifacts_and_safe_check_detail(self):
         jobs = {name: {"result": "skipped", "outputs": {}} for name in
-                ("claim", "handoff", "round1", "round2", "round3", "round4")}
+                ("claim", "handoff", "round1", "round2", "round3")}
         jobs["claim"]["result"] = "success"
         jobs["round1"]["result"] = "failure"
         with mock.patch.dict(os.environ, {"OUTCOMES": json.dumps(jobs)}), mock.patch.object(control.subprocess, "run"), mock.patch.object(control, "status_comment") as comment:
@@ -487,6 +478,19 @@ class FeedbackTest(GateTest):
         self.assertIn("Reason: round-failed", comment.call_args.args[1])
         self.assertIn("check-failed=lint", control.round_status({"verify": {"outputs": {"failed_check": "lint"}}}))
         self.assertNotIn(SECRET, control.round_status({"verify": {"outputs": {"failed_check": SECRET}}}))
+
+    def test_third_round_exhausts_the_shared_budget(self):
+        for outcome, reason in (("checks_failed", "checks-exhausted"),
+                                ("request_changes", "rework-exhausted")):
+            jobs = {name: {"result": "success", "outputs": {}} for name in
+                    ("claim", "round1", "round2", "round3", "handoff")}
+            jobs["handoff"]["result"] = "skipped"
+            jobs["round3"]["outputs"]["outcome"] = outcome
+            with mock.patch.dict(os.environ, {"OUTCOMES": json.dumps(jobs)}), \
+                    mock.patch.object(control.subprocess, "run"), \
+                    mock.patch.object(control, "status_comment") as comment:
+                control.terminal_report("1", str(self.out))
+            self.assertIn(f"Reason: {reason}", comment.call_args.args[1])
 
     def test_round_states_preserve_success_and_explicit_not_started(self):
         jobs = {"implement": {"result": "success"}, "verify": {"result": "success"},
@@ -503,7 +507,7 @@ class FeedbackTest(GateTest):
 class ClaimedTest(GateTest):
     def setUp(self):
         super().setUp()
-        control.gate("1", str(self.out))
+        authorization.gate("1", str(self.out))
         self.issue["labels"] = [{"name": name} for name in ("ready-for-agent", "implementing")]
         self.event = {**labeled("labeled", "github-actions[bot]", "implementing"), "id": 987}
         self.pages = [[labeled("labeled", OWNER)], [self.event]]
@@ -513,15 +517,15 @@ class ClaimedTest(GateTest):
 
     # GateTest's cases also exercise the shared validation against claimed state.
     def gate(self):
-        control.validate_issue("1", claimed=True, captured=control.snapshot("1", str(self.out)))
+        authorization.validate_issue("1", claimed=True, captured=authorization.snapshot("1", str(self.out)))
 
     def test_accepts_authorized_issue_and_writes_body(self):
-        control.record_claim("1", str(self.out), str(self.record))
-        control.claimed("1", str(self.out), str(self.record))
+        authorization.record_claim("1", str(self.out), str(self.record))
+        authorization.claimed("1", str(self.out), str(self.record))
         record = json.loads(self.record.read_text())
         self.assertEqual(record, {"issue": "1", "repository": REPO, "run_id": "123",
                                   "run_attempt": "1", "event_id": 987,
-                                  "snapshot": control.snapshot("1", str(self.out))})
+                                  "snapshot": authorization.snapshot("1", str(self.out))})
 
     def test_rejects_label_without_event_history(self):
         self.pages = [[labeled("labeled", OWNER)]]
@@ -554,9 +558,9 @@ class ClaimedTest(GateTest):
         self.issue["body"] += " changed"
         self.assertRejects("body-changed", control.record_claim, "1", str(self.out), str(self.record))
         self.issue["body"] = original
-        control.record_claim("1", str(self.out), str(self.record))
+        authorization.record_claim("1", str(self.out), str(self.record))
         self.issue["body"] = "Entirely new spec. Blocked by #99"
-        control.claimed("1", str(self.out), str(self.record))
+        authorization.claimed("1", str(self.out), str(self.record))
         self.assertEqual((self.out / "issue.md").read_text(), original)
 
     def test_gate_captures_any_current_body_without_manual_config(self):
@@ -566,7 +570,7 @@ class ClaimedTest(GateTest):
         pass
 
     def test_rejects_stale_run_attempt_repository_issue_and_event(self):
-        control.record_claim("1", str(self.out), str(self.record))
+        authorization.record_claim("1", str(self.out), str(self.record))
         original = self.record.read_text()
         for key, value in (("run_id", "999"), ("run_attempt", "2"), ("repository", "other/repo"),
                            ("issue", "2"), ("event_id", 988)):
@@ -602,21 +606,21 @@ class ScanTest(unittest.TestCase):
 
     def assertRejects(self, reason, content):
         with self.assertRaises(ValueError) as caught:
-            control.scan(self.artifact(content))
+            artifacts.scan(self.artifact(content))
         self.assertEqual(str(caught.exception), reason)
 
     def test_accepts_clean_artifact(self):
-        control.scan(self.artifact("diff --git a/x b/x\n+const task-assessment-for-merged-private = 1\n"
+        artifacts.scan(self.artifact("diff --git a/x b/x\n+const task-assessment-for-merged-private = 1\n"
                                    "+// abc api key handling\n"))
 
     def test_accepts_without_auth_file(self):
         with mock.patch.dict(os.environ):
             del os.environ["FACTORY_AUTH_FILE"]
             with self.assertRaisesRegex(ValueError, "^missing-auth-file$"):
-                control.scan(self.artifact("Zq9/\"opaque+cred"))
-            control.scan(self.artifact("Zq9/\"opaque+cred"), public=True)
+                artifacts.scan(self.artifact("Zq9/\"opaque+cred"))
+            artifacts.scan(self.artifact("Zq9/\"opaque+cred"), public=True)
             with self.assertRaisesRegex(ValueError, "^credential-pattern-in-artifact$"):
-                control.scan(self.artifact(SECRET), public=True)
+                artifacts.scan(self.artifact(SECRET), public=True)
 
     def test_rejects_exact_credential(self):
         self.assertRejects("credential-in-artifact", 'leak Zq9/"opaque+cred here')
@@ -626,7 +630,7 @@ class ScanTest(unittest.TestCase):
         self.assertRejects("credential-in-artifact", event)
 
     def test_ignores_short_values(self):
-        control.scan(self.artifact("abc api"))
+        artifacts.scan(self.artifact("abc api"))
 
     def test_rejects_credential_patterns(self):
         for content in ("ghp_" + "a" * 36, "token=gho_" + "B" * 20, "github_pat_" + "c_" * 15,
@@ -636,33 +640,33 @@ class ScanTest(unittest.TestCase):
                 self.assertRejects("credential-pattern-in-artifact", content)
 
     def test_rejects_oversized_artifact(self):
-        self.assertRejects("artifact-too-large", b"a" * (control.MAX_ARTIFACT_BYTES + 1))
+        self.assertRejects("artifact-too-large", b"a" * (artifacts.MAX_ARTIFACT_BYTES + 1))
 
     def test_accepts_artifact_at_size_limit(self):
-        control.scan(self.artifact(b"a" * control.MAX_ARTIFACT_BYTES))
+        artifacts.scan(self.artifact(b"a" * artifacts.MAX_ARTIFACT_BYTES))
 
     def test_unlimited_scan_accepts_any_size_but_still_finds_credentials(self):
-        large = "检查🙂 é\n" * (control.MAX_ARTIFACT_BYTES // 4)
-        self.assertGreater(len(large.encode()), control.MAX_ARTIFACT_BYTES)
-        control.scan(self.artifact(large), limit=None)
-        control.scan(self.artifact(large), public=True, limit=None)
+        large = "检查🙂 é\n" * (artifacts.MAX_ARTIFACT_BYTES // 4)
+        self.assertGreater(len(large.encode()), artifacts.MAX_ARTIFACT_BYTES)
+        artifacts.scan(self.artifact(large), limit=None)
+        artifacts.scan(self.artifact(large), public=True, limit=None)
         # A leak at the very end of a large artifact is still found.
         for leak, reason in ((SECRET, "credential-pattern-in-artifact"),
                              ('Zq9/"opaque+cred', "credential-in-artifact")):
             for public in (False, True):
                 with self.subTest(reason=reason, public=public), \
                         self.assertRaisesRegex(ValueError, f"^{reason}$"):
-                    control.scan(self.artifact(large + leak), public=public, limit=None)
+                    artifacts.scan(self.artifact(large + leak), public=public, limit=None)
         with mock.patch.dict(os.environ):
             del os.environ["FACTORY_AUTH_FILE"]
             with self.assertRaisesRegex(ValueError, "^missing-auth-file$"):
-                control.scan(self.artifact(large), limit=None)
+                artifacts.scan(self.artifact(large), limit=None)
 
     def test_cli_scan_output_is_private_and_unlimited(self):
         def run(content, env):
             return subprocess.run([sys.executable, "-I", str(CONTROL), "scan-output", self.artifact(content)],
                                   capture_output=True, text=True, env=env)
-        large = "ü" * control.MAX_ARTIFACT_BYTES
+        large = "ü" * artifacts.MAX_ARTIFACT_BYTES
         result = run(large, {**os.environ})
         self.assertEqual((result.returncode, result.stdout, result.stderr), (0, "", ""))
         result = run(large + SECRET, {**os.environ})
@@ -737,26 +741,18 @@ class CommentsTest(unittest.TestCase):
             self.assertIn(self.RUN, document["preface"])
         return documents
 
-    def test_publishes_present_reports_in_round_order_then_retro(self):
+    def test_publishes_present_reports_in_round_order(self):
         self.write("feedback-3/review.json", json.dumps({"findings": [], "advisory": ["Spec: improve naming"]}))
         self.write("feedback-1/review.json", json.dumps({"findings": ["Standards: fix scope"], "advisory": []}))
         self.write("feedback-2/checks.json", '{"command": "pnpm test", "output": "boom"}')
-        self.write("retro/retro.md", "\n  1. Keep  spacing.\n\n")
         documents = self.documents(self.comments())
         self.assertEqual([document["text"] for document in documents], [
             "### Findings\n\n- **Blocking** — Standards: fix scope\n",
-            "### Findings\n\n- Advisory — Spec: improve naming\n",
-            "\n  1. Keep  spacing.\n\n"])
-        for document, label in zip(documents, ("round 1", "round 3", "retro")):
+            "### Findings\n\n- Advisory — Spec: improve naming\n"])
+        for document, label in zip(documents, ("round 1", "round 3")):
             with self.subTest(label=label):
                 self.assertIn(label, document["preface"].lower())
         self.assertNotIn("pnpm test", "".join(document["text"] for document in documents))
-
-    def test_neutralizes_mentions(self):
-        self.write("retro/retro.md", "ping @maintainer and @org/team\n")
-        [body] = self.comments()
-        self.assertNotRegex(body.decode(), r"@(?!\u200b)")
-        self.assertEqual(self.documents([body])[0]["text"], "ping @\u200bmaintainer and @\u200borg/team\n")
 
     def test_no_reports_write_no_comments(self):
         self.assertEqual(self.comments(), [])
@@ -765,9 +761,8 @@ class CommentsTest(unittest.TestCase):
         self.assertEqual(self.comments(), [])
 
     def test_large_unicode_reports_split_within_limit_and_reassemble_exactly(self):
-        review, retro = mixed_text(250_000), mixed_text(40_000)[::-1]
+        review = mixed_text(250_000)
         self.write("feedback-2/review.json", json.dumps({"findings": [], "advisory": [review]}))
-        self.write("retro/retro.md", retro)
         bodies = self.comments()
         self.assertEqual(control.COMMENT_BYTES, 60_000)
         # More than nine parts, so glob order has to keep numeric order.
@@ -776,10 +771,8 @@ class CommentsTest(unittest.TestCase):
             body.decode("utf-8")  # Never splits inside a character.
         documents = self.documents(bodies)
         self.assertEqual([document["text"] for document in documents],
-                         ["### Findings\n\n- Advisory \u2014 " + review.replace("@", "@\u200b") + "\n",
-                          retro.replace("@", "@\u200b")])
+                         ["### Findings\n\n- Advisory \u2014 " + review.replace("@", "@\u200b") + "\n"])
         self.assertGreater(documents[0]["total"], 1)
-        self.assertGreater(documents[1]["total"], 1)
 
     def test_refuses_credentials_anywhere_in_large_reports(self):
         text = mixed_text(30_000)
@@ -788,8 +781,7 @@ class CommentsTest(unittest.TestCase):
         for name, content, reason in (
             ("feedback-1/review.json", json.dumps({"findings": [], "advisory": [straddling]}), "credential-pattern-in-artifact"),
             ("feedback-4/review.json", json.dumps({"findings": [text * 3 + " " + SECRET], "advisory": []}), "credential-pattern-in-artifact"),
-            ("retro/retro.md", text * 3 + "opaque-credential-value", "credential-in-artifact"),
-            ("retro/retro.md", "-----BEGIN PRIVATE KEY-----", "credential-pattern-in-artifact"),
+            ("feedback-2/review.json", json.dumps({"findings": [], "advisory": [text * 3 + "opaque-credential-value"]}), "credential-in-artifact"),
         ):
             with self.subTest(name=name, reason=reason):
                 shutil.rmtree(self.reports, ignore_errors=True)
@@ -804,7 +796,7 @@ class CommentsTest(unittest.TestCase):
         self.assertEqual((result.returncode, result.stderr), (0, ""))
         self.assertEqual(self.documents([path.read_bytes() for path in sorted(self.output.glob("*.md"))])[0]["text"],
                          "### Findings\n\n- **Blocking** — fine\n")
-        self.write("retro/retro.md", f"x {SECRET}")
+        self.write("feedback-1/review.json", json.dumps({"findings": [f"x {SECRET}"], "advisory": []}))
         result = subprocess.run(args, capture_output=True, text=True, env={**os.environ})
         self.assertEqual((result.returncode, result.stderr), (1, "::error::credential-pattern-in-artifact\n"))
         self.assertNotIn(SECRET, result.stdout)
@@ -836,12 +828,11 @@ class RunnerStepTest(unittest.TestCase):
 
     jobs = {"implement": ("software-factory-round.yml", "implement"),
             "review": ("software-factory-round.yml", "review"),
-            "retro": ("software-factory-implement.yml", "retro"),
-            "publish": ("software-factory-implement.yml", "retro-publish")}
+            "publish": ("software-factory-implement.yml", "publish-reviews")}
 
     def run_step(self, job, claude="exit 0", gh="exit 0", select=None, env=None, files=None, setup=None):
-        select = select or {"implement": "Generate bounded candidate", "review": "Independently review verified candidate",
-                            "retro": "Propose improvements from the run"}.get(job, "claude -p")
+        select = select or {"implement": "Generate bounded candidate",
+                            "review": "Independently review verified candidate"}.get(job, "claude -p")
         workflow, name = self.jobs[job]
         directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.directory = directory
@@ -890,7 +881,7 @@ class RunnerStepTest(unittest.TestCase):
         return self.result(structured_output=value)
 
     def test_timeout_is_summarized_and_preserved_without_leaking(self):
-        for job in ("implement", "review", "retro"):
+        for job in ("implement", "review"):
             with self.subTest(job=job):
                 result, summary = self.run_step(job, f"echo {SECRET} >&2\nexec sleep 20")
                 self.assertEqual(result.returncode, 124, result.stderr)
@@ -960,7 +951,7 @@ class RunnerStepTest(unittest.TestCase):
             "reply.json": json.dumps({"type": "result", "subtype": "success", "is_error": False,
                                       "structured_output": {"findings": [finding]}})})
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertGreater((self.directory / "temp/feedback/review.json").stat().st_size, control.MAX_ARTIFACT_BYTES)
+        self.assertGreater((self.directory / "temp/feedback/review.json").stat().st_size, artifacts.MAX_ARTIFACT_BYTES)
 
     def test_review_rejects_old_schema(self):
         result, _ = self.run_step("review", self.reply({"verdict": "approve", "findings": []}))
@@ -968,26 +959,10 @@ class RunnerStepTest(unittest.TestCase):
         self.assertIn("::error::invalid-review", result.stderr)
         self.assertEqual((self.directory / "output").read_text(), "standards=started\nstandards=invalid-output\n")
 
-    def test_retro_writes_scanned_proposals(self):
-        result, _ = self.run_step("retro", self.result(result="Smooth run."))
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.directory / "temp/retro/retro.md").read_text(), "Smooth run.")
-        result, _ = self.run_step("retro", self.result(result=f"see {SECRET}"))
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("::error::credential-in-artifact", result.stderr)
-        self.assertNotIn(SECRET, result.stdout + result.stderr)
-
-    def test_retro_keeps_output_beyond_the_artifact_limit(self):
-        text = "1. 提案 🙂\n" * 100_000
-        result, _ = self.run_step("retro", 'cat "$CALLS/../reply.json"', files={
-            "reply.json": json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": text})})
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.directory / "temp/retro/retro.md").read_text(), text)
-
     def test_sessions_are_native_unmodified_and_scanned(self):
         session_id = "123e4567-e89b-42d3-a456-426614174000"
         for job, names in (("implement", ["implementation"]),
-                           ("review", ["review-standards", "review-spec"]), ("retro", ["retro"])):
+                           ("review", ["review-standards", "review-spec"])):
             with self.subTest(job=job):
                 files = {f"temp/{name}.session": session_id for name in names}
                 source = f"temp/claude-config/projects/factory/{session_id}.jsonl"
@@ -1021,43 +996,42 @@ class RunnerStepTest(unittest.TestCase):
         bodies = self.directory / "bodies"
         return result, [path.read_bytes() for path in sorted(bodies.iterdir())] if bodies.exists() else []
 
-    def test_retro_publish_comments_every_report_on_open_pr_else_issue(self):
-        reports = {"feedback-1/review.json": json.dumps({"findings": ["Standards: bug"], "advisory": []}),
-                   "feedback-2/checks.json": "{}",
-                   "retro/retro.md": "1. **Navigation**: ping @maintainer about src/a.ts.\n"}
+    def test_review_publish_comments_every_report_on_open_pr_else_issue(self):
+        reports = {"feedback-1/review.json": json.dumps({"findings": ["Standards: bug"], "advisory": ["ping @maintainer"]}),
+                   "feedback-2/checks.json": "{}"}
         for pr, target in (("17", ["pr", "comment", "17"]), ("", ["issue", "comment", "6"])):
             with self.subTest(pr=pr):
                 result, bodies = self.publish(reports, pr)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 calls = self.calls("gh")
-                self.assertEqual([call[:2] for call in calls], [["pr", "list"], target[:2], target[:2]])
+                self.assertEqual([call[:2] for call in calls], [["pr", "list"], target[:2]])
                 self.assertTrue(all(call[:3] == target for call in calls[1:]))
-                review, retro = (body.decode() for body in bodies)
-                self.assertIn("Standards: bug", review)
-                self.assertIn("ping @\u200bmaintainer", retro)
+                self.assertEqual(len(bodies), 1)
+                self.assertIn("Standards: bug", bodies[0].decode())
+                self.assertIn("ping @\u200bmaintainer", bodies[0].decode())
 
-    def test_retro_publish_posts_whatever_reports_exist(self):
+    def test_review_publish_posts_whatever_reports_exist(self):
         empty = json.dumps({"findings": [], "advisory": []})
-        for reports, count in (({"retro/retro.md": "Only retro."}, 1),
-                               ({"feedback-1/review.json": empty, "feedback-3/review.json": empty}, 2),
+        for reports, count in (({"feedback-1/review.json": empty, "feedback-3/review.json": empty}, 2),
                                ({"feedback-1/checks.json": "{}"}, 0), ({}, 0)):
             with self.subTest(reports=list(reports)):
                 result, bodies = self.publish(reports, "17")
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(len(bodies), count)
 
-    def test_retro_publish_splits_large_output_in_order(self):
+    def test_review_publish_splits_large_output_in_order(self):
         review = mixed_text(80_000)
-        result, bodies = self.publish({"retro/retro.md": review}, "17")
+        result, bodies = self.publish({"feedback-1/review.json": json.dumps({"findings": [], "advisory": [review]})}, "17")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertGreater(len(bodies), 1)
         self.assertTrue(all(len(body) <= 60_000 for body in bodies))
         chunks = [re.fullmatch(r"(.*?)Part (\d+)/(\d+)\n\n(.*)", body.decode(), re.DOTALL) for body in bodies]
-        self.assertEqual("".join(match[4] for match in chunks), review.replace("@", "@\u200b"))
+        self.assertEqual("".join(match[4] for match in chunks),
+                         ("### Findings\n\n- Advisory \u2014 " + review + "\n").replace("@", "@\u200b"))
 
-    def test_retro_publish_refuses_credentials(self):
-        for reports in ({"retro/retro.md": f"leak {SECRET}\n"},
-                        {"feedback-1/review.json": json.dumps({"findings": [], "advisory": [SECRET]})}):
+    def test_review_publish_refuses_credentials(self):
+        for reports in ({"feedback-1/review.json": json.dumps({"findings": [], "advisory": [SECRET]})},
+                        {"feedback-2/review.json": json.dumps({"findings": [f"leak {SECRET}"], "advisory": []})}):
             with self.subTest(reports=list(reports)):
                 result, bodies = self.publish(reports, "17")
                 self.assertEqual(result.returncode, 1)
@@ -1109,7 +1083,7 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(trigger["workflow_call"].get("secrets"), {
             "AGENT_API_KEY": {"required": True},
         })
-        for name in ("round1", "round2", "round3", "round4"):
+        for name in ("round1", "round2", "round3"):
             with self.subTest(round=name):
                 self.assertEqual(self.implement["jobs"][name].get("secrets"), {
                     "AGENT_API_KEY": "${{ secrets.AGENT_API_KEY }}",
@@ -1125,7 +1099,7 @@ class WorkflowContractTest(unittest.TestCase):
     def test_repairable_outcomes_reach_every_later_round(self):
         jobs = self.implement["jobs"]
         rounds = sorted(name for name in jobs if name.startswith("round"))
-        self.assertEqual(rounds, ["round1", "round2", "round3", "round4"])
+        self.assertEqual(rounds, ["round1", "round2", "round3"])
         for previous, current in zip(rounds, rounds[1:]):
             with self.subTest(round=current):
                 self.assertEqual(jobs[current]["needs"], previous)
@@ -1140,9 +1114,23 @@ class WorkflowContractTest(unittest.TestCase):
         upload = next(index for index, step in enumerate(steps)
                       if step.get("with", {}).get("name") == "checked-${{ inputs.round }}")
         for index, step in enumerate(steps):
-            if re.search(r"pnpm (lint|typecheck|build:admin|test)", step.get("run", "")):
+            if re.search(r"verification.py (lint|typecheck|build:admin|test)", step.get("run", "")):
                 self.assertGreater(index, upload, step["run"])
         self.assertNotIn("secrets", str(self.round["jobs"]["verify"]))
+
+    def test_verification_identity_failure_stops_repair_and_review(self):
+        steps = self.round["jobs"]["verify"]["steps"]
+        reject = next(i for i, step in enumerate(steps) if "verification.py assert" in step.get("run", ""))
+        feedback = next(i for i, step in enumerate(steps) if "control.py diagnose" in step.get("run", ""))
+        self.assertLess(reject, feedback)
+        self.assertNotIn("continue-on-error", steps[reject])
+        self.assertNotIn("if", steps[reject])
+        self.assertIn('"$VERIFICATION_FAILURE"', steps[reject]["run"])
+        self.assertIn("VERIFICATION_FAILURE=", str(steps[:reject]))
+        self.assertEqual(steps[reject]["id"], "integrity")
+        checks = self.round["jobs"]["verify"]["outputs"]["checks"]
+        self.assertIn("steps.integrity.outcome == 'success'", checks)
+        self.assertTrue(checks.endswith("|| '' }}"))
 
     def test_shared_files_contain_no_task_specific_text(self):
         shared = [*(CONTROL.parent / "prompts").glob("*.md"),
@@ -1162,11 +1150,19 @@ class WorkflowContractTest(unittest.TestCase):
         self.assertEqual(downloads(jobs["implement"]), {
             "factory-input", "checked-${{ steps.previous.outputs.round }}",
             "feedback-${{ steps.previous.outputs.round }}"})
-        # Findings reach the PR as retro-publish comments, never through the PR body.
+        # Findings reach the PR as publish-reviews comments, never through the PR body.
         handoff = self.implement["jobs"]["handoff"]
         self.assertEqual(downloads(handoff), {"checked-${{ steps.approved.outputs.round }}", "factory-claim", "factory-input"})
         self.assertNotIn("advisory", str(handoff))
         self.assertNotIn("review.json", str(handoff))
+
+    def test_handoff_uses_trusted_pr_skill_for_the_body(self):
+        step = next(step for step in self.implement["jobs"]["handoff"]["steps"]
+                    if step.get("id") == "pr")
+        self.assertIn('control.py pr-body "$ISSUE" "$ROUND" "$RUNNER_TEMP/pr.md"', step["run"])
+        self.assertEqual(step["env"]["ROUND"], "${{ steps.approved.outputs.round }}")
+        self.assertNotIn("gh pr create", step["run"].split("control.py pr-body")[0])
+        self.assertNotRegex(step["run"], r"printf .*Implements")
 
     def test_handoff_uses_trusted_control_after_patch_with_write_token(self):
         steps = self.implement["jobs"]["handoff"]["steps"]
@@ -1194,23 +1190,21 @@ class WorkflowContractTest(unittest.TestCase):
         generation = self.claude_steps()["implement"]["run"]
         for forbidden in ("--dangerously-skip-permissions", "bypassPermissions"):
             self.assertNotIn(forbidden, canary + generation)
-        self.assertIn("--tools Read,Glob,Grep,Edit,Write,Bash", canary)
+        self.assertIn('agent_runner.py" canary implement 120 --', canary)
         self.assertIn("Use Write to create canary-write", canary)
         self.assertIn("then Edit to replace initial with ok", canary)
         self.assertIn("Use Bash to test that canary-write contains ok", canary)
         self.assertIn('test "$(< "$canary/canary-write")" = ok', canary)
         self.assertIn("test ! -e \"$canary/hook-ran\" && test ! -e \"$canary/mcp-ran\"", canary)
 
-    def test_review_aggregates_and_scans_only_structured_findings(self):
-            run = self.claude_steps()["review"]["run"]
-            self.assertIn('control.py claude-result', run)
-            self.assertIn('control.py scan-output "$REVIEW_OUTPUT"', run)
-            self.assertLess(run.index("control.py claude-result"), run.index("control.py scan-output"))
-            self.assertNotIn("review.md", run)
-            steps = self.round["jobs"]["review"]["steps"]
-            upload = next(step["with"] for step in steps
-                          if step.get("with", {}).get("name") == "feedback-${{ inputs.round }}")
-            self.assertEqual(upload["path"], "${{ runner.temp }}/feedback")
+    def test_review_uses_shared_runner_and_explicit_feedback_artifact(self):
+        run = self.claude_steps()["review"]["run"]
+        self.assertIn('agent_runner.py round 600 -- "$ISSUE"', run)
+        self.assertNotIn("review.md", run)
+        steps = self.round["jobs"]["review"]["steps"]
+        upload = next(step["with"] for step in steps
+                      if step.get("with", {}).get("name") == "feedback-${{ inputs.round }}")
+        self.assertEqual(upload["path"], "${{ runner.temp }}/feedback")
 
     def jobs(self):
         for workflow in (self.implement, self.round):
@@ -1218,33 +1212,23 @@ class WorkflowContractTest(unittest.TestCase):
 
     def claude_steps(self):
             return {name: step for name, job in self.jobs() for step in job.get("steps", [])
-                    if "claude -p" in step.get("run", "")}
+                    if re.search(r"agent_runner.py (implement|round) ", step.get("run", ""))}
 
     def test_model_deadlines(self):
-            steps = self.claude_steps()
-            self.assertEqual(set(steps), {"implement", "review", "retro"})
-            for name, seconds in (("implement", 1500), ("review", 600), ("retro", 600)):
-                with self.subTest(job=name):
-                    self.assertEqual(re.findall(r' (\d+) -- \\\s+claude -p', steps[name]["run"]),
-                                     [str(seconds)])
+        steps = self.claude_steps()
+        self.assertEqual(set(steps), {"implement", "review"})
+        self.assertIn("agent_runner.py implement 1500 --", steps["implement"]["run"])
+        self.assertIn('agent_runner.py round 600 --', steps["review"]["run"])
 
-    def test_review_runs_both_axes_and_aggregates_both_files(self):
-            run = self.claude_steps()["review"]["run"]
-            self.assertIn("for axis in standards spec; do", run)
-            self.assertIn('prompt "review-$axis"', run)
-            self.assertIn('"$RUNNER_TEMP/review-$axis.json" "$RUNNER_TEMP/review-$axis-summary.txt" "review-$axis"', run)
-            self.assertIn('claude-findings "$RUNNER_TEMP/review-$axis.json"', run)
-            self.assertIn('"Standards=$RUNNER_TEMP/review-standards.json" "Spec=$RUNNER_TEMP/review-spec.json"', run)
 
     def test_only_implementation_gets_shell(self):
             modes = {name: re.findall(r"control\.py configure-claude \S+ (\w+)", step["run"])
                      for name, job in self.jobs() for step in job.get("steps", [])
                      if "control.py configure-claude" in step.get("run", "")}
-            self.assertEqual(modes, {"implement": ["implement"], "review": ["review"], "retro": ["retro"]})
-            self.assertIn("--tools Read,Glob,Grep,Edit,Write,Bash", self.claude_steps()["implement"]["run"])
-            for name in ("review", "retro"):
-                self.assertIn("--tools Read,Glob,Grep", self.claude_steps()[name]["run"])
-                self.assertNotIn("Write,Bash", self.claude_steps()[name]["run"])
+            self.assertEqual(modes, {"implement": ["implement"], "review": ["review"]})
+            self.assertIn("agent_runner.py implement", self.claude_steps()["implement"]["run"])
+            self.assertIn("agent_runner.py round", self.claude_steps()["review"]["run"])
+            self.assertNotIn("Write,Bash", self.claude_steps()["review"]["run"])
 
     def test_sessions_are_always_scanned_then_uploaded_for_three_days(self):
         uploads = 0
@@ -1270,7 +1254,7 @@ class WorkflowContractTest(unittest.TestCase):
                         self.assertTrue(path.endswith(".jsonl"), path)
                         self.assertNotIn("*", path)
                     self.assertEqual(step["with"]["retention-days"], 3)
-        self.assertEqual(uploads, 3)
+        self.assertEqual(uploads, 2)
 
     def test_every_factory_artifact_expires_after_three_days(self):
         for name, job in self.jobs():
@@ -1279,42 +1263,19 @@ class WorkflowContractTest(unittest.TestCase):
                     with self.subTest(job=name, artifact=step["with"]["name"]):
                         self.assertEqual(step["with"]["retention-days"], 3)
 
-    def test_retro_reads_the_whole_run_without_write_access(self):
-        retro = self.implement["jobs"]["retro"]
-        self.assertEqual(retro["permissions"], {"contents": "read"})
-        self.assertIn("always()", retro["if"])
-        self.assertIn("needs.claim.result == 'success'", retro["if"])
-        self.assertLessEqual({"claim", "round1", "round2", "round3", "round4", "handoff"}, set(retro["needs"]))
-        downloads = [step["with"] for step in retro["steps"] if "download-artifact" in step.get("uses", "")]
-        self.assertIn({"name": "factory-input", "path": "workspace/.factory-input"}, downloads)
-        # One pattern per download, so a missing kind of artifact cannot hide the others.
-        patterns = [item for item in downloads if "pattern" in item]
-        self.assertEqual(sorted(item["pattern"] for item in patterns), ["checked-*", "feedback-*", "session-*"])
-        for item in patterns:
-            self.assertEqual(item["path"], "workspace/.factory-input/run")
-            self.assertNotIn("merge-multiple", item)
-        steps = [step for step in retro["steps"] if "download-artifact" in step.get("uses", "")
-                 and "pattern" in step["with"]]
-        self.assertTrue(all(step.get("continue-on-error") for step in steps))
-        run = self.claude_steps()["retro"]["run"]
-        self.assertLess(run.index("control.py claude-text"), run.index("control.py scan-output "))
-
-    def test_retro_publish_holds_no_model_secret_and_survives_failed_retro(self):
-        publish = self.implement["jobs"]["retro-publish"]
-        self.assertEqual(set(publish["needs"]), {"claim", "retro"})
+    def test_review_publish_holds_no_model_secret(self):
+        publish = self.implement["jobs"]["publish-reviews"]
+        self.assertEqual(set(publish["needs"]), {"claim", "round1", "round2", "round3", "handoff"})
         self.assertIn("always()", publish["if"])
         self.assertIn("needs.claim.result == 'success'", publish["if"])
-        self.assertNotIn("needs.retro.result", publish["if"])
         self.assertNotIn("secrets", str(publish))
         self.assertNotIn("ANTHROPIC", str(publish))
         self.assertEqual(publish["permissions"], {"contents": "read", "issues": "write", "pull-requests": "write"})
         downloads = [step for step in publish["steps"] if "download-artifact" in step.get("uses", "")]
         self.assertEqual([step["with"] for step in downloads], [
-            {"pattern": "feedback-*", "path": "${{ runner.temp }}/reports"},
-            {"name": "retro", "path": "${{ runner.temp }}/reports/retro"}])
-        # A missing feedback or retro artifact must not stop the other reports from publishing.
+            {"pattern": "feedback-*", "path": "${{ runner.temp }}/reports"}])
+        # A missing feedback artifact must not stop other reports from publishing.
         self.assertTrue(downloads[0].get("continue-on-error"))
-        self.assertTrue(downloads[1].get("continue-on-error") or "needs.retro.result" in downloads[1].get("if", ""))
         run = next(step["run"] for step in publish["steps"] if "gh " in step.get("run", ""))
         self.assertIn('control.py comments "$RUNNER_TEMP/reports"', run)
         self.assertLess(run.index("control.py comments"), run.index("gh "))

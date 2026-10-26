@@ -5,25 +5,29 @@ import {
   replyToPrivateMessages,
   type RecordedMessage,
 } from "@tanomu/core";
-import { createChatModel } from "./chat-model.ts";
+import { createChatBindingStore } from "./chat-binding-store.ts";
+import { createChatModelResolver } from "./chat-model.ts";
 import { loadConfig } from "./config.ts";
 import { createConversationStore } from "./conversation-store.ts";
 import { createDb, runMigrations } from "./db/client.ts";
 import { createFeishu } from "./feishu.ts";
 import { createFeishuOAuth } from "./feishu-oauth.ts";
 import { createHttpApp } from "./http.ts";
+import { createKeyCipher } from "./key-cipher.ts";
 import { createLlmCallLog } from "./llm-call-log.ts";
+import { importChatBinding, createProviderStore } from "./provider-store.ts";
 
 const config = loadConfig();
 const db = createDb(config.DATABASE_URL);
 await runMigrations(db);
+const cipher = createKeyCipher(config.MASTER_KEY);
+await importChatBinding(db, cipher, config);
 
 const feishu = createFeishu(config);
 const deps = {
   store: createConversationStore(db),
   llmCallLog: createLlmCallLog(db),
-  model: createChatModel(config),
-  vision: config.CHAT_MODEL_VISION,
+  resolveChatModel: createChatModelResolver(db, cipher),
   send: feishu.send,
   downloadImage: feishu.downloadImage,
 };
@@ -36,6 +40,8 @@ const batcher = createMessageBatcher<RecordedMessage>({
 const http = createHttpApp({
   oauth: createFeishuOAuth(config),
   sessionSecret: config.SESSION_SECRET,
+  providerStore: createProviderStore(db, cipher),
+  chatBindingStore: createChatBindingStore(db),
 });
 serve({ fetch: http.fetch, port: config.HTTP_PORT });
 
