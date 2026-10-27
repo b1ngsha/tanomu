@@ -77,10 +77,6 @@ main
 
 Adopt it in a clean checkout with `gh stack checkout 117`, then run `gh stack view --short`. Do not run adoption from a worktree containing unrelated uncommitted changes. Before the first merge, confirm that every PR still has the expected base and head, all required CI checks are green, and the incremental diff remains unchanged.
 
-## Deprecated recovery path
-
-`/advance-pr-stack` is deprecated for normal stack operations. It remains available only for a legacy stack that cannot be imported into GitHub, or for a maintainer-directed recovery after `gh stack` stops on a conflict or inconsistent remote history. Run its dry-run first and preserve its journal; it never replaces the official stack metadata. Remove the deprecated skill and its CI regression test after all legacy stacks are migrated and one complete `gh stack sync`/merge cycle has been accepted.
-
 ## Agent review boundary
 
 Stack management and Agent review are independent:
