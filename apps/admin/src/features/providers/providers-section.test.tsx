@@ -152,6 +152,58 @@ describe("Providers", () => {
     expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
+  it("leaves the edit form when the Provider no longer exists", async () => {
+    fetchMock
+      .mockResolvedValueOnce(json([provider]))
+      .mockResolvedValueOnce(json({ error: "provider-not-found" }, 404))
+      .mockResolvedValueOnce(json([]));
+    const user = userEvent.setup();
+    setup();
+    await user.click(await screen.findByRole("button", { name: "编辑 OpenAI" }));
+
+    await user.click(screen.getByRole("button", { name: "保存 Provider" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("正在编辑的 Provider 已不存在");
+    expect(screen.queryByRole("heading", { name: "OpenAI" })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+
+    await user.click(screen.getByRole("button", { name: "返回添加 Provider" }));
+    expect(screen.getByRole("heading", { name: "添加 Provider" })).toBeInTheDocument();
+  });
+
+  it("deletes a Provider and leaves its edit form", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fetchMock
+      .mockResolvedValueOnce(json([provider]))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(json([]));
+    const user = userEvent.setup();
+    setup();
+    await user.click(await screen.findByRole("button", { name: "编辑 OpenAI" }));
+
+    await user.click(screen.getByRole("button", { name: "删除 OpenAI" }));
+    expect(await screen.findByText("尚未配置 Provider。")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "添加 Provider" })).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["an uncertain", new TypeError("connection lost"), "请求结果未知"],
+    ["a missing", json({ error: "provider-not-found" }, 404), "Provider 已不存在"],
+  ])("refreshes the list after %s delete", async (_, outcome, message) => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fetchMock.mockResolvedValueOnce(json([provider]));
+    if (outcome instanceof Error) fetchMock.mockRejectedValueOnce(outcome);
+    else fetchMock.mockResolvedValueOnce(outcome);
+    fetchMock.mockResolvedValueOnce(json([]));
+    const user = userEvent.setup();
+    setup();
+
+    await user.click(await screen.findByRole("button", { name: "删除 OpenAI" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
+    expect(screen.queryByRole("heading", { name: "OpenAI" })).not.toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("confirms deletion and keeps an in-use Provider", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
     fetchMock

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { screen } from "@testing-library/react";
+import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { provider } from "../../../test/fixtures.ts";
@@ -68,6 +68,40 @@ describe("chat Binding", () => {
     expect(model).toHaveValue("new-model");
     expect(screen.getByLabelText("支持图片输入")).toBeChecked();
     expect(screen.getByLabelText("Provider")).toHaveValue(provider.id);
+  });
+
+  it("refreshes the Binding before allowing a repeat after an uncertain save", async () => {
+    fetchMock
+      .mockResolvedValueOnce(json({ chat: binding }))
+      .mockResolvedValueOnce(json([provider]))
+      .mockRejectedValueOnce(new TypeError("connection lost"))
+      .mockResolvedValueOnce(json({ chat: binding }));
+    const user = userEvent.setup();
+    setup();
+
+    await user.click(await screen.findByRole("button", { name: "保存 Binding" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("请求结果未知");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      4,
+      expect.objectContaining({ method: "GET", url: expect.stringMatching(/capabilities$/) }),
+      expect.anything(),
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "保存 Binding" })).toBeEnabled());
+  });
+
+  it("refreshes the Providers when the selected Provider was deleted", async () => {
+    fetchMock
+      .mockResolvedValueOnce(json({ chat: binding }))
+      .mockResolvedValueOnce(json([provider]))
+      .mockResolvedValueOnce(json({ error: "provider-not-found" }, 404))
+      .mockResolvedValueOnce(json([]));
+    const user = userEvent.setup();
+    setup();
+
+    await user.click(await screen.findByRole("button", { name: "保存 Binding" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Provider 已不存在");
+    expect(await screen.findByText(/尚未配置 Provider/)).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
   });
 
   it("disables Binding writes when no Provider is available", async () => {

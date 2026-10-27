@@ -138,9 +138,14 @@ export function Providers() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const unavailable = useAdminWriting() || providers.isError;
   const editing = providers.data?.find((provider) => provider.id === editingId);
+  // Another session deleted it, or a refresh after a failed save no longer lists it.
+  const editingMissing = editingId !== null && providers.data !== undefined && !editing;
 
   function deleteProvider(provider: Provider) {
-    if (window.confirm(`删除 Provider「${provider.name}」？`)) remove.mutate(provider.id);
+    if (!window.confirm(`删除 Provider「${provider.name}」？`)) return;
+    remove.mutate(provider.id, {
+      onSuccess: () => setEditingId((id) => (id === provider.id ? null : id)),
+    });
   }
 
   return (
@@ -215,7 +220,17 @@ export function Providers() {
           </li>
         ))}
       </ul>
-      {providers.data && (
+      {editingMissing && (
+        <div className="mt-6 grid justify-items-start gap-3 rounded-lg border border-border p-5">
+          <p role="alert" className="text-destructive">
+            正在编辑的 Provider 已不存在，列表已刷新。
+          </p>
+          <Button type="button" variant="outline" onClick={() => setEditingId(null)}>
+            返回添加 Provider
+          </Button>
+        </div>
+      )}
+      {providers.data && !editingMissing && (
         <ProviderForm
           key={editing?.id ?? "new"}
           provider={editing ?? null}
