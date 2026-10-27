@@ -93,15 +93,27 @@ round. Passing checks lead to a read-only review along the two `code-review` axe
 each in its own fresh Claude Code session so neither sees the other's conversation:
 Standards (documented repository standards plus the smell baseline) and Spec (the
 captured issue body). Each axis returns native `structured_output` matching
-`{"findings":[{"blocking":bool,"finding":str}]}`. `control.py claude-result` validates
+`{"findings":[{"blocking":bool,"finding":str,"path":str|null,"line":int|null}]}`. Every
+finding carries evidence and a location when one line applies; defects in unchanged code
+are advisory `Pre-existing:` findings unless the spec requires the change to fix them.
+`control.py claude-result` validates
 both native result envelopes again and writes `review.json` with the verdict, the
 blocking findings and the advisory ones, each labelled with its axis and never
 reranked. Only a blocking finding requests changes. Smells are always advisory.
-All findings from every completed round are rendered from `review.json` and published
-as comments after handoff, including earlier rounds that requested changes; no
-second review-Markdown response is generated. Both kinds of repair share one budget
-of three rounds: the initial attempt and two repairs. Repair is not a blind retry: every round is checked again, and only
-the patch bound to passing checks and review is published.
+When an axis reports blocking findings, one fresh read-only verifier checks exactly those
+findings against the cited code and the spec or documented rule. A finding without
+confirmed evidence becomes advisory; a verifier failure fails the round. The verifier
+never searches for more findings. All findings from every completed round are rendered
+from `review.json` and published as comments after handoff, including earlier rounds that
+requested changes; no second review-Markdown response is generated. Both kinds of repair
+share one budget of three rounds: the initial attempt and two repairs. From round two,
+review receives the last reviewed findings and the candidate diff since that round. It
+checks whether earlier blocking findings are resolved and whether the repair introduced a
+problem; resolved and earlier advisory findings are not repeated. A repair after a
+checks-only round has no previous review and uses the full-candidate prompt again. Blocking
+findings name a bug class so the implementer fixes every instance. A repair is not a
+blind retry: every round is checked again, and only the patch bound to passing checks and
+review is published.
 
 Authorization, patch-validation, credential-scan, implementer-error and infrastructure failures
 are not repairable and stop the run, as does a repair round that leaves the patch

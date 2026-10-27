@@ -326,7 +326,8 @@ jobs:
     if: needs.verify.outputs.checks == 'passed'
     runs-on: ubuntu-latest
     environment: agent
-    timeout-minutes: 25
+    # Two axes and, when needed, one blocking-finding verifier have separate budgets.
+    timeout-minutes: 35
     env: *agent-env
     permissions:
       contents: read
@@ -334,6 +335,7 @@ jobs:
       verdict: ${{ steps.review.outputs.verdict }}
       standards: ${{ steps.review.outputs.standards }}
       spec: ${{ steps.review.outputs.spec }}
+      verify: ${{ steps.review.outputs.verify }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -353,14 +355,35 @@ jobs:
         with:
           name: checked-${{ inputs.round }}
           path: ${{ runner.temp }}/checked
+      # A repair needs the last reviewed round, not just the immediately previous checks.
+      - if: inputs.round > 1
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: feedback-*
+          path: ${{ runner.temp }}/previous
+      - if: inputs.round > 1
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: checked-*
+          path: ${{ runner.temp }}/previous
       - name: Apply candidate for independent review
+        id: prepare
         working-directory: candidate
+        env:
+          ROUND: ${{ inputs.round }}
+          BASE: ${{ inputs.base }}
         run: |
           set -euo pipefail
           git apply "$RUNNER_TEMP/checked/candidate.patch"
           rm -rf .factory-input
           cp -R "$RUNNER_TEMP/input" .factory-input
           cp "$RUNNER_TEMP/checked/candidate.patch" .factory-input/
+          repair=false
+          if [ "$ROUND" -gt 1 ]; then
+            repair=$(python3 -I ../trusted/.github/software-factory/control.py repair-context \
+              "$BASE" "$ROUND" "$RUNNER_TEMP/previous" .factory-input | jq -r .repair)
+          fi
+          printf 'repair=%s\n' "$repair" >> "$GITHUB_OUTPUT"
       - name: Install pinned runner
         run: python3 -I trusted/.github/software-factory/agent_runner.py install
       - name: Configure fresh read-only runner
@@ -371,13 +394,14 @@ jobs:
         env:
           ISSUE: ${{ inputs.issue }}
           REVIEW_OUTPUT: ${{ runner.temp }}/feedback/review.json
+          REPAIR: ${{ steps.prepare.outputs.repair }}
         run: |
           set -euo pipefail
           PWD=$(pwd -P)
           export PWD
           mkdir "$RUNNER_TEMP/feedback"
           # Trusted runner validates each fresh axis before starting the next; retains native sessions.
-          python3 -I ../trusted/.github/software-factory/agent_runner.py round 600 -- "$ISSUE"
+          python3 -I ../trusted/.github/software-factory/agent_runner.py round 600 -- "$ISSUE" "${REPAIR:-false}"
           verdict=$(jq -r .verdict "$REVIEW_OUTPUT")
           printf 'verdict=%s\n' "$verdict" >> "$GITHUB_OUTPUT"
       - name: Record sessions
@@ -389,7 +413,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/session"
-          for axis in standards spec; do
+          for axis in standards spec verify; do
             if [ ! -f "$RUNNER_TEMP/review-$axis.session" ]; then continue; fi
             python3 -I trusted/.github/software-factory/control.py claude-transcript \
               "$(< "$RUNNER_TEMP/review-$axis.session")" "$RUNNER_TEMP/session/round$ROUND-review-$axis.jsonl"
@@ -403,6 +427,7 @@ jobs:
           path: |
             ${{ runner.temp }}/session/round${{ inputs.round }}-review-standards.jsonl
             ${{ runner.temp }}/session/round${{ inputs.round }}-review-spec.jsonl
+            ${{ runner.temp }}/session/round${{ inputs.round }}-review-verify.jsonl
           retention-days: 3
           if-no-files-found: error
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
