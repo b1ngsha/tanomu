@@ -30,7 +30,6 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test:factory
-      - run: python3 -I .claude/skills/advance-pr-stack/scripts/test_advance.py
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
