@@ -44,7 +44,37 @@ architecture decisions with first-party guidance for its stack. Sources were rev
 - Give empty, missing, and invalid data distinct meanings where callers need to react differently.
   Preserve the intended distinction between an omitted property, `undefined`, and `null`.
 
+### Vertical whitespace
+
+oxfmt removes leading, trailing, and repeated blank lines but never adds one, so review checks this
+section rather than assuming the formatter has already made declarations readable.
+
+- Separate top-level declarations with one blank line, including a type alias derived from the
+  declaration above it. Consecutive imports, single-line re-exports, and one-line declarations of
+  the same kind may stay grouped.
+- Inside a function, separate logical steps (guard, compute, return) with a blank line. Each
+  paragraph is one piece of logic: an action together with what it causes, or the lines preparing
+  one value. Components, hooks, handlers, and tests follow this rule.
+- In tests, keep an action, the wait for its effect, and assertions about that effect in one
+  paragraph; start the next action in a new paragraph. Setup that only reaches the state under test
+  may stay together. Do not extract a variable just to move an assertion into its own paragraph.
+
 ## Modules, interfaces, and dependencies
+
+### Callers in the same change
+
+Every surface a change adds has a production caller in that change. A test exercises a helper; it
+does not justify shipping it. Splitting a ticket into stacked PRs does not relax this rule.
+
+- MUST introduce an exported symbol, interface member, prop, option, configuration field, or error
+  code together with its first production caller, or defer it to the PR that needs it. Tests, test
+  fixtures, and stories are not callers.
+- A complete, authenticated HTTP route is delivered behavior on its own: clients can call it before
+  its UI exists, so an API PR need not wait for the console PR that consumes it.
+- Remove branches that the module's own invariants make unreachable, and guards that repeat a
+  guarantee an inner boundary already establishes, along with the tests that forced them.
+- Do not build a mechanism ahead of the requested change because a later planned PR will use it.
+  Introduce it with the change that needs it.
 
 - Follow [the architecture's module ownership and dependency direction](ARCHITECTURE.md) when
   placing code or choosing a seam.
@@ -294,6 +324,9 @@ architecture decisions with first-party guidance for its stack. Sources were rev
 - Do validation and database constraints enforce the intended contract at the actual boundary?
 - Can the admin interaction be understood and operated during loading, failure, and keyboard use?
 - Does the evidence exercise the changed contract, and are deployment/recovery requirements explicit?
+- Does every new exported symbol, option, and branch have a production caller or reachable path in
+  this PR, rather than only a test or a later stacked PR?
+- Do blank lines separate top-level declarations and logical steps? oxfmt does not add them.
 
 ## Sources
 

@@ -32,7 +32,9 @@ Small steps: each PR changes **at most 600 lines** (additions + deletions), excl
 
 - Plan the split before writing code. A ticket may span several PRs; each must be mergeable and deployable on its own (CI green, nothing half-wired in production).
 - Earlier PRs reference the ticket with `Refs #N`; the PR that finishes it uses `Closes #N`.
-- Prefer splitting along seams: a prefactor or schema migration first, then the behaviour, then its UI.
+- Prefer splitting along seams: a prefactor or schema migration first, then a vertical slice that
+  ends in a real caller (Provider UI, then Binding UI), not a layer that only later PRs call.
+  See "Callers in the same change" in [CODING_STANDARDS.md](CODING_STANDARDS.md).
 - After merging a PR with stacked children, run `/advance-pr-stack` for the direct child. Dry-run first; the tool retargets the child, recovers a deleted base and rebases descendants without merging or deleting branches.
 
 ## Implementing tickets
