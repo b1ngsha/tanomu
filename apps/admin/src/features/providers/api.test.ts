@@ -17,20 +17,28 @@ describe("Provider API", () => {
     );
   });
 
-  it("omits an empty replacement key but includes a create key", async () => {
-    const bodies: unknown[] = [];
+  it("creates with POST and updates only the patched fields with PATCH", async () => {
+    const requests: { method: string; url: string; body: unknown }[] = [];
     fetchMock.mockImplementation(async (request: Request) => {
-      bodies.push(await request.clone().json());
+      requests.push({ method: request.method, url: request.url, body: await request.json() });
       return json(provider);
     });
 
-    await providerApi.save(provider.id, { ...providerInput, apiKey: "" });
+    await expect(providerApi.create(providerInput)).resolves.toEqual(provider);
 
-    expect(bodies[0]).not.toHaveProperty("apiKey");
+    expect(requests[0]).toEqual({
+      method: "POST",
+      url: "http://localhost:3000/api/providers",
+      body: providerInput,
+    });
 
-    await providerApi.save(null, providerInput);
+    await expect(providerApi.update(provider.id, { name: "Renamed" })).resolves.toEqual(provider);
 
-    expect(bodies[1]).toMatchObject({ apiKey: "secret" });
+    expect(requests[1]).toEqual({
+      method: "PATCH",
+      url: `http://localhost:3000/api/providers/${provider.id}`,
+      body: { name: "Renamed" },
+    });
   });
 
   it("maps known API errors without displaying server-provided text", async () => {
@@ -38,7 +46,7 @@ describe("Provider API", () => {
       json({ error: "duplicate-provider-name", message: "secret upstream detail" }, 409),
     );
 
-    const error = await providerApi.save(null, providerInput).catch((failure: unknown) => failure);
+    const error = await providerApi.create(providerInput).catch((failure: unknown) => failure);
 
     expect(errorMessage(error)).toBe("Provider 名称已存在，请更换名称。");
     expect(needsReconciliation(error)).toBe(false);
@@ -47,7 +55,7 @@ describe("Provider API", () => {
   it("does not replay a failed write and marks its outcome for reconciliation", async () => {
     fetchMock.mockRejectedValue(new TypeError("connection lost"));
 
-    const error = await providerApi.save(null, providerInput).catch((failure: unknown) => failure);
+    const error = await providerApi.create(providerInput).catch((failure: unknown) => failure);
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(needsReconciliation(error)).toBe(true);

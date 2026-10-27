@@ -17,3 +17,5 @@ export const providerView = providerFields.omit({ apiKey: true }).extend({
 });
 export type Provider = z.infer<typeof providerView>;
 export type ProviderInput = z.infer<typeof providerFields>;
+// Omitted fields keep their saved values.
+export type ProviderPatch = Partial<ProviderInput>;

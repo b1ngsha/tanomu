@@ -46,9 +46,13 @@ describe("Providers", () => {
   });
 
   it("keeps edits and the saved key after a rejected update", async () => {
+    let patch: unknown;
     fetchMock
       .mockResolvedValueOnce(json([provider]))
-      .mockResolvedValueOnce(json({ error: "duplicate-provider-name" }, 409));
+      .mockImplementationOnce(async (request: Request) => {
+        patch = await request.json();
+        return json({ error: "duplicate-provider-name" }, 409);
+      });
     const user = userEvent.setup();
     setup();
 
@@ -68,6 +72,7 @@ describe("Providers", () => {
       expect.objectContaining({ method: "PATCH" }),
       expect.anything(),
     );
+    expect(patch).toEqual({ name: "Changed", protocol: "openai", baseUrl: provider.baseUrl });
   });
 
   it("refreshes before allowing a repeat after an uncertain write", async () => {

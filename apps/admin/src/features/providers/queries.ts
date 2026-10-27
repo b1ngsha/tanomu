@@ -1,7 +1,7 @@
 import { QueryClient, queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { needsReconciliation } from "../../lib/http.ts";
 import { providerApi } from "./api.ts";
-import type { ProviderInput } from "./contracts.ts";
+import type { ProviderPatch } from "./contracts.ts";
 
 export const providerQueries = {
   list: () =>
@@ -16,23 +16,28 @@ async function reconcile(client: QueryClient) {
   await client.fetchQuery(providerQueries.list()).catch(() => undefined);
 }
 
-export function useSaveProvider() {
+function useProviderWrite<TData, TVariables>(
+  mutationFn: (variables: TVariables) => Promise<TData>,
+) {
   const client = useQueryClient();
   return useMutation({
     mutationKey: ["admin-write"],
-    mutationFn: ({ id, input }: { id: string | null; input: ProviderInput }) =>
-      providerApi.save(id, input),
+    mutationFn,
     onSuccess: () => reconcile(client),
     onError: (error) => (needsReconciliation(error) ? reconcile(client) : undefined),
   });
 }
 
+export function useCreateProvider() {
+  return useProviderWrite(providerApi.create);
+}
+
+export function useUpdateProvider() {
+  return useProviderWrite(({ id, patch }: { id: string; patch: ProviderPatch }) =>
+    providerApi.update(id, patch),
+  );
+}
+
 export function useDeleteProvider() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationKey: ["admin-write"],
-    mutationFn: providerApi.remove,
-    onSuccess: () => reconcile(client),
-    onError: (error) => (needsReconciliation(error) ? reconcile(client) : undefined),
-  });
+  return useProviderWrite(providerApi.remove);
 }
