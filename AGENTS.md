@@ -33,7 +33,7 @@ Small steps: each PR changes **at most 600 lines** (additions + deletions), excl
 - Plan the split before writing code. A ticket may span several PRs; each must be mergeable and deployable on its own (CI green, nothing half-wired in production).
 - Earlier PRs reference the ticket with `Refs #N`; the PR that finishes it uses `Closes #N`.
 - Prefer splitting along seams: a prefactor or schema migration first, then the behaviour, then its UI.
-- After merging a PR with stacked children, run `/advance-pr-stack` for the direct child. Dry-run first; the tool retargets the child, recovers a deleted base and rebases descendants without merging or deleting branches.
+- Manage stacked PRs with GitHub's official `gh stack` extension. Read [docs/agents/stacked-prs.md](docs/agents/stacked-prs.md) when creating, linking, syncing, rebasing, submitting, or merging a stack. The deprecated `/advance-pr-stack` skill is reserved for legacy-stack recovery.
 
 ## Implementing tickets
 

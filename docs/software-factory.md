@@ -200,6 +200,14 @@ run, remove a stale `implementing` label,
 and resolve any existing branch/PR before deliberately authorizing another run.
 Never blindly rerun a claimed or partially published task.
 
+## Stacked PR management
+
+Stacked PRs use GitHub's official `gh stack` extension. Read [the stacked PR runbook](agents/stacked-prs.md) before creating, linking, syncing, rebasing, submitting, or merging a stack. The Admin Console chain #103 → #104 → #106 → #107 → #109 → #111 → #113 is linked as GitHub stack #117.
+
+The stack manager owns branch ancestry, PR base branches, rebases, pushes and stack merges. It does not grant Agent review any branch or PR mutation authority. Agent review remains an independent advisory workflow: it reads the current merge-base-to-head diff, records freshness for the current PR revision, and publishes comments without retargeting, rebasing, pushing, merging or closing PRs. A stack rebase can therefore require fresh CI and Agent review evidence even when the feature change itself is unchanged.
+
+`/advance-pr-stack` is deprecated for normal operations and remains only as a recovery path for legacy stacks that cannot be imported into GitHub. Its regression test remains in CI until legacy stacks are migrated and one complete official stack synchronization and merge cycle has been accepted. Remove the skill and its test together after that cutover.
+
 ## Agent PR review
 
 Agent review uses `agent-review.yml` and `agent-review-status.yml`. Historical
