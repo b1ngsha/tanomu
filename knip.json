@@ -1,0 +1,15 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "ignore": ["**/test/**", "**/*.test.ts", "**/*.test.tsx"],
+  "workspaces": {
+    "apps/server": {
+      "entry": ["src/main.ts!", "src/db/migrate.ts!", "drizzle.config.ts"]
+    },
+    "apps/admin": {
+      "entry": ["index.html!", "src/main.tsx!", "vite.config.ts"]
+    },
+    "packages/core": {
+      "entry": ["src/index.ts!"]
+    }
+  }
+}

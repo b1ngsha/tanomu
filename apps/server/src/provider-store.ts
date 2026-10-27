@@ -16,9 +16,9 @@ type ChatEnv = Partial<
   >
 >;
 
-export type ProviderProtocol = (typeof providers.$inferSelect)["protocol"];
+type ProviderProtocol = (typeof providers.$inferSelect)["protocol"];
 
-export interface ProviderView {
+interface ProviderView {
   id: string;
   name: string;
   protocol: ProviderProtocol;
@@ -26,14 +26,14 @@ export interface ProviderView {
   apiKeyMask: string;
 }
 
-export interface CreateProviderInput {
+interface CreateProviderInput {
   name: string;
   protocol: ProviderProtocol;
   baseUrl: string;
   apiKey: string;
 }
 
-export interface UpdateProviderInput {
+interface UpdateProviderInput {
   name?: string;
   protocol?: ProviderProtocol;
   baseUrl?: string;

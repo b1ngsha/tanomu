@@ -3,7 +3,7 @@ import type { Db } from "./db/client.ts";
 import { capabilityBindings, providers } from "./db/schema.ts";
 import { StoreError } from "./store-error.ts";
 
-export interface ChatBinding {
+interface ChatBinding {
   providerId: string;
   model: string;
   vision: boolean;

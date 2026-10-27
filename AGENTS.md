@@ -13,7 +13,8 @@ Adding or moving modules, changing dependencies, or locating extension seams: re
 - `pnpm build:admin`: build `apps/admin/dist`; Docker runs this during the image build
 - `pnpm test` / `pnpm test:db`: unit tests / unit tests plus Postgres-backed tests against the `tanomu_test` database in the local compose DB
 - `pnpm test:factory`: software-factory controller and workflow tests
-- `pnpm lint` (oxlint, type-aware), `pnpm format` (oxfmt), `pnpm typecheck`
+- `pnpm lint` (oxlint, type-aware), `pnpm check:unused` (knip production analysis: exports whose only
+  callers are tests fail), `pnpm format` (oxfmt), `pnpm typecheck`
 - `pnpm db:generate`: generate a migration after editing `apps/server/src/db/schema.ts`
 
 Deployment (Volcano Engine, deploy job in CI, backups, rollback): `docs/deployment.md`.
