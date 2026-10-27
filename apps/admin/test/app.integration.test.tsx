@@ -31,7 +31,6 @@ describe("Admin application", () => {
     expect(screen.getByRole("button", { name: "正在退出…" })).toBeDisabled();
 
     await act(async () => finishLogout(new Response(null, { status: 204 })));
-
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/auth/feishu/login"));
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("你好，Ada");
   });
@@ -42,7 +41,6 @@ describe("Admin application", () => {
     fetchMock.mockResolvedValue(json({ error: "Unauthorized" }, 401));
 
     setup();
-
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/auth/feishu/login"));
     expect(await screen.findByRole("alert")).toHaveTextContent("登录已过期");
   });

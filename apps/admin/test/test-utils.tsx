@@ -8,6 +8,7 @@ import { createQueryClient } from "../src/lib/query-client.ts";
 export const fetchMock = vi.fn();
 
 beforeEach(() => vi.stubGlobal("fetch", fetchMock));
+
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -24,13 +25,16 @@ export function json(body: unknown, status = 200) {
 
 export function createQueryWrapper() {
   const client = createQueryClient();
+
   function Wrapper({ children }: { children: ReactNode }) {
     return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
   }
+
   return { client, wrapper: Wrapper };
 }
 
 export function renderWithQuery(ui: ReactElement) {
   const { client, wrapper } = createQueryWrapper();
+
   return { client, ...render(ui, { wrapper }) };
 }

@@ -12,12 +12,14 @@ const errorBody = z.object({
     "invalid-request",
   ]),
 });
+
 const messages = {
   "duplicate-provider-name": "Provider 名称已存在，请更换名称。",
   "provider-in-use": "Provider 正在被使用，请先修改 Binding。",
   "provider-not-found": "Provider 不存在，请刷新配置。",
   "invalid-request": "请求内容无效，请检查输入。",
 };
+
 export function errorMessage(error: unknown): string {
   if (error instanceof HTTPError) {
     if (error.response.status === 401) return "登录已过期，请重新登录。";

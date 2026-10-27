@@ -7,6 +7,7 @@ import { fetchMock, json, renderWithQuery } from "../../../test/test-utils.tsx";
 import { ChatBinding } from "./chat-binding-section.tsx";
 
 const binding = { providerId: provider.id, model: "gpt-5", vision: true };
+
 function setup() {
   return renderWithQuery(<ChatBinding />);
 }
@@ -18,7 +19,6 @@ describe("chat Binding", () => {
     setup();
 
     await user.click(await screen.findByRole("button", { name: "保存 Binding" }));
-
     expect(screen.getByText("尚未绑定 chat Capability。")).toBeInTheDocument();
     expect(await screen.findAllByRole("alert")).toHaveLength(2);
     expect(fetchMock).toHaveBeenCalledTimes(2);
@@ -41,7 +41,6 @@ describe("chat Binding", () => {
     await user.type(screen.getByLabelText("模型"), binding.model);
     await user.click(screen.getByLabelText("支持图片输入"));
     await user.click(screen.getByRole("button", { name: "保存 Binding" }));
-
     expect(await screen.findByRole("status")).toHaveTextContent("chat Binding 已保存");
     expect(requestBody).toEqual(binding);
     expect(screen.getByLabelText("模型")).toHaveValue("gpt-5");
@@ -61,7 +60,6 @@ describe("chat Binding", () => {
 
     await user.click(screen.getByLabelText("支持图片输入"));
     await user.click(screen.getByRole("button", { name: "保存 Binding" }));
-
     expect(await screen.findByRole("alert")).toHaveTextContent("请求内容无效");
     expect(model).toHaveValue("new-model");
     expect(screen.getByLabelText("支持图片输入")).toBeChecked();

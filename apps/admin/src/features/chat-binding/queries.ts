@@ -12,9 +12,11 @@ export const chatBindingQueries = {
 
 export function useSaveBinding() {
   const client = useQueryClient();
+
   async function reconcile() {
     await client.fetchQuery(chatBindingQueries.get()).catch(() => undefined);
   }
+
   return useMutation({
     mutationKey: ["admin-write"],
     mutationFn: chatBindingApi.save,

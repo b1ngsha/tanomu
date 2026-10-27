@@ -14,6 +14,7 @@ import {
 
 const fieldClass =
   "mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50";
+
 const emptyProvider: ProviderInput = { name: "", protocol: "openai", baseUrl: "", apiKey: "" };
 
 function ProviderForm({
@@ -43,18 +44,23 @@ function ProviderForm({
 
   function submit(input: ProviderInput) {
     setNotice("");
+
     const options = {
       onSuccess: () => {
         reset({ ...input, apiKey: "" });
         setNotice("Provider 已保存。");
       },
     };
+
     if (!provider) return create.mutate(input, options);
+
     // An empty replacement key keeps the saved credential.
     const { apiKey, ...fields } = input;
     update.mutate({ id: provider.id, patch: apiKey ? input : fields }, options);
   }
+
   const error = save.error;
+
   return (
     <form
       className="mt-6 grid gap-4 rounded-lg border border-border p-5"

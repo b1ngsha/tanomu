@@ -24,12 +24,10 @@ describe("Provider queries", () => {
     await waitFor(() => expect(result.current.providers.data).toEqual([provider]));
 
     act(() => result.current.save.mutate(providerInput));
-
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     expect(result.current.save.isPending).toBe(true);
 
     await act(async () => finish(json([{ ...provider, name: "Fresh" }])));
-
     await waitFor(() => expect(result.current.save.isPending).toBe(false));
     expect(client.getQueryData(providerQueries.list().queryKey)).toEqual([
       { ...provider, name: "Fresh" },

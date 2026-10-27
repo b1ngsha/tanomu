@@ -17,7 +17,6 @@ describe("Providers", () => {
     setup();
 
     await user.click(await screen.findByRole("button", { name: "保存 Provider" }));
-
     expect(await screen.findAllByRole("alert")).toHaveLength(3);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -34,7 +33,6 @@ describe("Providers", () => {
     await user.type(screen.getByLabelText("API Key"), "secret");
 
     await user.click(screen.getByRole("button", { name: "保存 Provider" }));
-
     expect(await screen.findByRole("status")).toHaveTextContent("Provider 已保存");
     expect(screen.getByRole("heading", { name: "OpenAI" })).toBeInTheDocument();
     expect(screen.getByLabelText("API Key")).toHaveValue("");
@@ -64,7 +62,6 @@ describe("Providers", () => {
     expect(screen.getByPlaceholderText("sk-••••（留空保持不变）")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "保存 Provider" }));
-
     expect(await screen.findByRole("alert")).toHaveTextContent("Provider 名称已存在");
     expect(name).toHaveValue("Changed");
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -87,7 +84,6 @@ describe("Providers", () => {
     await user.type(screen.getByLabelText("API Key"), "secret");
 
     await user.click(screen.getByRole("button", { name: "保存 Provider" }));
-
     expect(await screen.findByRole("alert")).toHaveTextContent("请求结果未知");
     expect(screen.getByRole("heading", { name: "OpenAI" })).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(3);
@@ -106,13 +102,11 @@ describe("Providers", () => {
     await user.type(screen.getByLabelText("API Key"), "secret");
 
     await user.click(screen.getByRole("button", { name: "保存 Provider" }));
-
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "保存 Provider" })).toBeDisabled(),
     );
 
     await user.click(screen.getByRole("button", { name: "重新加载" }));
-
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "保存 Provider" })).toBeEnabled(),
     );
@@ -128,7 +122,6 @@ describe("Providers", () => {
     setup();
 
     await user.click(await screen.findByRole("button", { name: "删除 OpenAI" }));
-
     expect(window.confirm).toHaveBeenCalledWith("删除 Provider「OpenAI」？");
     expect(await screen.findByRole("alert")).toHaveTextContent("Provider 正在被使用");
     expect(screen.getByRole("heading", { name: "OpenAI" })).toBeInTheDocument();
