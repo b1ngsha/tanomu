@@ -7,7 +7,17 @@ import { createQueryClient } from "../src/lib/query-client.ts";
 
 export const fetchMock = vi.fn();
 
-beforeEach(() => vi.stubGlobal("fetch", fetchMock));
+// jsdom lacks ResizeObserver, which Radix Checkbox measures itself with.
+class NoopResizeObserver {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+beforeEach(() => {
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("ResizeObserver", NoopResizeObserver);
+});
 
 afterEach(() => {
   cleanup();

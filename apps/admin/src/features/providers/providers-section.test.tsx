@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { screen, waitFor } from "@testing-library/react";
+import { act, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { provider } from "../../../test/fixtures.ts";
@@ -19,6 +19,10 @@ describe("Providers", () => {
     await user.click(await screen.findByRole("button", { name: "保存 Provider" }));
     expect(await screen.findAllByRole("alert")).toHaveLength(3);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+    const name = screen.getByLabelText("名称");
+    expect(name).toHaveAttribute("aria-invalid", "true");
+    expect(name).toHaveAccessibleDescription("不能为空");
+    expect(name).toHaveFocus();
   });
 
   it("creates a Provider and displays the refreshed server state", async () => {
@@ -36,6 +40,8 @@ describe("Providers", () => {
     expect(await screen.findByRole("status")).toHaveTextContent("Provider 已保存");
     expect(screen.getByRole("heading", { name: "OpenAI" })).toBeInTheDocument();
     expect(screen.getByLabelText("API Key")).toHaveValue("");
+    expect(screen.getByLabelText("名称")).toHaveValue("");
+    expect(screen.getByLabelText("Base URL")).toHaveValue("");
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ method: "POST" }),
@@ -70,6 +76,39 @@ describe("Providers", () => {
       expect.anything(),
     );
     expect(patch).toEqual({ name: "Changed", protocol: "openai", baseUrl: provider.baseUrl });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("locks the edit draft through reconciliation and shows the saved server state", async () => {
+    let finish!: (response: Response) => void;
+    const refreshed = new Promise<Response>((resolve) => {
+      finish = resolve;
+    });
+    fetchMock
+      .mockResolvedValueOnce(json([provider]))
+      .mockResolvedValueOnce(json({ ...provider, name: "Changed" }))
+      .mockImplementationOnce(() => refreshed);
+    const user = userEvent.setup();
+    setup();
+    await user.click(await screen.findByRole("button", { name: "编辑 OpenAI" }));
+    const name = screen.getByLabelText("名称");
+    await user.clear(name);
+    await user.type(name, "Changed");
+
+    await user.click(screen.getByRole("button", { name: "保存 Provider" }));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    expect(name).toBeDisabled();
+    expect(screen.getByLabelText("协议")).toBeDisabled();
+    expect(screen.getByLabelText("API Key")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "取消" })).toBeDisabled();
+
+    await act(async () => finish(json([{ ...provider, name: "Changed" }])));
+
+    expect(await screen.findByRole("status")).toHaveTextContent("Provider 已保存");
+    expect(name).toBeEnabled();
+    expect(name).toHaveValue("Changed");
+    expect(screen.getByRole("heading", { name: "Changed" })).toBeInTheDocument();
   });
 
   it("refreshes before allowing a repeat after an uncertain write", async () => {

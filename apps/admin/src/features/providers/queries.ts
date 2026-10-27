@@ -1,5 +1,6 @@
 import { QueryClient, queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { needsReconciliation } from "../../lib/http.ts";
+import { adminWriteKey } from "../../lib/query-client.ts";
 import { providerApi } from "./api.ts";
 import type { ProviderPatch } from "./contracts.ts";
 
@@ -22,7 +23,7 @@ function useProviderWrite<TData, TVariables>(
   const client = useQueryClient();
 
   return useMutation({
-    mutationKey: ["admin-write"],
+    mutationKey: adminWriteKey,
     mutationFn,
     onSuccess: () => reconcile(client),
     onError: (error) => (needsReconciliation(error) ? reconcile(client) : undefined),

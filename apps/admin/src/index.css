@@ -10,6 +10,8 @@
   --color-ring: #245bdb;
   --color-accent: #eef3fc;
   --color-accent-foreground: #172b4d;
+  --color-muted-foreground: #646a73;
+  --color-destructive: #d83931;
   --radius-md: 0.5rem;
 }
 

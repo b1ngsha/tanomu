@@ -1,6 +1,12 @@
 import { z } from "zod";
 
-const providerProtocol = z.enum(["openai", "anthropic", "google"]);
+export const providerProtocol = z.enum(["openai", "anthropic", "google"]);
+
+export const protocolLabels: Record<z.infer<typeof providerProtocol>, string> = {
+  openai: "OpenAI",
+  anthropic: "Anthropic",
+  google: "Google",
+};
 
 const nonempty = z.string().trim().min(1, "不能为空");
 

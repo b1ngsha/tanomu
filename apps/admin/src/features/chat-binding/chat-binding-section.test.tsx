@@ -22,6 +22,10 @@ describe("chat Binding", () => {
     expect(screen.getByText("尚未绑定 chat Capability。")).toBeInTheDocument();
     expect(await screen.findAllByRole("alert")).toHaveLength(2);
     expect(fetchMock).toHaveBeenCalledTimes(2);
+    const select = screen.getByLabelText("Provider");
+    expect(select).toHaveAttribute("aria-invalid", "true");
+    expect(select).toHaveAccessibleDescription("请选择 Provider");
+    expect(select).toHaveFocus();
   });
 
   it("saves the complete Binding and refreshes its Query", async () => {
