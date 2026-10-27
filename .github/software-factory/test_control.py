@@ -924,7 +924,6 @@ class RunnerStepTest(unittest.TestCase):
         self.assertEqual(len(sessions), 2)
         axes = control.review_axes()
         expected = json.loads(json.dumps(control.FINDINGS_SCHEMA))
-        expected["properties"]["findings"]["items"]["required"] = ["blocking", "finding"]
         ids = []
         for (axis, other), session in zip((("standards", "spec"), ("spec", "standards")), sessions):
             with self.subTest(axis=axis):
@@ -939,11 +938,54 @@ class RunnerStepTest(unittest.TestCase):
                 self.assertTrue((self.directory / f"temp/review-{axis}.json").is_file())
         self.assertNotEqual(*ids)
         self.assertEqual((self.directory / "output").read_text(),
-                         "standards=started\nstandards=passed\nspec=started\nspec=passed\nverdict=approve\n")
+                         "standards=started\nstandards=passed\nspec=started\nspec=passed\nverify=skipped\nverdict=approve\n")
         review = json.loads((self.directory / "temp/feedback/review.json").read_text())
         self.assertEqual(review["advisory"], ["Standards: src/a.ts: possible Mysterious Name",
                                               "Spec: src/a.ts: possible Mysterious Name"])
         self.assertFalse((self.directory / "temp/feedback/review.md").exists())
+
+    def test_blocking_findings_require_a_covering_verifier(self):
+        claude = ('if [[ "$*" == *\'"verdicts"\'* ]]; then\n'
+                  + self.reply({"verdicts": [{"id": 0, "confirmed": False, "evidence": "old code"},
+                                              {"id": 1, "confirmed": True, "evidence": "a.ts:4"}]})
+                  + '\nelse\n' + self.reply({"findings": [{"blocking": True, "finding": "bug",
+                                                           "path": "a.ts", "line": 4}]}) + '\nfi')
+        result, _ = self.run_step("review", claude, files={"candidate/.factory-input/issue.md": "spec"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(self.calls("claude")), 3)
+        review = json.loads((self.directory / "temp/feedback/review.json").read_text())
+        self.assertEqual(review["findings"], ["Spec: bug"])
+        self.assertEqual(len(review["advisory"]), 1)
+        self.assertIn("Unconfirmed by verification: old code", review["advisory"][0])
+        claims = json.loads((self.directory / "candidate/.factory-input/blocking.json").read_text())
+        self.assertEqual([item["id"] for item in claims], [0, 1])
+        self.assertEqual([item["finding"] for item in claims], ["bug", "bug"])
+        self.assertTrue(all(item["path"] == "a.ts" and item["line"] == 4 for item in claims))
+        self.assertIn("verify=started\nverify=passed\n", (self.directory / "output").read_text())
+
+    def test_verifier_failure_fails_closed_without_a_report(self):
+        claude = ('if [[ "$*" == *\'"verdicts"\'* ]]; then exit 3; fi\n'
+                  + self.reply({"findings": [{"blocking": True, "finding": "bug",
+                                              "path": "a.ts", "line": 4}]}))
+        result, _ = self.run_step("review", claude, files={"candidate/.factory-input/issue.md": "spec"})
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("verify=runner-error", (self.directory / "output").read_text())
+        self.assertFalse((self.directory / "temp/feedback/review.json").exists())
+
+    def test_verifier_rejects_incomplete_verdicts(self):
+        claude = ('if [[ "$*" == *\'"verdicts"\'* ]]; then\n'
+                  + self.reply({"verdicts": []}) + '\nelse\n'
+                  + self.reply({"findings": [{"blocking": True, "finding": "bug",
+                                              "path": "a.ts", "line": 4}]}) + '\nfi')
+        result, _ = self.run_step("review", claude, files={"candidate/.factory-input/issue.md": "spec"})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("verify=invalid-output", (self.directory / "output").read_text())
+        self.assertFalse((self.directory / "temp/feedback/review.json").exists())
+
+    def test_repair_round_prompt_receives_incremental_context(self):
+        result, _ = self.run_step("review", self.reply({"findings": []}), env={"REPAIR": "true"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(all("repair.patch" in call[-1] for call in self.calls("claude")))
 
     def test_review_accepts_output_beyond_the_artifact_limit(self):
         finding = {"blocking": False, "finding": "src/a.ts: " + "说明 " * 100_000}
@@ -1143,10 +1185,11 @@ class WorkflowContractTest(unittest.TestCase):
 
     def test_review_repair_and_handoff_use_the_checked_patch(self):
         def downloads(job):
-            return {step["with"]["name"] for step in job["steps"]
+            return {step["with"].get("name", step["with"].get("pattern")) for step in job["steps"]
                     if "download-artifact" in step.get("uses", "")}
         jobs = self.round["jobs"]
-        self.assertEqual(downloads(jobs["review"]), {"factory-input", "checked-${{ inputs.round }}"})
+        self.assertEqual(downloads(jobs["review"]), {
+            "factory-input", "checked-${{ inputs.round }}", "feedback-*", "checked-*"})
         self.assertEqual(downloads(jobs["implement"]), {
             "factory-input", "checked-${{ steps.previous.outputs.round }}",
             "feedback-${{ steps.previous.outputs.round }}"})

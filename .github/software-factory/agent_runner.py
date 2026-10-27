@@ -2,6 +2,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import math
 import os
 from pathlib import Path
@@ -77,6 +78,30 @@ def schema_json(control, mode):
     return schema.getvalue().rstrip("\n")
 
 
+def run_axis(control, axis, phase, prompt, budget, result, schema, mode, temp, verify=False):
+    """A fresh supervised session per phase; invalid output fails before the next phase."""
+    outcome(axis, "started")
+    try:
+        status = invoke(phase, prompt, budget, result, temp / f"{phase}-summary.txt",
+                        schema=schema,
+                        session_file=temp / f"{phase}.session" if mode == "round" else None)
+    except Exception:
+        status = 127
+    if status:
+        failure = "timeout" if status == 124 else "runner-error"
+        outcome(axis, failure)
+        print(f"::error::{axis}-{failure}")
+        return status
+    try:
+        (control.claude_result if verify else control.claude_findings)(result)
+    except Exception as error:
+        outcome(axis, "invalid-output")
+        error_marker(error)
+        return 1
+    outcome(axis, "passed")
+    return 0
+
+
 def single(mode, budget, prompt):
     control = trusted_module("control")
     canary = mode.startswith("canary-")
@@ -100,35 +125,51 @@ def review(mode, budget, *args):
     control = trusted_module("control")  # Lazy to allow control to reuse invoke later.
     prefix = "review" if mode == "round" else "final"
     axes = ("standards", "spec") if mode == "round" or args[-1] == "true" else ("standards",)
+    if mode == "round":
+        if args[-1] not in ("true", "false"):
+            raise ValueError("invalid-agent-runner-input")
     context = args if mode == "round" else args[:2]
     schema = schema_json(control, mode)
     temp = Path(os.environ["RUNNER_TEMP"])
     files = []
     for axis in axes:
         phase = f"{prefix}-{axis}"
-        outcome(axis, "started")
         result = temp / f"{phase}.json"
         try:
             prompt = control.prompt(phase, *context).rstrip("\n")
-            status = invoke(phase, prompt, budget, result, temp / f"{phase}-summary.txt",
-                            schema=schema,
-                            session_file=temp / f"{phase}.session" if mode == "round" else None)
-        except Exception:
-            status = 127
-        if status:
-            failure = "timeout" if status == 124 else "runner-error"
-            outcome(axis, failure)
-            print(f"::error::{axis}-{failure}")
-            return status
-        try:
-            control.claude_findings(result)
         except Exception as error:
-            outcome(axis, "invalid-output")
             error_marker(error)
             return 1
-        outcome(axis, "passed")
+        status = run_axis(control, axis, phase, prompt, budget, result, schema, mode, temp)
+        if status:
+            return status
         files.append((axis.title(), result))
-    control.claude_review_result(files, os.environ["REVIEW_OUTPUT"])
+    confirmed = None
+    if mode == "round":
+        claims = [{"axis": axis, **item} for axis, name in files
+                  for item in control.claude_findings(name) if item["blocking"]]
+        # Identical claims share one verification; their text is the report's deduplication key.
+        claims = list({f"{item['axis']}: {item['finding']}": item for item in claims}.values())
+        claims = [{"id": index, **item} for index, item in enumerate(claims)]
+        claim_texts = [f"{item['axis']}: {item['finding']}" for item in claims]
+        if not claims:
+            outcome("verify", "skipped")
+        else:
+            # Findings reach the verifier as workspace data, never as interpolated prompt text.
+            Path(".factory-input/blocking.json").write_text(json.dumps(claims))
+            result = temp / "review-verify.json"
+            status = run_axis(control, "verify", "review-verify", control.verify_prompt().rstrip("\n"),
+                              budget, result, schema_json(control, "verify"), mode, temp, verify=True)
+            if status:
+                return status
+            try:
+                verdicts = control.claude_verdicts(result, claim_texts)
+            except Exception as error:
+                outcome("verify", "invalid-output")
+                error_marker(error)
+                return 1
+            confirmed = {claim: verdicts[index] for index, claim in enumerate(claim_texts)}
+    control.claude_review_result(files, os.environ["REVIEW_OUTPUT"], confirmed)
     control.scan(os.environ["REVIEW_OUTPUT"], limit=None)
     return 0
 
@@ -155,7 +196,7 @@ def main(args):
             args = [f"canary-{role}", *args]
         mode, budget, separator, *context = args
         if (mode not in ("round", "final", "implement", "canary-implement", "canary-final") or separator != "--"
-                or len(context) != (3 if mode == "final" else 1)
+                or len(context) != (3 if mode == "final" else 2 if mode == "round" else 1)
                 or mode == "final" and context[-1] not in ("true", "false")
                 or not math.isfinite(float(budget)) or float(budget) <= 0):
             raise ValueError("invalid-agent-runner-input")

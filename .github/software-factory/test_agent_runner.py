@@ -193,7 +193,7 @@ class InvocationTest(unittest.TestCase):
                    "GITHUB_OUTPUT": str(root / "output"), "REVIEW_OUTPUT": str(root / "report/review.json")}
             env.pop("FINAL_PATCH", None)
             env.pop("GITHUB_STEP_SUMMARY", None)
-            for mode, context in (("round", ["6"]), ("final", ["b" * 40, "a" * 40, "true"])):
+            for mode, context in (("round", ["6", "false"]), ("final", ["b" * 40, "a" * 40, "true"])):
                 with self.subTest(mode=mode):
                     entry = """import importlib.util, os, signal, sys
 spec = importlib.util.spec_from_file_location('agent_runner', sys.argv[1])
@@ -207,8 +207,8 @@ assert all(signal.getsignal(sig) is handler for sig in (signal.SIGINT, signal.SI
 assert os.environ['CLAUDE_TRANSCRIPT'] == 'stale'
 sys.exit(status)
 """
-                    result = subprocess.run([sys.executable, "-I", "-c", entry, str(script), mode, "2", "--", *context],
-                                            env=env, cwd=root, capture_output=True, text=True, timeout=10)
+                    result = subprocess.run([sys.executable, "-I", "-c", entry, str(script), mode, "5", "--", *context],
+                                            env=env, cwd=root, capture_output=True, text=True, timeout=20)
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertNotIn("CANDIDATE_MODULE_LOADED", result.stdout + result.stderr)
                     self.assertEqual(json.loads((root / "report/review.json").read_text())["verdict"], "approve")
@@ -221,7 +221,9 @@ sys.exit(status)
                 self.assertEqual(Path(transcript).read_text(), "native transcript\n")
                 self.assertFalse((root / f"final-{axis}.session").exists())
             self.assertEqual((root / "output").read_text(),
-                             "standards=started\nstandards=passed\nspec=started\nspec=passed\n" * 2)
+                             "standards=started\nstandards=passed\nspec=started\nspec=passed\n"
+                             "verify=skipped\nstandards=started\nstandards=passed\n"
+                             "spec=started\nspec=passed\n")
 
 
 if __name__ == "__main__":
