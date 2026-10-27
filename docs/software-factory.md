@@ -48,12 +48,15 @@ The 600 changed-line limit excludes `pnpm-lock.yaml` and `apps/server/drizzle/me
 
 Review follows the `code-review` skill vendored, unmodified, from one pinned
 upstream commit (see `skills/README.md`). The factory never fetches skills at run
-time. `control.py` inlines the two sub-agent briefs and standards section into the
-prompts. The regression suite pins the commit and file SHA-256, and checks that
+time. `control.py` inlines the Standards and Spec sub-agent briefs and standards section into the
+prompts; Security has a separate trusted brief. The short repository-owned `REVIEW.md` is
+loaded with every axis. The regression suite pins the commit and file SHA-256, and checks that
 referenced files and skills are vendored. To update, replace the skill from one new
 commit and update both pins. The prompt builder removes only the briefs' upstream
-"Under 400 words." instruction; vendored files stay unchanged. Reviews have no
-response word, character or finding-count cap and include supported judgement calls.
+"Under 400 words." instruction; vendored files stay unchanged. Structured findings have no
+response word, character or finding-count cap and include supported judgement calls. An
+agent-review summary omits additional unlocated `Nit:` findings after five; the complete
+structured report remains authoritative.
 The pinned `pr/SKILL.md` supplies the same PR-body template used by an interactive
 `/pr` session. Trusted handoff fills it with known run facts; the implementation
 agent does not invoke the skill or receive PR permissions.
@@ -237,7 +240,10 @@ are read as data. The review uses the merge-base-to-head diff,
 so later unrelated main commits are excluded. Standards always runs. Spec uses
 this repository's issues referenced by
 `Closes`, `Fixes`, `Resolves` or `Refs #N` in the PR body; their captured bodies supply this review's specification.
-Without a linked issue, Spec is skipped and the report explains why. Each axis runs
+Without a linked issue, Spec is skipped and the report explains why. Security runs only when
+the diff touches `.github/`, `deploy/`, server composition or authentication/session/Provider/
+key-cipher paths, or matching admin authentication paths; it uses the same read-only runner
+and has its own security brief. Each axis runs
 in a fresh session under a 600-second budget and returns schema-validated structured
 output. `control.py` reads the native single-result JSON envelope and validates its
 `structured_output` again. Each native envelope is validated before starting the next axis. The result file stays on the runner and is not uploaded. A timeout, provider error or
@@ -279,7 +285,8 @@ locations that exist in the reviewed diff are kept; the rest stay in the summary
 text. New reviews post a brief summary with blocking/advisory counts and direct readers
 to inline comments for located findings, without repeating their text. Findings
 without a publishable location, including oversized inline comments, remain in full
-in the summary. The presentation format is frozen in the review identity, so recovery
+in the summary except that at most five unlocated `Nit:` findings are shown; omitted
+nits remain in `review.json`. The presentation format is frozen in the review identity, so recovery
 of earlier reports preserves their original rendering and digest. After posting the
 summary, the publisher submits all located findings as one
 PR review with inline comments (`COMMENT`, never an approval or a change request),

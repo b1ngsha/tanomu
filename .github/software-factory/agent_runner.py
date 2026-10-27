@@ -124,10 +124,15 @@ def single(mode, budget, prompt):
 def review(mode, budget, *args):
     control = trusted_module("control")  # Lazy to allow control to reuse invoke later.
     prefix = "review" if mode == "round" else "final"
-    axes = ("standards", "spec") if mode == "round" or args[-1] == "true" else ("standards",)
     if mode == "round":
+        axes = ("standards", "spec")
         if args[-1] not in ("true", "false"):
             raise ValueError("invalid-agent-runner-input")
+    else:
+        if any(value not in ("true", "false") for value in args[-2:]):
+            raise ValueError("invalid-agent-runner-input")
+        axes = tuple(axis for axis, enabled in (("standards", True), ("spec", args[2] == "true"),
+                                                ("security", args[3] == "true")) if enabled)
     context = args if mode == "round" else args[:2]
     schema = schema_json(control, mode)
     temp = Path(os.environ["RUNNER_TEMP"])
@@ -196,8 +201,8 @@ def main(args):
             args = [f"canary-{role}", *args]
         mode, budget, separator, *context = args
         if (mode not in ("round", "final", "implement", "canary-implement", "canary-final") or separator != "--"
-                or len(context) != (3 if mode == "final" else 2 if mode == "round" else 1)
-                or mode == "final" and context[-1] not in ("true", "false")
+                or len(context) != (4 if mode == "final" else 2 if mode == "round" else 1)
+                or mode == "final" and any(value not in ("true", "false") for value in context[-2:])
                 or not math.isfinite(float(budget)) or float(budget) <= 0):
             raise ValueError("invalid-agent-runner-input")
         if mode in ("round", "final"):

@@ -80,7 +80,8 @@ jobs:
     runs-on: ubuntu-latest
     # Holds only the provider key and model; no reviewers, deployable from main only.
     environment: agent
-    timeout-minutes: 25
+    # A sensitive-path review may run Standards, Spec and Security in separate sessions.
+    timeout-minutes: 40
     permissions:
       contents: read
     env:
@@ -126,6 +127,13 @@ jobs:
           # A PR symlink could aim the read tool at the model key; the patch still shows it.
           find . -path ./.git -prune -o -type l -exec rm -f -- {} +
           cp -- "$RUNNER_TEMP"/final-input/* .factory-input/
+      - name: Classify security-sensitive paths
+        id: security
+        working-directory: candidate
+        env:
+          HEAD: ${{ needs.identify.outputs.head }}
+          BASE: ${{ needs.identify.outputs.base }}
+        run: python3 -I ../trusted/.github/software-factory/control.py security-required "$HEAD" "$BASE" >> "$GITHUB_OUTPUT"
       - name: Install pinned runner
         run: python3 -I trusted/.github/software-factory/agent_runner.py install
       - name: Configure fresh read-only runner
@@ -160,6 +168,7 @@ jobs:
           HEAD: ${{ needs.identify.outputs.head }}
           BASE: ${{ needs.identify.outputs.base }}
           SPEC: ${{ needs.identify.outputs.spec }}
+          SECURITY: ${{ steps.security.outputs.required }}
           REVIEW_OUTPUT: ${{ runner.temp }}/final-review/review.json
           # Locations are accepted only where this diff can actually anchor a comment.
           FINAL_PATCH: .factory-input/final.patch
@@ -167,7 +176,7 @@ jobs:
           set -euo pipefail
           mkdir "$RUNNER_TEMP/final-review"
           # Trusted runner fails closed on each axis before spending a call on the next.
-          python3 -I ../trusted/.github/software-factory/agent_runner.py final 600 -- "$BASE" "$HEAD" "$SPEC"
+          python3 -I ../trusted/.github/software-factory/agent_runner.py final 600 -- "$BASE" "$HEAD" "$SPEC" "${SECURITY:-false}"
           cp -- "$RUNNER_TEMP/final-input/identity.json" "$RUNNER_TEMP/final-review/identity.json"
           python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/final-review/identity.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

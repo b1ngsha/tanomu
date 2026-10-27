@@ -128,7 +128,7 @@ class SkillPinTest(unittest.TestCase):
 
     def test_review_axes_parse_from_pinned_skill(self):
         axes = control.review_axes()
-        self.assertEqual(set(axes), {"standards", "spec"})
+        self.assertEqual(set(axes), {"standards", "spec", "security"})
         self.assertTrue(axes["standards"]["brief"].startswith("Report, per file/hunk"))
         self.assertTrue(axes["spec"]["brief"].startswith("Report: (a) requirements"))
         self.assertTrue(axes["standards"]["context"].startswith("### 3. Identify the standards sources"))

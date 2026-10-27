@@ -193,7 +193,7 @@ class InvocationTest(unittest.TestCase):
                    "GITHUB_OUTPUT": str(root / "output"), "REVIEW_OUTPUT": str(root / "report/review.json")}
             env.pop("FINAL_PATCH", None)
             env.pop("GITHUB_STEP_SUMMARY", None)
-            for mode, context in (("round", ["6", "false"]), ("final", ["b" * 40, "a" * 40, "true"])):
+            for mode, context in (("round", ["6", "false"]), ("final", ["b" * 40, "a" * 40, "true", "false"])):
                 with self.subTest(mode=mode):
                     entry = """import importlib.util, os, signal, sys
 spec = importlib.util.spec_from_file_location('agent_runner', sys.argv[1])
