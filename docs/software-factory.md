@@ -302,6 +302,30 @@ merge. Only the structured report and
 its identity are retained for three days. See [ADR 0007](adr/0007-final-review-via-pull-request-target.md).
 The automatic trigger can be validated live only after the workflow reaches main.
 
+### Manual review evaluation
+
+`.github/software-factory/evals.json` records escaped defects and known-clean fixes as
+historical PRs. Each case pins the original head and merge base; the controller rejects
+a moved revision or a different merge base rather than silently evaluating another patch.
+The first pair records #97's status-comment permission defect and its clean fix in #105.
+Expected evidence is a case-insensitive text fragment plus its finding path, not a
+whole-finding snapshot. This is a regression signal, not proof that two findings are
+semantically identical.
+
+Run one case with
+`gh workflow run agent-review-eval.yml --ref main -f case=pr-97-status-comment-permission`.
+Dispatch is manual because every run spends model budget. Identification and model review
+are separate jobs: only identification has read-only GitHub API access, and only review
+has the Provider secret. The historical candidate is inspected as data with the same
+read-only runner and canary as ordinary agent review. No job has write permission or
+publishes comments, reviews, labels or status to the historical PR.
+
+The Actions summary contains only case identity and counts. The scanned artifact retains
+the full findings, pinned identity and score for three days. An escaped-defect case fails
+when expected evidence is missed; a clean case fails on blocking findings while allowing
+advisory findings. Add new escaped defects and clean cases manually, with the fixing PR
+as evidence, rather than scheduling automatic paid scans.
+
 ## Execution observation and recovery
 
 GitHub is the status store: bot-owned issue/PR comments are the durable entry point,

@@ -12,6 +12,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent
 REVIEW_FILE = ROOT.parents[1] / "REVIEW.md"
+EVALS_FILE = ROOT / "evals.json"
 # Isolated mode omits the script directory; only trusted siblings are imported.
 sys.path.insert(0, str(ROOT))
 from authorization import (claimed, claim_identity, dependencies, gate, metadata,  # noqa: E402
@@ -544,6 +545,21 @@ def complete_review(number, head, posted):
     return publication.complete(head, posted, inline)
 
 
+def write_issue_inputs(pull, output):
+    repo = os.environ["GITHUB_REPOSITORY"]
+    issues = []
+    for issue_number in linked_issues(pull["body"]):
+        issue = api(f"repos/{repo}/issues/{issue_number}")
+        # A transferred issue redirects to another repository.
+        require(issue["repository_url"] == f"https://api.github.com/repos/{repo}", "foreign-issue")
+        if "pull_request" in issue:
+            continue
+        (output / f"issue-{issue_number}.md").write_text(
+            f"# Issue #{issue_number}: {issue['title']}\n\n{issue.get('body') or ''}\n")
+        issues.append(issue_number)
+    return issues
+
+
 def final_identify(number, event, directory):
     require(event in ("pull_request_target", "workflow_dispatch"), "invalid-event")
     pull, problems, posted = final_pull(number)
@@ -557,21 +573,79 @@ def final_identify(number, event, directory):
     skip = event == "pull_request_target" and (pull["user"]["type"] == "Bot" or complete)
     output = Path(directory)
     output.mkdir(parents=True, exist_ok=True)
-    issues = []
-    for issue_number in [] if skip else linked_issues(pull["body"]):
-        issue = api(f"repos/{repo}/issues/{issue_number}")
-        # A transferred issue redirects to another repository.
-        require(issue["repository_url"] == f"https://api.github.com/repos/{repo}", "foreign-issue")
-        if "pull_request" in issue:
-            continue
-        (output / f"issue-{issue_number}.md").write_text(
-            f"# Issue #{issue_number}: {issue['title']}\n\n{issue.get('body') or ''}\n")
-        issues.append(issue_number)
+    issues = [] if skip else write_issue_inputs(pull, output)
     (output / "identity.json").write_text(json.dumps(
         {"pr": int(number), "head": head, "base": base, "issues": issues,
          "run": os.environ["GITHUB_RUN_ID"], "summary_format": "compact", "review_name": "Agent review"}))
     return {"pr": number, "head": head, "base": base, "skip": json.dumps(skip),
             "spec": json.dumps(bool(issues))}
+
+def eval_case(case_id):
+    require(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", case_id), "invalid-eval-case")
+    data = json.loads(EVALS_FILE.read_text())
+    cases = data.get("cases", []) if isinstance(data, dict) else []
+    require(isinstance(cases, list), "invalid-eval-case")
+    matching = [item for item in cases if isinstance(item, dict) and item.get("id") == case_id]
+    require(len(matching) == 1, "invalid-eval-case")
+    case = matching[0]
+    expected = case.get("expected")
+    require(type(case.get("pr")) is int and case["pr"] > 0
+            and isinstance(case.get("head"), str) and SHA.fullmatch(case["head"])
+            and isinstance(case.get("base"), str) and SHA.fullmatch(case["base"])
+            and type(case.get("clean")) is bool and isinstance(expected, list) and all(
+                isinstance(item, dict) and set(item) == {"path", "contains"}
+                and isinstance(item["path"], str) and item["path"].strip()
+                and isinstance(item["contains"], str) and item["contains"].strip() for item in expected),
+            "invalid-eval-case")
+    return case
+
+
+def eval_identify(case_id, directory):
+    """Resolve one pinned historical PR as read-only evaluation input; never publish to it."""
+    case = eval_case(case_id)
+    require(os.environ["GITHUB_REF"] == "refs/heads/main", "wrong-ref")
+    repo = os.environ["GITHUB_REPOSITORY"]
+    number, head, base = str(case["pr"]), case["head"], case["base"]
+    pull = api(f"repos/{repo}/pulls/{number}")
+    require(pull.get("merged") is True, "eval-not-merged")
+    require((pull["head"].get("repo") or {}).get("full_name") == repo, "fork-pr")
+    require(pull["base"]["ref"] == "main"
+            and (pull["base"].get("repo") or {}).get("full_name") == repo, "wrong-base")
+    require(pull["head"]["sha"] == head and pull["base"]["sha"] == base, "eval-revision-moved")
+    merge_base = api(f"repos/{repo}/compare/{base}...{head}")["merge_base_commit"]["sha"]
+    require(merge_base == base, "eval-revision-moved")
+    output = Path(directory)
+    output.mkdir(parents=True, exist_ok=True)
+    issues = write_issue_inputs(pull, output)
+    identity = {"pr": case["pr"], "head": head, "base": base, "issues": issues,
+                "run": os.environ["GITHUB_RUN_ID"], "summary_format": "compact",
+                "review_name": "Agent review evaluation"}
+    (output / "identity.json").write_text(json.dumps(identity))
+    fields = ("id", "pr", "head", "base", "fix_pr", "expected", "clean")
+    (output / "case.json").write_text(json.dumps({key: case.get(key) for key in fields}))
+    return {"pr": number, "head": head, "base": base, "spec": json.dumps(bool(issues))}
+
+
+def eval_score(case_file, output, *results):
+    """Score expected evidence against native findings, without printing model text."""
+    case = json.loads(Path(case_file).read_text())
+    require(results, "missing-eval-results")
+    findings = [item for result in results for item in claude_findings(result)]
+    hits = []
+    for index, expected in enumerate(case["expected"]):
+        if any(expected["contains"].casefold() in item["finding"].casefold()
+               and (item.get("path") == expected["path"] or expected["path"] in item["finding"])
+               for item in findings):
+            hits.append(index)
+    blocking = sum(item["blocking"] for item in findings)
+    score = {"case": case["id"], "pr": case["pr"], "expected": len(case["expected"]),
+             "hits": len(hits), "misses": [index for index in range(len(case["expected"]))
+                                           if index not in hits],
+             "findings": len(findings), "blocking": blocking, "clean": case["clean"],
+             "passed": len(hits) == len(case["expected"]) and (not case["clean"] or blocking == 0)}
+    Path(output).write_text(json.dumps(score))
+    return score
+
 
 def final_head(number, filename):
     pull, problems, posted = final_pull(number)
@@ -823,6 +897,13 @@ if __name__ == "__main__":
                 print(f"{key}={value}")
         elif command == "final-resume":
             print(f"resumed={json.dumps(final_resume(*args))}")
+        elif command == "eval-identify":
+            for key, value in eval_identify(*args).items():
+                print(f"{key}={value}")
+        elif command == "eval-score":
+            score = eval_score(*args)
+            print(f"case={score['case']} hits={score['hits']}/{score['expected']} "
+                  f"findings={score['findings']} blocking={score['blocking']}")
         elif command == "final-head":
             final_head(*args)
         elif command == "final-review-status":
