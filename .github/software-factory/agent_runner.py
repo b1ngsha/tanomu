@@ -129,11 +129,12 @@ def review(mode, budget, *args):
         if args[-1] not in ("true", "false"):
             raise ValueError("invalid-agent-runner-input")
     else:
-        if any(value not in ("true", "false") for value in args[-2:]):
+        if any(value not in ("true", "false") for value in args[2:4]):
             raise ValueError("invalid-agent-runner-input")
         axes = tuple(axis for axis, enabled in (("standards", True), ("spec", args[2] == "true"),
                                                 ("security", args[3] == "true")) if enabled)
-    context = args if mode == "round" else args[:2]
+    previous = args[4] if mode == "final" and len(args) == 5 else ""
+    context = args if mode == "round" else (*args[:2], previous)
     schema = schema_json(control, mode)
     temp = Path(os.environ["RUNNER_TEMP"])
     files = []
@@ -201,8 +202,9 @@ def main(args):
             args = [f"canary-{role}", *args]
         mode, budget, separator, *context = args
         if (mode not in ("round", "final", "implement", "canary-implement", "canary-final") or separator != "--"
-                or len(context) != (4 if mode == "final" else 2 if mode == "round" else 1)
-                or mode == "final" and any(value not in ("true", "false") for value in context[-2:])
+                or (mode == "final" and len(context) not in (4, 5))
+                or (mode != "final" and len(context) != (2 if mode == "round" else 1))
+                or mode == "final" and any(value not in ("true", "false") for value in context[2:4])
                 or not math.isfinite(float(budget)) or float(budget) <= 0):
             raise ValueError("invalid-agent-runner-input")
         if mode in ("round", "final"):

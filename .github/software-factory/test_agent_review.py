@@ -39,8 +39,16 @@ class FinalPromptTest(TaskDirectory):
                                "AXIS", "BLOCKING", "DIFF", "ACCEPTANCE"):
                     self.assertNotIn(absent, text)
 
+    def test_incremental_prompt_reviews_only_the_delta_and_carries_blockers(self):
+        full = control.prompt("final-standards", BASE, HEAD)
+        text = control.prompt("final-standards", BASE, HEAD, OTHER)
+        self.assertNotIn("incremental.patch", full)
+        for expected in (OTHER, HEAD, ".factory-input/incremental.patch", ".factory-input/previous-review.json",
+                         "earlier blocking findings", "Do not repeat resolved or advisory findings"):
+            self.assertIn(expected, text)
+
     def test_final_prompts_reject_malformed_revisions(self):
-        for args in ((BASE, "HEAD"), (BASE, HEAD[:-1]), (BASE.upper(), HEAD)):
+        for args in ((BASE, "HEAD"), (BASE, HEAD[:-1]), (BASE.upper(), HEAD), (BASE, HEAD, "HEAD")):
             with self.subTest(args=args):
                 self.assertRejects("invalid-sha", control.prompt, "final-spec", *args)
 
@@ -212,6 +220,16 @@ class PrDiffTest(unittest.TestCase):
                 head = self.commit(".factory-input")
                 self.assertRejects("factory-input-exists", head, self.base)
                 self.assertFalse(outside.exists())
+    def test_incremental_diff_requires_an_ancestor_and_checked_out_head(self):
+        control.pr_diff(self.head, self.base)
+        control.incremental_diff(self.base, self.head)
+        patch = Path(".factory-input/incremental.patch").read_bytes()
+        self.assertIn(b"+pr change", patch)
+        self.assertNotIn(b"later", patch)
+        with self.assertRaisesRegex(ValueError, "invalid-previous-head"):
+            control.incremental_diff(self.git("rev-parse", "main"), self.head)
+        with self.assertRaisesRegex(ValueError, "head-mismatch"):
+            control.incremental_diff(self.base, OTHER)
 
 
 class FinalCommentsTest(unittest.TestCase):

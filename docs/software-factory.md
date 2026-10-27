@@ -264,7 +264,21 @@ completion remains detectable after the artifacts expire. Expired or missing
 artifacts needed for recovery fall back to a fresh review.
 Rerunning the publisher also fills missing parts from its existing report. A moved
 head makes the report stale and prevents publication. Manual dispatch always
-requests a fresh review.
+requests a fresh review. When an earlier report exists, manual dispatch first tries
+an incremental re-review. Only bot-owned receipts nominate candidates: the trusted
+controller recovers the artifact from its original trusted run, validates the
+PR, reviewed head, run id and publication digest, scans the report, and requires the
+old head to be an ancestor of the current head. Missing, expired, forged or diverged
+history falls back to a full review without spending a model call on recovery. A
+receipt for the current head also selects a full review rather than skipping it in
+favor of an older report.
+
+An incremental review reads only the old-head-to-current-head delta plus the previous
+findings. It carries forward unresolved blocking findings with current evidence,
+does not repeat resolved or advisory findings, and reports new defects in the delta.
+The full current PR patch still supplies inline-comment locations and security-path
+classification. Publication identity and stale-head checks continue to bind the new
+report to the current head; automatic entry never uses incremental recovery.
 
 `agent-review-status.yml` separately checks the current PR head on open, synchronize,
 reopen and Ready for review. It reuses the bot-owned summary and inline receipts to

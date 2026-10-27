@@ -28,8 +28,8 @@ class FinalRunnerStepTest(unittest.TestCase):
     run_step, calls, uploaded = base.RunnerStepTest.run_step, base.RunnerStepTest.calls, base.RunnerStepTest.uploaded
     reply = base.RunnerStepTest.reply
 
-    def review(self, claude, spec="true", security="false"):
-        env = {"HEAD": HEAD, "BASE": BASE, "SPEC": spec, "SECURITY": security,
+    def review(self, claude, spec="true", security="false", previous=""):
+        env = {"HEAD": HEAD, "BASE": BASE, "SPEC": spec, "SECURITY": security, "PREVIOUS": previous,
                "ANTHROPIC_MODEL": "deepseek-flash",
                "CLAUDE_SETTINGS": "settings.json", "FINAL_PATCH": ".factory-input/final.patch"}
         files = {"temp/final-input/identity.json": '{"run":"42"}',
@@ -68,6 +68,14 @@ class FinalRunnerStepTest(unittest.TestCase):
                 self.assertEqual(review, {"verdict": "request_changes", "advisory": [], "inline": [], "findings": [
                     f"{axis.title()}: src/a.ts: breaks AGENTS.md" for axis in axes]})
                 self.assertEqual(json.loads(self.temp("final-review/identity.json").read_text()), {"run": "42"})
+
+    def test_incremental_review_passes_previous_head_to_every_axis(self):
+        previous = "c" * 40
+        result, _ = self.review(self.reply({"findings": []}), previous=previous)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for axis, session in zip(("standards", "spec"), self.calls("claude")):
+            self.assertEqual(session[-1], control.prompt(f"final-{axis}", BASE, HEAD, previous).rstrip("\n"))
+            self.assertIn("incremental.patch", session[-1])
 
     def test_sensitive_paths_add_a_fresh_security_axis(self):
         result, _ = self.review(self.reply({"findings": []}), security="true")
@@ -142,7 +150,7 @@ class FinalRunnerStepTest(unittest.TestCase):
         self.assertEqual(review["inline"], [{"axis": axis, "blocking": True, "finding": "bug",
                                              "path": "src/a.ts", "line": 2} for axis in ("Standards", "Spec")])
 
-    def stage(self, plant=lambda candidate: None):
+    def stage(self, plant=lambda candidate: None, incremental=False):
         env = {}
 
         def setup(directory):
@@ -160,7 +168,11 @@ class FinalRunnerStepTest(unittest.TestCase):
             git(candidate, "add", "-A")
             git(candidate, "commit", "-qm", "head")
             env["HEAD"] = git(candidate, "rev-parse", "HEAD")
+            if incremental:
+                env["PREVIOUS"] = env["BASE"]
         files = {"temp/final-input/identity.json": "{}", "temp/final-input/issue-6.md": "# Issue #6\n"}
+        if incremental:
+            files["temp/final-input/previous-review.json"] = '{"findings":[]}'
         # setup fills env before run_step reads it.
         result, _ = self.run_step("review", select="control.py pr-diff", files=files, setup=setup, env=env)
         return result, self.directory / "candidate"
@@ -175,6 +187,13 @@ class FinalRunnerStepTest(unittest.TestCase):
         self.assertIn("new file mode 120000", patch)
         self.assertEqual([path for path in candidate.rglob("*") if path.is_symlink()], [])
         self.assertEqual((candidate / "a.txt").read_text(), "head\n")
+
+    def test_stage_adds_incremental_patch_and_previous_findings(self):
+        result, candidate = self.stage(incremental=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        inputs = candidate / ".factory-input"
+        self.assertIn("+head", (inputs / "incremental.patch").read_text())
+        self.assertEqual((inputs / "previous-review.json").read_text(), '{"findings":[]}')
 
     def test_stage_rejects_a_planted_factory_input(self):
         def directory(candidate):
@@ -344,7 +363,8 @@ class FinalWorkflowContractTest(unittest.TestCase):
         steps = {step.get("name"): step for step in self.jobs["review"]["steps"]}
         canary, review = steps["Verify candidate configuration is inert"], steps["Review the pull request"]
         self.assertIn('agent_runner.py" canary final 120 --', canary["run"])
-        self.assertIn('agent_runner.py final 600 -- "$BASE" "$HEAD" "$SPEC" "${SECURITY:-false}"', review["run"])
+        self.assertIn('agent_runner.py final 600 -- "$BASE" "$HEAD" "$SPEC" "${SECURITY:-false}" "${PREVIOUS:-}"',
+                      review["run"])
         self.assertIn('cp -- "$RUNNER_TEMP/final-input/identity.json"', review["run"])
         self.assertEqual(canary.get("env", {}), {})  # Both steps inherit the same job-level routing.
         model = "${{ vars.AGENT_MODEL }}"
@@ -358,6 +378,25 @@ class FinalWorkflowContractTest(unittest.TestCase):
                 for prefix in re.findall(r'(\S*)\.github/software-factory/', step.get("run", "")):
                     with self.subTest(job=name, step=step.get("name"), prefix=prefix):
                         self.assertIn(prefix, prefixes[(name, step.get("working-directory"))])
+
+    def test_manual_incremental_context_is_recovered_before_upload_and_staging(self):
+        identify = self.jobs["identify"]
+        self.assertEqual(identify["outputs"]["previous"], "${{ steps.incremental.outputs.previous }}")
+        steps = identify["steps"]
+        incremental = next(step for step in steps if step.get("id") == "incremental")
+        resume = next(step for step in steps if step.get("id") == "resume")
+        upload = next(step for step in steps if step.get("with", {}).get("name") == "final-input")
+        self.assertLess(steps.index(resume), steps.index(incremental))
+        self.assertLess(steps.index(incremental), steps.index(upload))
+        self.assertIn("steps.resume.outputs.resumed != 'true'", incremental["if"])
+        self.assertIn("final-incremental", incremental["run"])
+
+        review_steps = self.jobs["review"]["steps"]
+        stage = next(step for step in review_steps if step.get("name") == "Stage PR diff and issues as data")
+        review = next(step for step in review_steps if step.get("name") == "Review the pull request")
+        self.assertEqual(stage["env"]["PREVIOUS"], "${{ needs.identify.outputs.previous }}")
+        self.assertIn('incremental-diff "$PREVIOUS" "$HEAD"', stage["run"])
+        self.assertEqual(review["env"]["PREVIOUS"], "${{ needs.identify.outputs.previous }}")
 
     def test_artifacts_are_explicit_and_expire_after_three_days(self):
         all_uploads = [step for job in self.jobs.values() for step in job["steps"]
