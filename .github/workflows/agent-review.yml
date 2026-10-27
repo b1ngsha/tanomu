@@ -38,6 +38,7 @@ jobs:
       skip: ${{ steps.identify.outputs.skip }}
       spec: ${{ steps.identify.outputs.spec }}
       resumed: ${{ steps.resume.outputs.resumed }}
+      previous: ${{ steps.incremental.outputs.previous }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -58,6 +59,13 @@ jobs:
         run: |
           python3 -I .github/software-factory/control.py final-resume "$PR" "$EVENT" \
             "$RUNNER_TEMP/final-input" "$RUNNER_TEMP/final-review" >> "$GITHUB_OUTPUT"
+      - id: incremental
+        if: steps.identify.outputs.skip != 'true' && steps.resume.outputs.resumed != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ steps.identify.outputs.pr }}
+          EVENT: ${{ github.event_name }}
+        run: python3 -I .github/software-factory/control.py final-incremental "$PR" "$EVENT" "$RUNNER_TEMP/final-input" >> "$GITHUB_OUTPUT"
       - if: steps.identify.outputs.skip != 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -119,11 +127,15 @@ jobs:
         env:
           HEAD: ${{ needs.identify.outputs.head }}
           BASE: ${{ needs.identify.outputs.base }}
+          PREVIOUS: ${{ needs.identify.outputs.previous }}
         run: |
           set -euo pipefail
           # The PR must not choose where trusted input lands.
           if [ -e .factory-input ] || [ -L .factory-input ]; then echo '::error::factory-input-exists'; exit 1; fi
           python3 -I ../trusted/.github/software-factory/control.py pr-diff "$HEAD" "$BASE"
+          if [ -n "${PREVIOUS:-}" ]; then
+            python3 -I ../trusted/.github/software-factory/control.py incremental-diff "$PREVIOUS" "$HEAD"
+          fi
           # A PR symlink could aim the read tool at the model key; the patch still shows it.
           find . -path ./.git -prune -o -type l -exec rm -f -- {} +
           cp -- "$RUNNER_TEMP"/final-input/* .factory-input/
@@ -169,6 +181,7 @@ jobs:
           BASE: ${{ needs.identify.outputs.base }}
           SPEC: ${{ needs.identify.outputs.spec }}
           SECURITY: ${{ steps.security.outputs.required }}
+          PREVIOUS: ${{ needs.identify.outputs.previous }}
           REVIEW_OUTPUT: ${{ runner.temp }}/final-review/review.json
           # Locations are accepted only where this diff can actually anchor a comment.
           FINAL_PATCH: .factory-input/final.patch
@@ -176,7 +189,7 @@ jobs:
           set -euo pipefail
           mkdir "$RUNNER_TEMP/final-review"
           # Trusted runner fails closed on each axis before spending a call on the next.
-          python3 -I ../trusted/.github/software-factory/agent_runner.py final 600 -- "$BASE" "$HEAD" "$SPEC" "${SECURITY:-false}"
+          python3 -I ../trusted/.github/software-factory/agent_runner.py final 600 -- "$BASE" "$HEAD" "$SPEC" "${SECURITY:-false}" "${PREVIOUS:-}"
           cp -- "$RUNNER_TEMP/final-input/identity.json" "$RUNNER_TEMP/final-review/identity.json"
           python3 -I ../trusted/.github/software-factory/control.py scan-output "$RUNNER_TEMP/final-review/identity.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

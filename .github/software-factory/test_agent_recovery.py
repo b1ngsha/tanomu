@@ -155,13 +155,19 @@ class FinalRecoveryTest(unittest.TestCase):
 
     def test_requires_trusted_workflow_origin(self):
         for field, value in (("workflow_id", 10), ("path", ".github/workflows/evil.yml"),
-                             ("head_branch", "pr-branch"), ("event", "pull_request"),
+                             ("event", "pull_request"),
                              ("repository", {"full_name": "other/repo"}),
                              ("head_repository", {"full_name": "other/repo"})):
             with self.subTest(field=field), mock.patch.dict(self.record, {field: value}):
                 self.assertFalse(self.resume())
                 self.assertFalse(self.output.exists())
         self.record["event"] = "workflow_dispatch"
+        self.assertTrue(self.resume())
+        with mock.patch.dict(self.record, {"head_branch": "pr-branch"}):
+            self.assertFalse(self.resume())
+
+    def test_pull_request_target_recovers_from_its_pr_branch(self):
+        self.record.update(head_branch="docs/caller-and-layout-standards")
         self.assertTrue(self.resume())
 
     def test_missing_expired_and_invalid_archive_fall_back_to_fresh_review(self):
@@ -205,6 +211,101 @@ class FinalRecoveryTest(unittest.TestCase):
                 self.assertFalse(self.resume())
                 self.assertFalse(self.output.exists())
         self.files = original
+
+
+class FinalIncrementalTest(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.input = self.root / "input"
+        self.input.mkdir()
+        self.enterContext(mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": REPO, "GITHUB_RUN_ID": "200"}))
+        os.environ.pop("FACTORY_AUTH_FILE", None)
+        self.identity = {"pr": 2, "head": HEAD, "base": BASE, "issues": [], "run": "100"}
+        self.files = {"identity.json": json.dumps(self.identity),
+                      "review.json": json.dumps({"verdict": "request_changes", "findings": ["Standards: bug"],
+                                                 "advisory": []})}
+        for name, text in self.files.items():
+            (self.root / name).write_text(text)
+        current = self.root / "current.json"
+        current.write_text(json.dumps({"pr": 2, "head": HEAD, "eligible": True, "posted": []}))
+        control.final_comments(self.root, self.root / "identity.json", current, self.root / "comments")
+        body = (self.root / "comments/0001.md").read_text()
+        self.comments = [{"user": BOT, "body": body}]
+        self.current = {**self.identity, "head": OTHER, "run": "200"}
+        (self.input / "identity.json").write_text(json.dumps(self.current))
+        self.record = {"workflow_id": 9, "path": ".github/workflows/final-review.yml",
+                       "head_branch": "main", "event": "workflow_dispatch",
+                       "repository": {"full_name": REPO}, "head_repository": {"full_name": REPO}}
+        self.artifact = {"id": 55, "name": "final-review", "expired": False}
+        self.comparison = {"status": "ahead", "merge_base_commit": {"sha": HEAD}}
+        self.api_calls, self.cli_calls = [], []
+
+    def api(self, path):
+        self.api_calls.append(path)
+        if path.endswith("/actions/runs/100"):
+            return self.record
+        if path.endswith("/actions/workflows/final-review.yml"):
+            return {"id": 9, "path": self.record["path"]}
+        if path.endswith("/artifacts?name=final-review&per_page=100"):
+            return {"artifacts": [self.artifact]}
+        if path.endswith(f"/compare/{HEAD}...{OTHER}"):
+            return self.comparison
+        raise AssertionError(path)
+
+    def cli(self, args, **kwargs):
+        self.cli_calls.append(args)
+        if args[2:4] == ["--paginate", "--slurp"]:
+            return b"[[]]" if "/pulls/" in args[-1] else json.dumps([self.comments]).encode()
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            for name, text in self.files.items():
+                archive.writestr(name, text)
+        return buffer.getvalue()
+
+    def incremental(self, event="workflow_dispatch"):
+        with mock.patch.object(control, "api", side_effect=self.api), \
+                mock.patch.object(control.subprocess, "check_output", side_effect=self.cli):
+            return control.final_incremental("2", event, self.input)
+
+    def test_manual_dispatch_recovers_validated_previous_findings(self):
+        self.assertEqual(self.incremental(), HEAD)
+        self.assertEqual((self.input / "previous-review.json").read_text(), self.files["review.json"])
+        self.assertEqual(json.loads((self.input / "identity.json").read_text()), self.current)
+
+    def test_automatic_review_on_pr_branch_can_be_incremental_baseline(self):
+        self.record.update(event="pull_request_target", head_branch="feat/reviewed-pr")
+        self.assertEqual(self.incremental(), HEAD)
+
+    def test_automatic_entry_never_uses_incremental_recovery(self):
+        self.assertEqual(self.incremental("pull_request_target"), "")
+        self.assertEqual((self.api_calls, self.cli_calls), ([], []))
+
+    def test_current_head_receipt_does_not_select_an_older_report(self):
+        (self.input / "identity.json").write_text(json.dumps({**self.current, "head": HEAD}))
+        self.assertEqual(self.incremental(), "")
+        self.assertEqual(self.api_calls, [])
+        self.assertFalse((self.input / "previous-review.json").exists())
+
+    def test_non_ancestor_or_rebased_previous_head_falls_back_to_full_review(self):
+        for comparison in ({"status": "diverged", "merge_base_commit": {"sha": BASE}},
+                           {"status": "ahead", "merge_base_commit": {"sha": BASE}}):
+            with self.subTest(comparison=comparison):
+                self.comparison = comparison
+                self.assertEqual(self.incremental(), "")
+                self.assertFalse((self.input / "previous-review.json").exists())
+
+    def test_invalid_receipt_artifact_or_digest_falls_back_to_full_review(self):
+        original = self.comments
+        self.comments = [{"user": {"login": "mallory", "type": "User"}, "body": original[0]["body"]}]
+        self.assertEqual(self.incremental(), "")
+        digest = control.FINAL_MARKER.fullmatch(original[0]["body"].split("\n", 1)[0])[2]
+        changed = original[0]["body"].replace(f"digest={digest}", f"digest={'0' * 16}", 1)
+        self.comments = [{"user": BOT, "body": changed}]
+        self.assertEqual(self.incremental(), "")
+        self.comments = original
+        self.artifact["expired"] = True
+        self.assertEqual(self.incremental(), "")
+        self.assertFalse((self.input / "previous-review.json").exists())
 
 
 if __name__ == "__main__":
