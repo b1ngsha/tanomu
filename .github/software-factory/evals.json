@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "pr-97-status-comment-permission",
+      "pr": 97,
+      "head": "dc5335d5cd1cb9d9c3283099e70be1453c77c381",
+      "base": "d3a2979423b6d502fddc282c88f2aa6f988b3218",
+      "fix_pr": 105,
+      "clean": false,
+      "description": "The status job used pull-requests: read while writing PR conversation comments through the Issues API.",
+      "expected": [
+        {
+          "path": ".github/workflows/agent-review-status.yml",
+          "contains": "pull-requests"
+        }
+      ]
+    },
+    {
+      "id": "pr-105-status-comment-permission-fix",
+      "pr": 105,
+      "head": "3c28087593d82c7434155e1304603c03b5212d1a",
+      "base": "d531590d935a0585c2d57ac544e2695a091e6cff",
+      "description": "The escaped permission defect is fixed here; blocking findings are false-positive signals.",
+      "clean": true,
+      "expected": []
+    }
+  ]
+}

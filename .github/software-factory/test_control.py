@@ -830,7 +830,8 @@ class RunnerStepTest(unittest.TestCase):
             "review": ("software-factory-round.yml", "review"),
             "publish": ("software-factory-implement.yml", "publish-reviews")}
 
-    def run_step(self, job, claude="exit 0", gh="exit 0", select=None, env=None, files=None, setup=None):
+    def run_step(self, job, claude="exit 0", gh="exit 0", select=None, env=None, files=None, setup=None,
+                 budget="5"):
         select = select or {"implement": "Generate bounded candidate",
                             "review": "Independently review verified candidate"}.get(job, "claude -p")
         workflow, name = self.jobs[job]
@@ -865,7 +866,7 @@ class RunnerStepTest(unittest.TestCase):
                "CALLS": str(directory / "calls"), "ANTHROPIC_MODEL": "deepseek-flash",
                "CLAUDE_CONFIG_DIR": str(directory / "temp/claude-config"), "CLAUDE_SETTINGS": "settings.json",
                "REVIEW_OUTPUT": str(directory / "temp/feedback/review.json"), **(env or {})}
-        script = re.sub(r' (600|1500) --', ' 1 --', step["run"])
+        script = re.sub(r' (600|1500) --', f' {budget} --', step["run"])
         result = subprocess.run(["bash", "-e", "-c", script], cwd=cwd, env=env,
                                 capture_output=True, text=True, timeout=30)
         return result, (directory / "summary").read_text() if (directory / "summary").exists() else ""
@@ -883,7 +884,7 @@ class RunnerStepTest(unittest.TestCase):
     def test_timeout_is_summarized_and_preserved_without_leaking(self):
         for job in ("implement", "review"):
             with self.subTest(job=job):
-                result, summary = self.run_step(job, f"echo {SECRET} >&2\nexec sleep 20")
+                result, summary = self.run_step(job, f"echo {SECRET} >&2\nexec sleep 20", budget="1")
                 self.assertEqual(result.returncode, 124, result.stderr)
                 self.assertIn('"exit_status": 124', result.stdout)
                 self.assertIn("### Factory Agent run", summary)
