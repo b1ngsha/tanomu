@@ -1,6 +1,6 @@
 # Deployment
 
-tanomu runs on a single Volcano Engine cloud server (cn-shanghai) under Docker Compose. Every push to `main` that passes CI sends the commit's source to the server over SSH (`git archive`, ~50 KB), builds the image there, and restarts the service (the `deploy` job in `.github/workflows/ci.yml`). There is no container registry. The server reaches Docker Hub and npm through the Clash proxy running on it (`127.0.0.1:7890`); cross-border transfers from the GitHub runner are far too slow to ship images (ADR 0006).
+tanomu runs on a single Volcano Engine cloud server (cn-shanghai) under Docker Compose. The production deploy is started manually from the `main` branch after CI passes; the deploy job in `.github/workflows/ci.yml` sends the selected commit's source to the server over SSH (`git archive`, ~50 KB), builds the image there, and restarts the service. There is no container registry. The server reaches Docker Hub and npm through the Clash proxy running on it (`127.0.0.1:7890`); cross-border transfers from the GitHub runner are far too slow to ship images (ADR 0006).
 
 On the server everything lives in `/opt/tanomu`:
 
@@ -145,9 +145,9 @@ Leave it running, then in another terminal run `curl http://localhost:3000/healt
 
 ## Operations
 
-- **Deploy**: merge to `main`. A failed build leaves the running container untouched. After restarting, the job fails if the server doesn't log `tanomu is listening` within 60 s, and prints the last 50 log lines. This log marker in `apps/server/src/main.ts` and the deploy check in `.github/workflows/ci.yml` form one readiness contract; update both when changing it.
-- **Change config or rotate a secret**: update the `production` environment, then re-run the latest deploy job on `main`. This does not support rotating `MASTER_KEY`: changing it makes stored Provider API keys undecryptable; follow the recovery note under [GitHub `production` environment](#3-github-production-environment). Changing `POSTGRES_PASSWORD` also requires `ALTER USER` inside Postgres, as noted there.
-- **Roll back**: re-run the deploy job of an earlier successful run on `main` (it rebuilds that commit on the server). For a quick fix, images from the last week are still on the server: set `TANOMU_IMAGE` in `.env` to `tanomu-server:<git sha>` and run `docker compose up -d`; the next deploy overwrites it.
+- **Deploy**: from the Actions tab, run the `CI` workflow manually with `main` selected. The workflow first runs the checks, then deploys the selected commit. A failed build leaves the running container untouched. After restarting, the job fails if the server doesn't log `tanomu is listening` within 60 s, and prints the last 50 log lines. This log marker in `apps/server/src/main.ts` and the deploy check in `.github/workflows/ci.yml` form one readiness contract; update both when changing it.
+- **Change config or rotate a secret**: update the `production` environment, then manually run the `CI` workflow on `main`. This does not support rotating `MASTER_KEY`: changing it makes stored Provider API keys undecryptable; follow the recovery note under [GitHub `production` environment](#3-github-production-environment). Changing `POSTGRES_PASSWORD` also requires `ALTER USER` inside Postgres, as noted there.
+- **Roll back**: from the Actions tab, re-run the `CI` workflow of an earlier successful run on `main` (it rebuilds that run's commit on the server). For a quick fix, images from the last week are still on the server: set `TANOMU_IMAGE` in `.env` to `tanomu-server:<git sha>` and run `docker compose up -d`; the next deploy overwrites it.
 - **Upgrade Postgres or add a third-party image**: change the image in `deploy/compose.yml`; the server pulls it through the proxy on the next deploy.
 - **Logs**: `docker compose logs -f server`.
 - **Backups**: cron runs `backup.sh` daily at 03:30 server time and keeps 14 days (`KEEP_DAYS`). Backups stay on the server; copying them off-box is not set up yet.
