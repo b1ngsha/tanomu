@@ -28,8 +28,9 @@ class FinalRunnerStepTest(unittest.TestCase):
     run_step, calls, uploaded = base.RunnerStepTest.run_step, base.RunnerStepTest.calls, base.RunnerStepTest.uploaded
     reply = base.RunnerStepTest.reply
 
-    def review(self, claude, spec="true"):
-        env = {"HEAD": HEAD, "BASE": BASE, "SPEC": spec, "ANTHROPIC_MODEL": "deepseek-flash",
+    def review(self, claude, spec="true", security="false"):
+        env = {"HEAD": HEAD, "BASE": BASE, "SPEC": spec, "SECURITY": security,
+               "ANTHROPIC_MODEL": "deepseek-flash",
                "CLAUDE_SETTINGS": "settings.json", "FINAL_PATCH": ".factory-input/final.patch"}
         files = {"temp/final-input/identity.json": '{"run":"42"}',
                  "candidate/.factory-input/identity.json": '{"run":"forged"}',
@@ -67,6 +68,14 @@ class FinalRunnerStepTest(unittest.TestCase):
                 self.assertEqual(review, {"verdict": "request_changes", "advisory": [], "inline": [], "findings": [
                     f"{axis.title()}: src/a.ts: breaks AGENTS.md" for axis in axes]})
                 self.assertEqual(json.loads(self.temp("final-review/identity.json").read_text()), {"run": "42"})
+
+    def test_sensitive_paths_add_a_fresh_security_axis(self):
+        result, _ = self.review(self.reply({"findings": []}), security="true")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        sessions = self.calls("claude")
+        self.assertEqual(len(sessions), 3)
+        self.assertIn(control.review_axes()["security"]["brief"], sessions[-1][-1])
+        self.assertIn("security=started\nsecurity=passed\n", (self.directory / "output").read_text())
 
     def test_failed_axes_fail_without_leaking_or_publishing(self):
         for claude, status, calls in ((f"echo {SECRET} >&2\nexec sleep 20", 124, 1), ("exit 3", 3, 1),
@@ -335,7 +344,7 @@ class FinalWorkflowContractTest(unittest.TestCase):
         steps = {step.get("name"): step for step in self.jobs["review"]["steps"]}
         canary, review = steps["Verify candidate configuration is inert"], steps["Review the pull request"]
         self.assertIn('agent_runner.py" canary final 120 --', canary["run"])
-        self.assertIn('agent_runner.py final 600 -- "$BASE" "$HEAD" "$SPEC"', review["run"])
+        self.assertIn('agent_runner.py final 600 -- "$BASE" "$HEAD" "$SPEC" "${SECURITY:-false}"', review["run"])
         self.assertIn('cp -- "$RUNNER_TEMP/final-input/identity.json"', review["run"])
         self.assertEqual(canary.get("env", {}), {})  # Both steps inherit the same job-level routing.
         model = "${{ vars.AGENT_MODEL }}"

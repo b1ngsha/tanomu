@@ -11,6 +11,7 @@ def require(condition, reason):
 
 
 COMMENT_BYTES = 60_000
+MAX_SUMMARY_NITS = 5
 
 
 def pr_body(number, round_number, repository, run, template):
@@ -79,6 +80,20 @@ def compact_summary(result, located):
     if located:
         noun = "finding" if len(located) == 1 else "findings"
         summary += f"\n{len(located)} {noun} in inline comments; see those comments for details.\n"
+    # Only the human-facing summary is capped. The complete structured report is retained.
+    nits = 0
+    omitted = 0
+    advisory = []
+    for text in remaining["advisory"]:
+        if text.startswith("Nit:") or ": Nit:" in text:
+            nits += 1
+            if nits > MAX_SUMMARY_NITS:
+                omitted += 1
+                continue
+        advisory.append(text)
+    remaining["advisory"] = advisory
+    if omitted:
+        summary += f"\n{omitted} additional nit findings are omitted here; see the review.json artifact.\n"
     if any(remaining.values()):
         summary += "\n" + findings_text(remaining).replace("### Findings", "### Other findings", 1)
     elif not located:

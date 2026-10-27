@@ -17,6 +17,7 @@ Use {"findings":[]} when there is nothing to report. There is no word, character
 finding-count limit. Report every supported finding in full, including the evidence,
 reasoning and proposed fix; do not summarize, truncate or drop findings to save space.
 Include judgement calls and baseline smells as non-blocking findings, labelled as such.
+Prefix advisory findings with "Important:", "Nit:" or "Pre-existing:" as appropriate.
 A defect in code this diff leaves unchanged is pre-existing: non-blocking, prefixed with
 "Pre-existing:", unless the spec requires this change to fix it. Write each blocking
 finding as a bug class and require every instance in this diff to be fixed, not only the

@@ -11,6 +11,7 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parent
+REVIEW_FILE = ROOT.parents[1] / "REVIEW.md"
 # Isolated mode omits the script directory; only trusted siblings are imported.
 sys.path.insert(0, str(ROOT))
 from authorization import (claimed, claim_identity, dependencies, gate, metadata,  # noqa: E402
@@ -79,6 +80,16 @@ def review_axes():
             "blocking": "a missing, partial or wrongly implemented requirement, or behaviour the "
                         "spec did not ask for. Quote the spec line in every finding.",
         },
+        "security": {
+            "brief": "Review this diff for concrete security vulnerabilities. Check the actual data "
+                     "flow and trust boundaries, cite evidence, and do not report speculative or "
+                     "purely stylistic concerns.",
+            "context": "Pay particular attention to workflow permissions, candidate code isolation, "
+                       "credential handling, authentication, deployment and rollback boundaries.",
+            "blocking": "a concrete security vulnerability introduced by this diff that can expose "
+                        "credentials, cross a trust boundary, bypass authorization or enable an "
+                        "unsafe deployment. Explain the attack path and evidence.",
+        },
     }
 
 ROUND_REVIEW = {
@@ -117,13 +128,13 @@ def review_prompt(name, context):
     text = (ROOT / "prompts" / "review.md").read_text()
     for key, value in {"AXIS": name.title(), "BLOCKING": axis["blocking"], **context}.items():
         text = text.replace(key, value)
-    parts = [text, f"Brief: {axis['brief']}"]
+    parts = [text, f"Brief: {axis['brief']}", REVIEW_FILE.read_text()]
     if axis["context"]:
         parts.append(axis["context"])
     return "\n\n".join(parts) + "\n"
 
 def prompt(mode, *args):
-    if mode in ("final-standards", "final-spec"):
+    if mode in ("final-standards", "final-spec", "final-security"):
         return review_prompt(mode.removeprefix("final-"), final_review(*args))
     number, *repair = args
     metadata(number)
@@ -617,6 +628,20 @@ def agent_status_comment(number, filename):
     return True
 
 
+def security_required(head, base):
+    """Run the security axis only for paths that can change a security boundary."""
+    require(SHA.fullmatch(head) and SHA.fullmatch(base), "invalid-sha")
+    paths = git("diff", "--name-only", "-z", "--no-ext-diff", "--no-textconv", base, head).decode().split("\0")
+    for path in paths:
+        name = Path(path).name
+        if path.startswith((".github/", "deploy/")) or path == "apps/server/src/main.ts":
+            return True
+        if path.startswith(("apps/server/src/", "apps/admin/src/")) and re.search(
+                r"auth|oauth|session|provider|key-cipher", name, re.I):
+            return True
+    return False
+
+
 def pr_diff(head, base):
     """Write the PR diff into a fresh .factory-input before any untrusted input is copied there."""
     require(SHA.fullmatch(head) and SHA.fullmatch(base), "invalid-sha")
@@ -805,6 +830,8 @@ if __name__ == "__main__":
             print(f"Agent review: {result['status']} for {result['head']}")
         elif command == "agent-status-comment":
             agent_status_comment(*args)
+        elif command == "security-required":
+            print(f"required={json.dumps(security_required(*args))}")
         elif command == "pr-diff":
             pr_diff(*args)
         elif command == "pr-body":

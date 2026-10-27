@@ -11,6 +11,7 @@ import time
 HEARTBEAT_SECONDS = 60
 KILL_GRACE_SECONDS = 15
 PHASES = {"implement": ("implement", None), "review-verify": ("review", "verify"),
+          "final-security": ("final", "security"),
           **{f"{phase}-{axis}": (phase, axis) for phase in ("review", "final")
              for axis in ("standards", "spec")}}
 
