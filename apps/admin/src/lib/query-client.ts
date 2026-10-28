@@ -1,5 +1,12 @@
-import { MutationCache, QueryCache, QueryClient } from "@tanstack/react-query";
+import { MutationCache, QueryCache, QueryClient, useIsMutating } from "@tanstack/react-query";
 import { HTTPError } from "ky";
+
+// Every Admin write shares one key so all forms stay locked until a write and its refresh finish.
+export const adminWriteKey = ["admin-write"];
+
+export function useAdminWriting(): boolean {
+  return useIsMutating({ mutationKey: adminWriteKey }) > 0;
+}
 
 export function createQueryClient(
   onUnauthorized = () => window.location.replace("/auth/feishu/login"),

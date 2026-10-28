@@ -1,5 +1,6 @@
 import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
 import { needsReconciliation } from "../../lib/http.ts";
+import { adminWriteKey } from "../../lib/query-client.ts";
 import { chatBindingApi } from "./api.ts";
 
 export const chatBindingQueries = {
@@ -18,7 +19,7 @@ export function useSaveBinding() {
   }
 
   return useMutation({
-    mutationKey: ["admin-write"],
+    mutationKey: adminWriteKey,
     mutationFn: chatBindingApi.save,
     onSuccess: reconcile,
     onError: (error) => (needsReconciliation(error) ? reconcile() : undefined),

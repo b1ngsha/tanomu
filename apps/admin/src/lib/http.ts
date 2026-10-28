@@ -29,6 +29,12 @@ export function errorMessage(error: unknown): string {
   return "请求失败，请重试或刷新配置。";
 }
 
+export function writeErrorMessage(error: unknown): string {
+  return needsReconciliation(error)
+    ? "请求结果未知，已尝试刷新配置，请确认后再重试。"
+    : errorMessage(error);
+}
+
 // A definite 4xx rejection is safe to correct; transport/5xx/invalid responses may follow a write.
 export function needsReconciliation(error: unknown): boolean {
   return (
