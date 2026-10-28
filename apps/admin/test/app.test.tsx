@@ -5,7 +5,8 @@ import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-libr
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/app.tsx";
-import { adminQueries, createQueryClient, useSaveProvider } from "../src/lib/queries.ts";
+import { providerQueries, useSaveProvider } from "../src/features/providers/queries.ts";
+import { createQueryClient } from "../src/lib/query-client.ts";
 
 const provider = {
   id: "2b1e3b7d-bcb5-44a9-bb15-dbbd10d9fbb3",
@@ -95,7 +96,7 @@ describe("Admin application", () => {
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
     const { result } = renderHook(
-      () => ({ providers: useQuery(adminQueries.providers()), save: useSaveProvider() }),
+      () => ({ providers: useQuery(providerQueries.list()), save: useSaveProvider() }),
       { wrapper },
     );
     await waitFor(() => expect(result.current.providers.data).toEqual([provider]));
@@ -108,7 +109,7 @@ describe("Admin application", () => {
     await act(async () => finish(json([{ ...provider, name: "Fresh" }])));
 
     await waitFor(() => expect(result.current.save.isPending).toBe(false));
-    expect(client.getQueryData(adminQueries.providers().queryKey)).toEqual([
+    expect(client.getQueryData(providerQueries.list().queryKey)).toEqual([
       { ...provider, name: "Fresh" },
     ]);
   });

@@ -2,14 +2,17 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useIsMutating, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { useForm } from "react-hook-form";
-import { Button } from "./components/ui/button.tsx";
-import { chatBinding, type Binding, type Provider } from "./lib/contracts.ts";
-import { adminQueries, errorMessage, needsReconciliation, useSaveBinding } from "./lib/queries.ts";
+import { Button } from "../../components/ui/button.tsx";
+import { errorMessage, needsReconciliation } from "../../lib/http.ts";
+import type { Provider } from "../providers/contracts.ts";
+import { providerQueries } from "../providers/queries.ts";
+import { chatBinding, type Binding } from "./contracts.ts";
+import { chatBindingQueries, useSaveBinding } from "./queries.ts";
 
 const fieldClass =
   "mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50";
 
-function BindingForm({
+function ChatBindingForm({
   binding,
   providers,
   disabled,
@@ -93,8 +96,8 @@ function BindingForm({
 }
 
 export function ChatBinding() {
-  const capabilities = useQuery(adminQueries.capabilities());
-  const providers = useQuery(adminQueries.providers());
+  const capabilities = useQuery(chatBindingQueries.get());
+  const providers = useQuery(providerQueries.list());
   const writing = useIsMutating({ mutationKey: ["admin-write"] }) > 0;
   const error = capabilities.error ?? providers.error;
   const disabled =
@@ -136,7 +139,7 @@ export function ChatBinding() {
         <p className="mt-6 text-slate-600">尚未配置 Provider，请先添加 Provider。</p>
       )}
       {capabilities.data && providers.data && (
-        <BindingForm
+        <ChatBindingForm
           binding={capabilities.data.chat}
           providers={providers.data}
           disabled={disabled}
