@@ -5,7 +5,12 @@ import { useForm } from "react-hook-form";
 import { Button } from "../../components/ui/button.tsx";
 import { errorMessage, needsReconciliation } from "../../lib/http.ts";
 import { providerCreate, providerFields, type Provider, type ProviderInput } from "./contracts.ts";
-import { providerQueries, useDeleteProvider, useSaveProvider } from "./queries.ts";
+import {
+  providerQueries,
+  useCreateProvider,
+  useDeleteProvider,
+  useUpdateProvider,
+} from "./queries.ts";
 
 const fieldClass =
   "mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring/50";
@@ -20,7 +25,9 @@ function ProviderForm({
   disabled: boolean;
   onCancel: () => void;
 }) {
-  const save = useSaveProvider();
+  const create = useCreateProvider();
+  const update = useUpdateProvider();
+  const save = provider ? update : create;
   const [notice, setNotice] = useState("");
   const {
     register,
@@ -36,15 +43,16 @@ function ProviderForm({
 
   function submit(input: ProviderInput) {
     setNotice("");
-    save.mutate(
-      { id: provider?.id ?? null, input },
-      {
-        onSuccess: () => {
-          reset({ ...input, apiKey: "" });
-          setNotice("Provider 已保存。");
-        },
+    const options = {
+      onSuccess: () => {
+        reset({ ...input, apiKey: "" });
+        setNotice("Provider 已保存。");
       },
-    );
+    };
+    if (!provider) return create.mutate(input, options);
+    // An empty replacement key keeps the saved credential.
+    const { apiKey, ...fields } = input;
+    update.mutate({ id: provider.id, patch: apiKey ? input : fields }, options);
   }
   const error = save.error;
   return (

@@ -4,7 +4,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { provider, providerInput } from "../../../test/fixtures.ts";
 import { createQueryWrapper, fetchMock, json } from "../../../test/test-utils.tsx";
-import { providerQueries, useSaveProvider } from "./queries.ts";
+import { providerQueries, useCreateProvider } from "./queries.ts";
 
 describe("Provider queries", () => {
   it("keeps a Provider save pending until its fresh query has reconciled", async () => {
@@ -18,12 +18,12 @@ describe("Provider queries", () => {
       .mockImplementationOnce(() => refetch);
     const { client, wrapper } = createQueryWrapper();
     const { result } = renderHook(
-      () => ({ providers: useQuery(providerQueries.list()), save: useSaveProvider() }),
+      () => ({ providers: useQuery(providerQueries.list()), save: useCreateProvider() }),
       { wrapper },
     );
     await waitFor(() => expect(result.current.providers.data).toEqual([provider]));
 
-    act(() => result.current.save.mutate({ id: null, input: providerInput }));
+    act(() => result.current.save.mutate(providerInput));
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
     expect(result.current.save.isPending).toBe(true);
