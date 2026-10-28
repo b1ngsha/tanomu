@@ -20,6 +20,7 @@ function useProviderWrite<TData, TVariables>(
   mutationFn: (variables: TVariables) => Promise<TData>,
 ) {
   const client = useQueryClient();
+
   return useMutation({
     mutationKey: ["admin-write"],
     mutationFn,

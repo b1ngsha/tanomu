@@ -7,6 +7,7 @@ export function createQueryClient(
   function onError(error: Error) {
     if (error instanceof HTTPError && error.response.status === 401) onUnauthorized();
   }
+
   return new QueryClient({
     queryCache: new QueryCache({ onError }),
     mutationCache: new MutationCache({ onError }),

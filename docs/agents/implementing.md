@@ -27,9 +27,9 @@ first for repository commands, conventions, and documentation entry points.
 
 ## Finishing
 
-1. Run `pnpm format && pnpm lint && pnpm test:db` before committing code changes; report skipped
-   checks and missing prerequisites. For documentation-only changes, run `pnpm format:check` and
-   `git diff --check`, and verify affected links and instructions.
+1. Run `pnpm format && pnpm lint && pnpm check:unused && pnpm test:db` before committing code
+   changes; report skipped checks and missing prerequisites. For documentation-only changes, run
+   `pnpm format:check` and `git diff --check`, and verify affected links and instructions.
 2. In an interactive session, run `/simplify` on code changes, then `/code-review` against `main`
    with the ticket as spec, and fix what's worth fixing. In the factory, the orchestrator owns
    independent review and trusted publication; its implementation session does not invoke skills,

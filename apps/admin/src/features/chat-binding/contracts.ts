@@ -5,4 +5,5 @@ export const chatBinding = z.object({
   model: z.string().trim().min(1, "不能为空"),
   vision: z.boolean(),
 });
+
 export type Binding = z.infer<typeof chatBinding>;

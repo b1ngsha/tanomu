@@ -33,6 +33,7 @@ jobs:
       - run: pnpm test:factory
       - run: pnpm format:check
       - run: pnpm lint
+      - run: pnpm check:unused
       - run: pnpm typecheck
       - run: pnpm build:admin
       - run: pnpm test

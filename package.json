@@ -7,6 +7,7 @@
     "dev:admin": "pnpm --filter @tanomu/admin dev",
     "build:admin": "pnpm --filter @tanomu/admin build",
     "lint": "oxlint --type-aware",
+    "check:unused": "knip --production --no-progress",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "typecheck": "pnpm -r typecheck",
@@ -18,6 +19,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
+    "knip": "^6.43.0",
     "oxfmt": "^0.73.0",
     "oxlint": "^1.88.0",
     "oxlint-tsgolint": "^7.0.2004",

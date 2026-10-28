@@ -35,6 +35,7 @@ function ChatBindingForm({
 
   function submit(input: Binding) {
     setNotice("");
+
     save.mutate(input, {
       onSuccess: () => {
         reset(input);

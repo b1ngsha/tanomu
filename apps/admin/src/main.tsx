@@ -7,6 +7,7 @@ import { createQueryClient } from "./lib/query-client.ts";
 
 function Root() {
   const [client] = useState(createQueryClient);
+
   return (
     <QueryClientProvider client={client}>
       <App />

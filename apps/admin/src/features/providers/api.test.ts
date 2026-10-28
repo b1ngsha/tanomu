@@ -25,7 +25,6 @@ describe("Provider API", () => {
     });
 
     await expect(providerApi.create(providerInput)).resolves.toEqual(provider);
-
     expect(requests[0]).toEqual({
       method: "POST",
       url: "http://localhost:3000/api/providers",
@@ -33,7 +32,6 @@ describe("Provider API", () => {
     });
 
     await expect(providerApi.update(provider.id, { name: "Renamed" })).resolves.toEqual(provider);
-
     expect(requests[1]).toEqual({
       method: "PATCH",
       url: `http://localhost:3000/api/providers/${provider.id}`,
@@ -56,7 +54,6 @@ describe("Provider API", () => {
     fetchMock.mockRejectedValue(new TypeError("connection lost"));
 
     const error = await providerApi.create(providerInput).catch((failure: unknown) => failure);
-
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(needsReconciliation(error)).toBe(true);
     expect(errorMessage(error)).toBe("请求失败，请重试或刷新配置。");
