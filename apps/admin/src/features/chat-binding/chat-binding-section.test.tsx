@@ -1,40 +1,15 @@
 // @vitest-environment jsdom
-import "@testing-library/jest-dom/vitest";
-import { QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ChatBinding } from "../../../src/features/chat-binding/chat-binding-section.tsx";
-import { createQueryClient } from "../../../src/lib/query-client.ts";
+import { describe, expect, it } from "vitest";
+import { provider } from "../../../test/fixtures.ts";
+import { fetchMock, json, renderWithQuery } from "../../../test/test-utils.tsx";
+import { ChatBinding } from "./chat-binding-section.tsx";
 
-const provider = {
-  id: "2b1e3b7d-bcb5-44a9-bb15-dbbd10d9fbb3",
-  name: "OpenAI",
-  protocol: "openai" as const,
-  baseUrl: "https://api.openai.com/v1",
-  apiKeyMask: "sk-••••",
-};
 const binding = { providerId: provider.id, model: "gpt-5", vision: true };
-const fetchMock = vi.fn();
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "Content-Type": "application/json" },
-  });
-}
 function setup() {
-  return render(
-    <QueryClientProvider client={createQueryClient()}>
-      <ChatBinding />
-    </QueryClientProvider>,
-  );
+  return renderWithQuery(<ChatBinding />);
 }
-beforeEach(() => vi.stubGlobal("fetch", fetchMock));
-afterEach(() => {
-  cleanup();
-  vi.unstubAllGlobals();
-  fetchMock.mockReset();
-});
 
 describe("chat Binding", () => {
   it("shows the unbound state and validates the required Provider", async () => {
