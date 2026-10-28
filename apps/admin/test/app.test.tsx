@@ -50,6 +50,7 @@ describe("Admin application", () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(json({ openId: "ou_123", name: "Ada" }))
+      .mockResolvedValueOnce(json([]))
       .mockImplementationOnce(() => logoutResponse);
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
@@ -63,7 +64,7 @@ describe("Admin application", () => {
     await act(async () => finishLogout(new Response(null, { status: 204 })));
 
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/auth/feishu/login"));
-    expect(screen.getByRole("heading")).toHaveTextContent("你好，Ada");
+    expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("你好，Ada");
   });
 
   it("redirects expired sessions for queries as well as mutations", async () => {
