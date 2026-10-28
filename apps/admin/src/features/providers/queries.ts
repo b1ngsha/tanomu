@@ -1,6 +1,6 @@
-import { QueryClient, queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
-import { needsReconciliation } from "../../lib/http.ts";
-import { adminWriteKey } from "../../lib/query-client.ts";
+import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
+import { isProviderMissing, needsReconciliation } from "../../lib/http.ts";
+import { adminWriteKey, refreshAfterWrite } from "../../lib/query-client.ts";
 import { providerApi } from "./api.ts";
 import type { ProviderPatch } from "./contracts.ts";
 
@@ -12,21 +12,18 @@ export const providerQueries = {
     }),
 };
 
-async function reconcile(client: QueryClient) {
-  // Mutation callbacks must not reject. The query's error state disables writes until a later reload succeeds.
-  await client.fetchQuery(providerQueries.list()).catch(() => undefined);
-}
-
 function useProviderWrite<TData, TVariables>(
   mutationFn: (variables: TVariables) => Promise<TData>,
 ) {
   const client = useQueryClient();
+  const refresh = () => refreshAfterWrite(client, providerQueries.list());
 
   return useMutation({
     mutationKey: adminWriteKey,
     mutationFn,
-    onSuccess: () => reconcile(client),
-    onError: (error) => (needsReconciliation(error) ? reconcile(client) : undefined),
+    onSuccess: refresh,
+    onError: (error) =>
+      needsReconciliation(error) || isProviderMissing(error) ? refresh() : undefined,
   });
 }
 

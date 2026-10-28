@@ -1,6 +1,7 @@
 import { queryOptions, useMutation, useQueryClient } from "@tanstack/react-query";
-import { needsReconciliation } from "../../lib/http.ts";
-import { adminWriteKey } from "../../lib/query-client.ts";
+import { isProviderMissing, needsReconciliation } from "../../lib/http.ts";
+import { adminWriteKey, refreshAfterWrite } from "../../lib/query-client.ts";
+import { providerQueries } from "../providers/queries.ts";
 import { chatBindingApi } from "./api.ts";
 
 export const chatBindingQueries = {
@@ -13,15 +14,17 @@ export const chatBindingQueries = {
 
 export function useSaveBinding() {
   const client = useQueryClient();
-
-  async function reconcile() {
-    await client.fetchQuery(chatBindingQueries.get()).catch(() => undefined);
-  }
+  const refresh = () => refreshAfterWrite(client, chatBindingQueries.get());
 
   return useMutation({
     mutationKey: adminWriteKey,
     mutationFn: chatBindingApi.save,
-    onSuccess: reconcile,
-    onError: (error) => (needsReconciliation(error) ? reconcile() : undefined),
+    onSuccess: refresh,
+    onError: (error) => {
+      if (needsReconciliation(error)) return refresh();
+      // The selected Provider was deleted elsewhere; drop it from the choices.
+      if (isProviderMissing(error)) return refreshAfterWrite(client, providerQueries.list());
+      return undefined;
+    },
   });
 }

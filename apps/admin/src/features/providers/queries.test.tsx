@@ -4,7 +4,7 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import { provider, providerInput } from "../../../test/fixtures.ts";
 import { createQueryWrapper, fetchMock, json } from "../../../test/test-utils.tsx";
-import { providerQueries, useCreateProvider } from "./queries.ts";
+import { providerQueries, useCreateProvider, useDeleteProvider } from "./queries.ts";
 
 describe("Provider queries", () => {
   it("keeps a Provider save pending until its fresh query has reconciled", async () => {
@@ -32,5 +32,31 @@ describe("Provider queries", () => {
     expect(client.getQueryData(providerQueries.list().queryKey)).toEqual([
       { ...provider, name: "Fresh" },
     ]);
+  });
+
+  it("does not reconcile with a read that started before the write", async () => {
+    let finishStale!: (response: Response) => void;
+    const stale = new Promise<Response>((resolve) => {
+      finishStale = resolve;
+    });
+    fetchMock
+      .mockResolvedValueOnce(json([provider]))
+      .mockImplementationOnce(() => stale)
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(json([]));
+    const { client, wrapper } = createQueryWrapper();
+    const { result } = renderHook(
+      () => ({ providers: useQuery(providerQueries.list()), remove: useDeleteProvider() }),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.providers.data).toEqual([provider]));
+    void client.refetchQueries({ queryKey: providerQueries.list().queryKey });
+
+    act(() => result.current.remove.mutate(provider.id));
+    await waitFor(() => expect(result.current.remove.isSuccess).toBe(true));
+    await act(async () => finishStale(json([provider])));
+
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(client.getQueryData(providerQueries.list().queryKey)).toEqual([]);
   });
 });
